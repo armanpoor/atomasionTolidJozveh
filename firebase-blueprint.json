@@ -1,0 +1,241 @@
+{
+  "entities": {
+    "UserWorkspaceProfile": {
+      "title": "UserWorkspaceProfile",
+      "description": "Authenticated user's private workspace profile and default Persian DOCX publishing preferences.",
+      "type": "object",
+      "properties": {
+        "ownerId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "displayName": {
+          "type": "string",
+          "maxLength": 120
+        },
+        "email": {
+          "type": "string",
+          "format": "email",
+          "maxLength": 200
+        },
+        "defaultWorkflowMode": {
+          "type": "string",
+          "enum": ["single_polish", "multi_merge", "master_update", "raw_synthesis"],
+          "maxLength": 32
+        },
+        "defaultAiModel": {
+          "type": "string",
+          "enum": ["gemini-4-hydrogen", "gemini-3.1-flash-lite"],
+          "maxLength": 48
+        },
+        "defaultThinkingLevel": {
+          "type": "string",
+          "enum": ["MINIMAL", "LOW", "MEDIUM", "HIGH", "XHIGH"],
+          "maxLength": 16
+        },
+        "defaultFontFamily": {
+          "type": "string",
+          "maxLength": 64
+        },
+        "defaultPageSize": {
+          "type": "string",
+          "enum": ["A4", "B5"],
+          "maxLength": 8
+        },
+        "googleSearchMode": {
+          "type": "string",
+          "enum": ["off", "conflicts_only", "conflicts_and_enrichment"],
+          "maxLength": 32
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "ownerId",
+        "displayName",
+        "email",
+        "defaultWorkflowMode",
+        "defaultAiModel",
+        "defaultThinkingLevel",
+        "defaultFontFamily",
+        "defaultPageSize",
+        "googleSearchMode",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "ProjectLiveState": {
+      "title": "ProjectLiveState",
+      "description": "Real-time 5-stage pipeline progress, pause/resume checkpoint state, and active processing status for a project.",
+      "type": "object",
+      "properties": {
+        "ownerId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "projectId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "workflowMode": {
+          "type": "string",
+          "enum": ["single_polish", "multi_merge", "master_update", "raw_synthesis"],
+          "maxLength": 32
+        },
+        "stage": {
+          "type": "integer"
+        },
+        "percent": {
+          "type": "integer"
+        },
+        "status": {
+          "type": "string",
+          "enum": ["draft", "running", "paused", "awaiting_outline", "completed", "failed"],
+          "maxLength": 32
+        },
+        "stageMessage": {
+          "type": "string",
+          "maxLength": 300
+        },
+        "activeFileName": {
+          "type": "string",
+          "maxLength": 240
+        },
+        "processedCount": {
+          "type": "integer"
+        },
+        "totalCount": {
+          "type": "integer"
+        },
+        "paused": {
+          "type": "boolean"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "ownerId",
+        "projectId",
+        "title",
+        "workflowMode",
+        "stage",
+        "percent",
+        "status",
+        "stageMessage",
+        "activeFileName",
+        "processedCount",
+        "totalCount",
+        "paused",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "ProjectChatMessage": {
+      "title": "ProjectChatMessage",
+      "description": "Persisted turn in the context-aware Gemini document editor chatbot or Gemini Live voice assistant.",
+      "type": "object",
+      "properties": {
+        "ownerId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "projectId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "role": {
+          "type": "string",
+          "enum": ["user", "assistant"],
+          "maxLength": 16
+        },
+        "source": {
+          "type": "string",
+          "enum": ["text", "voice"],
+          "maxLength": 16
+        },
+        "text": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 8000
+        },
+        "hasProposal": {
+          "type": "boolean"
+        },
+        "proposalApplied": {
+          "type": "boolean"
+        },
+        "proposalSummary": {
+          "type": "string",
+          "maxLength": 600
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "ownerId",
+        "projectId",
+        "role",
+        "source",
+        "text",
+        "hasProposal",
+        "proposalApplied",
+        "proposalSummary",
+        "createdAt",
+        "updatedAt"
+      ]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": {
+        "$ref": "#/entities/UserWorkspaceProfile"
+      },
+      "description": "Private user profile and default document publishing settings; strictly owner-only."
+    },
+    "/users/{userId}/projectStates/{projectId}": {
+      "schema": {
+        "$ref": "#/entities/ProjectLiveState"
+      },
+      "description": "Real-time 5-stage pipeline state, progress percentage, and pause/resume flags per project."
+    },
+    "/users/{userId}/projectStates/{projectId}/chatMessages/{messageId}": {
+      "schema": {
+        "$ref": "#/entities/ProjectChatMessage"
+      },
+      "description": "Chronological conversation thread for the context-aware Gemini chatbot and Gemini Live voice edits."
+    }
+  }
+}

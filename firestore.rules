@@ -1,0 +1,287 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Pillar 1 / Global Safety Net: Deny all access by default
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Global Hardened Primitives
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isVerifiedUser() {
+      return isSignedIn() && request.auth.token.email_verified == true;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function isVerifiedOwner(userId) {
+      return isVerifiedUser() && request.auth.uid == userId;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    // Validation Blueprint: UserWorkspaceProfile
+    function isValidUserProfile(data, userId) {
+      return data.keys().hasAll([
+          'ownerId',
+          'displayName',
+          'email',
+          'defaultWorkflowMode',
+          'defaultAiModel',
+          'defaultThinkingLevel',
+          'defaultFontFamily',
+          'defaultPageSize',
+          'googleSearchMode',
+          'createdAt',
+          'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'ownerId',
+          'displayName',
+          'email',
+          'defaultWorkflowMode',
+          'defaultAiModel',
+          'defaultThinkingLevel',
+          'defaultFontFamily',
+          'defaultPageSize',
+          'googleSearchMode',
+          'createdAt',
+          'updatedAt'
+        ])
+        && data.ownerId is string && data.ownerId == userId && data.ownerId == request.auth.uid
+        && data.displayName is string && data.displayName.size() <= 120
+        && data.email is string && data.email.size() <= 200
+        && data.defaultWorkflowMode is string && data.defaultWorkflowMode.size() <= 32
+        && data.defaultWorkflowMode in ['single_polish', 'multi_merge', 'master_update', 'raw_synthesis']
+        && data.defaultAiModel is string && data.defaultAiModel.size() <= 48
+        && data.defaultAiModel in ['gemini-4-hydrogen', 'gemini-3.1-flash-lite']
+        && data.defaultThinkingLevel is string && data.defaultThinkingLevel.size() <= 16
+        && data.defaultThinkingLevel in ['MINIMAL', 'LOW', 'MEDIUM', 'HIGH', 'XHIGH']
+        && data.defaultFontFamily is string && data.defaultFontFamily.size() >= 1 && data.defaultFontFamily.size() <= 64
+        && data.defaultPageSize is string && data.defaultPageSize.size() <= 8
+        && data.defaultPageSize in ['A4', 'B5']
+        && data.googleSearchMode is string && data.googleSearchMode.size() <= 32
+        && data.googleSearchMode in ['off', 'conflicts_only', 'conflicts_and_enrichment']
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    // Validation Blueprint: ProjectLiveState
+    function isValidProjectState(data, userId, projectId) {
+      return data.keys().hasAll([
+          'ownerId',
+          'projectId',
+          'title',
+          'workflowMode',
+          'stage',
+          'percent',
+          'status',
+          'stageMessage',
+          'activeFileName',
+          'processedCount',
+          'totalCount',
+          'paused',
+          'createdAt',
+          'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'ownerId',
+          'projectId',
+          'title',
+          'workflowMode',
+          'stage',
+          'percent',
+          'status',
+          'stageMessage',
+          'activeFileName',
+          'processedCount',
+          'totalCount',
+          'paused',
+          'createdAt',
+          'updatedAt'
+        ])
+        && data.ownerId is string && data.ownerId == userId && data.ownerId == request.auth.uid
+        && data.projectId is string && data.projectId == projectId && isValidId(data.projectId)
+        && data.title is string && data.title.size() >= 1 && data.title.size() <= 200
+        && data.workflowMode is string && data.workflowMode.size() <= 32
+        && data.workflowMode in ['single_polish', 'multi_merge', 'master_update', 'raw_synthesis']
+        && data.stage is int && data.stage >= 1 && data.stage <= 5
+        && data.percent is int && data.percent >= 0 && data.percent <= 100
+        && data.status is string && data.status.size() <= 32
+        && data.status in ['draft', 'running', 'paused', 'awaiting_outline', 'completed', 'failed']
+        && data.stageMessage is string && data.stageMessage.size() <= 300
+        && data.activeFileName is string && data.activeFileName.size() <= 240
+        && data.processedCount is int && data.processedCount >= 0 && data.processedCount <= 10000
+        && data.totalCount is int && data.totalCount >= 0 && data.totalCount <= 10000
+        && data.paused is bool
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    // Validation Blueprint: ProjectChatMessage
+    function isValidChatMessage(data, userId, projectId) {
+      return data.keys().hasAll([
+          'ownerId',
+          'projectId',
+          'role',
+          'source',
+          'text',
+          'hasProposal',
+          'proposalApplied',
+          'proposalSummary',
+          'createdAt',
+          'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'ownerId',
+          'projectId',
+          'role',
+          'source',
+          'text',
+          'hasProposal',
+          'proposalApplied',
+          'proposalSummary',
+          'createdAt',
+          'updatedAt'
+        ])
+        && data.ownerId is string && data.ownerId == userId && data.ownerId == request.auth.uid
+        && data.projectId is string && data.projectId == projectId && isValidId(data.projectId)
+        && data.role is string && data.role.size() <= 16 && data.role in ['user', 'assistant']
+        && data.source is string && data.source.size() <= 16 && data.source in ['text', 'voice']
+        && data.text is string && data.text.size() >= 1 && data.text.size() <= 8000
+        && data.hasProposal is bool
+        && data.proposalApplied is bool
+        && data.proposalSummary is string && data.proposalSummary.size() <= 600
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    // Private User Profile & Preferences (Strict PII Isolation)
+    match /users/{userId} {
+      allow get: if isValidId(userId) && isOwner(userId);
+      allow list: if false;
+      allow create: if isVerifiedOwner(userId)
+        && isValidId(userId)
+        && isValidUserProfile(incoming(), userId)
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if isValidUserProfile(incoming(), userId)
+        && isVerifiedOwner(userId)
+        && isValidId(userId)
+        && incoming().ownerId == existing().ownerId
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && (
+          incoming().diff(existing()).affectedKeys().hasOnly([
+            'displayName',
+            'email',
+            'defaultWorkflowMode',
+            'defaultAiModel',
+            'defaultThinkingLevel',
+            'defaultFontFamily',
+            'defaultPageSize',
+            'googleSearchMode',
+            'updatedAt'
+          ])
+        );
+      allow delete: if false;
+
+      // Real-time 5-Stage Job State per Project
+      match /projectStates/{projectId} {
+        allow get: if isValidId(userId) && isValidId(projectId) && isOwner(userId);
+        allow list: if isOwner(userId) && resource.data.ownerId == request.auth.uid;
+        allow create: if isVerifiedOwner(userId)
+          && isValidId(userId)
+          && isValidId(projectId)
+          && isValidProjectState(incoming(), userId, projectId)
+          && incoming().createdAt == request.time
+          && incoming().updatedAt == request.time
+          && exists(/databases/$(database)/documents/users/$(userId));
+        allow update: if isValidProjectState(incoming(), userId, projectId)
+          && isVerifiedOwner(userId)
+          && isValidId(userId)
+          && isValidId(projectId)
+          && incoming().ownerId == existing().ownerId
+          && incoming().projectId == existing().projectId
+          && incoming().createdAt == existing().createdAt
+          && incoming().updatedAt == request.time
+          && (
+            // Action 1: Update pipeline stage/progress/status
+            incoming().diff(existing()).affectedKeys().hasOnly([
+              'title',
+              'workflowMode',
+              'stage',
+              'percent',
+              'status',
+              'stageMessage',
+              'activeFileName',
+              'processedCount',
+              'totalCount',
+              'paused',
+              'updatedAt'
+            ])
+            ||
+            // Action 2: Toggle pause/resume state
+            incoming().diff(existing()).affectedKeys().hasOnly([
+              'paused',
+              'status',
+              'stageMessage',
+              'updatedAt'
+            ])
+          );
+        allow delete: if isVerifiedOwner(userId) && isValidId(userId) && isValidId(projectId);
+
+        // Multi-turn Chatbot & Live Voice History
+        match /chatMessages/{messageId} {
+          allow get: if isValidId(userId) && isValidId(projectId) && isValidId(messageId) && isOwner(userId);
+          allow list: if isOwner(userId) && resource.data.ownerId == request.auth.uid;
+          allow create: if isVerifiedOwner(userId)
+            && isValidId(userId)
+            && isValidId(projectId)
+            && isValidId(messageId)
+            && isValidChatMessage(incoming(), userId, projectId)
+            && incoming().createdAt == request.time
+            && incoming().updatedAt == request.time
+            && exists(/databases/$(database)/documents/users/$(userId)/projectStates/$(projectId));
+          allow update: if isValidChatMessage(incoming(), userId, projectId)
+            && isVerifiedOwner(userId)
+            && isValidId(userId)
+            && isValidId(projectId)
+            && isValidId(messageId)
+            && incoming().ownerId == existing().ownerId
+            && incoming().projectId == existing().projectId
+            && incoming().role == existing().role
+            && incoming().source == existing().source
+            && incoming().text == existing().text
+            && incoming().createdAt == existing().createdAt
+            && incoming().updatedAt == request.time
+            && existing().proposalApplied == false
+            && (
+              // Action: Mark chatbot structural proposal as applied (one-way terminal lock)
+              incoming().diff(existing()).affectedKeys().hasOnly(['proposalApplied', 'updatedAt'])
+              && incoming().proposalApplied == true
+            );
+          allow delete: if isVerifiedOwner(userId)
+            && isValidId(userId)
+            && isValidId(projectId)
+            && isValidId(messageId);
+        }
+      }
+    }
+  }
+}

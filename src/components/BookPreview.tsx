@@ -1,0 +1,946 @@
+import {
+  AlertTriangle,
+  ArrowRight,
+  BookOpen,
+  ChevronLeft,
+  ChevronRight,
+  Compass,
+  ExternalLink,
+  FileText,
+  Globe,
+  HelpCircle,
+  Image as ImageIcon,
+  Lightbulb,
+  ListTree,
+  RefreshCw,
+  Search,
+  Wrench,
+  X,
+} from 'lucide-react';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import {
+  CalloutBlock,
+  CalloutVariant,
+  ContentBlock,
+  DocxExportConfig,
+  FootnoteEntry,
+  ParsedBook,
+} from '../lib/bookTypes';
+import { toPersianDigits } from '../lib/formatParsers';
+import { SelectedChapterKey } from './ChapterSidebar';
+import { RichText } from './RichText';
+
+interface BookPreviewProps {
+  book: ParsedBook;
+  selected: SelectedChapterKey;
+  onSelect: (key: SelectedChapterKey) => void;
+  config: DocxExportConfig;
+  onOpenChapterDrawer?: () => void;
+}
+
+function getCalloutStyle(variant: CalloutVariant) {
+  switch (variant) {
+    case 'warning':
+      return {
+        bg: 'bg-[#FDF2F0]',
+        border: 'border-[#E6BFB7]',
+        accentText: 'text-[#9A3412]',
+        label: 'هشدار و قانون طلایی',
+        Icon: AlertTriangle,
+      };
+    case 'qa':
+      return {
+        bg: 'bg-[#F2F7F4]',
+        border: 'border-[#C7DDD0]',
+        accentText: 'text-[#14532D]',
+        label: 'پرسش و پاسخ کارگاهی',
+        Icon: HelpCircle,
+      };
+    case 'engineering':
+      return {
+        bg: 'bg-[#FAF6EC]',
+        border: 'border-[#E2D4B7]',
+        accentText: 'text-[#854D0E]',
+        label: 'نکته مهندسی',
+        Icon: Wrench,
+      };
+    case 'revision':
+      return {
+        bg: 'bg-[#F5F2F8]',
+        border: 'border-[#D7CBE6]',
+        accentText: 'text-[#5B21B6]',
+        label: 'اصلاحیه و تدقیق',
+        Icon: RefreshCw,
+      };
+    case 'project':
+      return {
+        bg: 'bg-[#EEF3F8]',
+        border: 'border-[#C6D5E6]',
+        accentText: 'text-[#1E3A5F]',
+        label: 'نقشه راه و جمع‌بندی',
+        Icon: Compass,
+      };
+    case 'concept':
+    default:
+      return {
+        bg: 'bg-[#F2F5F9]',
+        border: 'border-[#CFDCEB]',
+        accentText: 'text-[#1E3A5F]',
+        label: 'مبانی علمی و پیش‌نیاز',
+        Icon: Lightbulb,
+      };
+  }
+}
+
+function CalloutCard({
+  block,
+  footnoteMap,
+  onSelectFootnote,
+}: {
+  block: CalloutBlock;
+  footnoteMap: Map<number, FootnoteEntry>;
+  onSelectFootnote: (fn: FootnoteEntry) => void;
+}) {
+  const style = getCalloutStyle(block.variant);
+  const Icon = style.Icon;
+  const cleanTitle = block.title.replace(/^[⛔💡⚙️🔄❓📘]+\s*/, '');
+  const showKicker =
+    !cleanTitle.includes(style.label) &&
+    !cleanTitle.startsWith('مبانی علمی') &&
+    !cleanTitle.startsWith('پرسش و پاسخ') &&
+    !cleanTitle.startsWith('هشدار') &&
+    !cleanTitle.startsWith('نکته');
+
+  return (
+    <div className={`my-5 rounded-sm border ${style.border} ${style.bg} p-4 sm:p-5`}>
+      <div className={`mb-2.5 flex items-start gap-2 border-b ${style.border} pb-2.5`}>
+        <Icon className={`mt-0.5 h-4 w-4 shrink-0 ${style.accentText}`} />
+        <div className="min-w-0 flex-1">
+          {showKicker && (
+            <div className={`text-[11px] font-semibold tracking-wide opacity-80 ${style.accentText}`}>
+              {style.label}
+            </div>
+          )}
+          <div className={`text-sm font-bold leading-snug ${style.accentText}`}>
+            <RichText text={cleanTitle} footnoteMap={footnoteMap} onSelectFootnote={onSelectFootnote} />
+          </div>
+        </div>
+      </div>
+      <div className="space-y-2.5 text-[13.5px] leading-[1.95] text-[#292524]">
+        {block.paragraphs.map((p, idx) => (
+          <p key={idx}>
+            <RichText text={p} footnoteMap={footnoteMap} onSelectFootnote={onSelectFootnote} />
+          </p>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function BlockRenderer({
+  block,
+  footnoteMap,
+  onSelectFootnote,
+  onInspectProvenance,
+}: {
+  block: ContentBlock;
+  footnoteMap: Map<number, FootnoteEntry>;
+  onSelectFootnote: (fn: FootnoteEntry) => void;
+  onInspectProvenance?: (files: string[]) => void;
+}) {
+  const hasProvenance = Boolean(block.sourceFileNames && block.sourceFileNames.length > 0);
+  const wrapWithProvenance = (node: React.ReactNode) => {
+    if (!hasProvenance || !onInspectProvenance) return node;
+    return (
+      <div
+        onClick={() => onInspectProvenance(block.sourceFileNames!)}
+        title={`منبع: ${block.sourceFileNames!.join('، ')} — برای مشاهده کلیک کنید`}
+        className="group relative rounded-sm transition-colors hover:bg-[#FAF7F0] cursor-pointer"
+      >
+        {node}
+      </div>
+    );
+  };
+
+  switch (block.type) {
+    case 'paragraph':
+      return wrapWithProvenance(
+        <p className="my-3.5 text-[14.5px] leading-[2] text-[#1A1816]">
+          <RichText text={block.text} footnoteMap={footnoteMap} onSelectFootnote={onSelectFootnote} />
+        </p>
+      );
+
+    case 'subheading':
+      return (
+        <div className="mt-7 mb-3 flex items-baseline justify-between gap-2 border-b border-[#EAE5DA] pb-1.5">
+          <h4 className="text-[15.5px] font-bold text-[#1E3A5F]">
+            <RichText text={block.text} footnoteMap={footnoteMap} onSelectFootnote={onSelectFootnote} />
+          </h4>
+          <span className="font-mono-ltr shrink-0 text-[10px] text-[#8C857B]">Heading 4</span>
+        </div>
+      );
+
+    case 'callout':
+      return wrapWithProvenance(
+        <CalloutCard block={block} footnoteMap={footnoteMap} onSelectFootnote={onSelectFootnote} />
+      );
+
+    case 'table':
+      return wrapWithProvenance(
+        <div className="my-6">
+          {block.caption && (
+            <div className="mb-2 flex items-center justify-between gap-2">
+              <div className="text-[13px] font-bold text-[#1E3A5F]">{block.caption}</div>
+              {block.originalCaption && block.originalCaption !== block.caption && (
+                <span className="shrink-0 text-[11px] text-[#78716C]">شماره‌گذاری اصلاح شد</span>
+              )}
+            </div>
+          )}
+          <div className="overflow-x-auto border border-[#D8D2C5]">
+            <table className="w-full border-collapse text-right text-[13px]">
+              <thead>
+                <tr className="bg-[#1E3A5F] text-white">
+                  {block.headers.map((h, hIdx) => (
+                    <th
+                      key={hIdx}
+                      className="border-l border-[#2F527F] px-3 py-2.5 text-right font-semibold last:border-l-0"
+                    >
+                      {h}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {block.rows.map((row, rIdx) => (
+                  <tr
+                    key={rIdx}
+                    className={`border-t border-[#E2DDD3] ${rIdx % 2 === 1 ? 'bg-[#F8F6F1]' : 'bg-white'}`}
+                  >
+                    {row.map((cell, cIdx) => (
+                      <td
+                        key={cIdx}
+                        className="border-l border-[#E2DDD3] px-3 py-2 leading-relaxed text-[#292524] last:border-l-0"
+                      >
+                        <RichText
+                          text={cell || '—'}
+                          footnoteMap={footnoteMap}
+                          onSelectFootnote={onSelectFootnote}
+                        />
+                      </td>
+                    ))}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      );
+
+    case 'equation':
+      return wrapWithProvenance(
+        <div className="my-5 rounded-sm border border-[#DCD6C9] bg-[#F8F6F1] px-4 py-3.5 text-center">
+          <div className="font-mono-ltr text-sm font-semibold text-[#1E3A5F]">{block.readable}</div>
+        </div>
+      );
+
+    case 'list':
+      return wrapWithProvenance(
+        block.ordered ? (
+          <ol className="my-3.5 space-y-2 pr-5 text-[14px] leading-[1.9] text-[#1A1816]">
+            {block.items.map((item, idx) => (
+              <li key={idx} className="list-decimal marker:font-bold marker:text-[#1E3A5F]">
+                <RichText text={item} footnoteMap={footnoteMap} onSelectFootnote={onSelectFootnote} />
+              </li>
+            ))}
+          </ol>
+        ) : (
+          <ul className="my-3.5 space-y-2 pr-5 text-[14px] leading-[1.9] text-[#1A1816]">
+            {block.items.map((item, idx) => (
+              <li key={idx} className="list-disc marker:text-[#1E3A5F]">
+                <RichText text={item} footnoteMap={footnoteMap} onSelectFootnote={onSelectFootnote} />
+              </li>
+            ))}
+          </ul>
+        )
+      );
+
+    case 'figure':
+      return (
+        <div className="my-5 rounded-sm border border-dashed border-[#B7C7DA] bg-[#F4F7FB] p-4">
+          <div className="mb-1 flex items-center gap-2 text-xs font-bold text-[#1E3A5F]">
+            <ImageIcon className="h-4 w-4" />
+            <span>{block.caption}</span>
+          </div>
+          <p className="text-[13px] leading-relaxed text-[#44403C]">{block.description}</p>
+        </div>
+      );
+
+    case 'image':
+      return wrapWithProvenance(
+        <figure className="my-6 overflow-hidden rounded-sm border border-[#D8D2C5] bg-[#FBF9F5] p-3">
+          <img
+            src={block.dataUrl}
+            alt={block.caption}
+            className="mx-auto max-h-[380px] w-auto object-contain rounded-sm"
+          />
+          <figcaption className="mt-2.5 border-t border-[#E2DDD3] pt-2 text-center text-xs font-bold text-[#1E3A5F]">
+            {block.caption}
+          </figcaption>
+        </figure>
+      );
+
+    case 'web_enrichment':
+      return (
+        <div className="my-5 rounded-sm border border-[#D7CBE6] bg-[#F7F4FA] p-4 sm:p-5">
+          <div className="mb-2 flex items-center justify-between gap-2 border-b border-[#E3DAF0] pb-2">
+            <div className="flex items-center gap-2 text-xs font-bold text-[#5B21B6]">
+              <Globe className="h-4 w-4 shrink-0" />
+              <span>تکمیل‌شده از وب (جستجوی گوگل): {block.title}</span>
+            </div>
+            <span className="text-[10.5px] text-[#78716C]">ایزوله از متن اصلی کاربر</span>
+          </div>
+          <p className="text-[13.5px] leading-[1.95] text-[#292524]">{block.summary}</p>
+          {block.sources.length > 0 && (
+            <div className="mt-3 flex flex-wrap gap-2 border-t border-[#E3DAF0] pt-2.5">
+              {block.sources.map((src, i) => (
+                <a
+                  key={i}
+                  href={src.uri}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="inline-flex items-center gap-1 rounded-sm border border-[#D7CBE6] bg-white px-2.5 py-1 text-[11px] font-medium text-[#5B21B6] hover:bg-[#EFEAF7]"
+                >
+                  <ExternalLink className="h-3 w-3 shrink-0" />
+                  <span className="max-w-[200px] truncate">{src.title}</span>
+                </a>
+              ))}
+            </div>
+          )}
+        </div>
+      );
+
+    case 'conflict_note':
+      return (
+        <div className="my-5 rounded-sm border border-[#E6BFB7] bg-[#FDF2F0] p-4 sm:p-5 space-y-2.5">
+          <div className="flex items-center gap-2 border-b border-[#F0D3CC] pb-2 text-xs font-bold text-[#9A3412]">
+            <AlertTriangle className="h-4 w-4 shrink-0" />
+            <span>مقایسه دو روایت منبع (تناقض حفظ‌شده): {block.topic}</span>
+          </div>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs leading-relaxed">
+            <div className="rounded-sm border border-[#EDD4CE] bg-white p-3">
+              <div className="font-bold text-[#1E3A5F] mb-1">روایت ۱ · {block.fileAName}</div>
+              <p className="text-[#292524]">{block.excerptA}</p>
+            </div>
+            <div className="rounded-sm border border-[#EDD4CE] bg-white p-3">
+              <div className="font-bold text-[#1E3A5F] mb-1">روایت ۲ · {block.fileBName}</div>
+              <p className="text-[#292524]">{block.excerptB}</p>
+            </div>
+          </div>
+          {block.webSummary && (
+            <div className="rounded-sm border border-[#D7CBE6] bg-[#F7F4FA] p-3 text-xs leading-relaxed text-[#292524]">
+              <div className="font-bold text-[#5B21B6] mb-1">نتیجه بررسی با جستجوی گوگل:</div>
+              <p>{block.webSummary}</p>
+            </div>
+          )}
+          {block.resolutionNote && (
+            <div className="text-xs font-semibold text-[#14532D]">
+              تصمیم ویراستار: {block.resolutionNote}
+            </div>
+          )}
+        </div>
+      );
+
+    case 'diagram':
+      return (
+        <figure className="my-6 overflow-hidden rounded-sm border border-[#D8D2C5] bg-[#FBF9F5]">
+          <div
+            className="p-2 [&>svg]:h-auto [&>svg]:w-full"
+            dangerouslySetInnerHTML={{ __html: block.svgMarkup }}
+          />
+          <figcaption className="border-t border-[#E2DDD3] bg-white px-4 py-2.5 text-center text-xs font-bold text-[#1E3A5F]">
+            {block.caption}
+          </figcaption>
+        </figure>
+      );
+
+    default:
+      return null;
+  }
+}
+
+export function BookPreview({
+  book,
+  selected,
+  onSelect,
+  config,
+  onOpenChapterDrawer,
+}: BookPreviewProps) {
+  const [activeFootnote, setActiveFootnote] = useState<FootnoteEntry | null>(null);
+  const [activeProvenance, setActiveProvenance] = useState<string[] | null>(null);
+  const [glossarySearch, setGlossarySearch] = useState('');
+  const scrollContainerRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    scrollContainerRef.current?.scrollTo({ top: 0, behavior: 'auto' });
+    if (typeof window !== 'undefined' && window.innerWidth < 1024) {
+      window.scrollTo({ top: 0, behavior: 'auto' });
+    }
+    setActiveFootnote(null);
+    setActiveProvenance(null);
+  }, [selected]);
+
+  const footnoteMap = useMemo(() => {
+    const map = new Map<number, FootnoteEntry>();
+    for (const fn of book.footnotes) map.set(fn.canonicalId, fn);
+    return map;
+  }, [book.footnotes]);
+
+  const currentChapter = useMemo(() => {
+    if (selected.kind !== 'chapter') return null;
+    return book.chapters.find((c) => c.chapterNumber === selected.chapterNumber) || null;
+  }, [book.chapters, selected]);
+
+  const chapterSuggestions = useMemo(() => {
+    if (!currentChapter) return [];
+    return book.visualSuggestions.filter((v) => v.chapterNumber === currentChapter.chapterNumber);
+  }, [book.visualSuggestions, currentChapter]);
+
+  const currentLocationLabel = useMemo(() => {
+    if (selected.kind === 'chapter' && currentChapter) {
+      return `فصل ${toPersianDigits(currentChapter.chapterNumber)} از ${toPersianDigits(book.chapters.length)}`;
+    }
+    if (selected.kind === 'cheatsheets') return 'برگه تقلب و قوانین طلایی';
+    if (selected.kind === 'tables') return 'فهرست جداول یکپارچه';
+    if (selected.kind === 'glossary') return 'واژه‌نامه یکپارچه';
+    if (selected.kind === 'footnotes') return 'پانویس‌های یکتا';
+    return 'جلد و فهرست سرفصل‌ها';
+  }, [selected, currentChapter, book.chapters.length]);
+
+  return (
+    <div ref={scrollContainerRef} className="relative flex-1 lg:overflow-y-auto">
+      {/* Sticky Return-to-TOC & Chapter Navigation Bar whenever inside any chapter or appendix */}
+      {selected.kind !== 'cover' && (
+        <nav
+          aria-label="ناوبری بازگشت به فهرست سرفصل‌ها"
+          className="sticky top-[58px] lg:top-0 z-20 flex flex-wrap items-center justify-between gap-2 border-b border-[#E2DDD3] bg-[#FAF8F4]/95 px-4 py-2 backdrop-blur-xs sm:px-8"
+        >
+          <div className="flex items-center gap-2 min-w-0">
+            <button
+              type="button"
+              onClick={() => onSelect({ kind: 'cover' })}
+              className="inline-flex min-h-[34px] shrink-0 items-center gap-1.5 rounded-md border border-[#1E3A5F]/25 bg-white px-3 py-1 text-xs font-bold text-[#1E3A5F] hover:bg-[#EEF3F8] transition-colors cursor-pointer whitespace-nowrap"
+            >
+              <ArrowRight className="h-3.5 w-3.5 shrink-0" />
+              <span>بازگشت به فهرست سرفصل‌ها</span>
+            </button>
+
+            {onOpenChapterDrawer && (
+              <button
+                type="button"
+                onClick={onOpenChapterDrawer}
+                className="inline-flex min-h-[34px] shrink-0 items-center gap-1.5 rounded-md border border-[#D8D2C5] bg-white px-2.5 py-1 text-xs font-semibold text-[#44403C] hover:bg-[#F3F0E8] xl:hidden transition-colors cursor-pointer whitespace-nowrap"
+              >
+                <ListTree className="h-3.5 w-3.5 text-[#1E3A5F] shrink-0" />
+                <span>فهرست کشویی</span>
+              </button>
+            )}
+
+            <span className="hidden sm:inline text-xs text-[#78716C] tabular-nums truncate">
+              {currentLocationLabel}
+            </span>
+          </div>
+
+          {selected.kind === 'chapter' && currentChapter && (
+            <div className="flex items-center gap-1.5 shrink-0 tabular-nums">
+              <button
+                type="button"
+                disabled={currentChapter.chapterNumber <= 1}
+                onClick={() =>
+                  onSelect({ kind: 'chapter', chapterNumber: currentChapter.chapterNumber - 1 })
+                }
+                className="inline-flex min-h-[32px] items-center gap-1 rounded-md border border-[#D8D2C5] bg-white px-2.5 py-1 text-[11px] font-semibold text-[#1E3A5F] hover:bg-[#EEF3F8] disabled:opacity-40 disabled:cursor-not-allowed transition-colors cursor-pointer whitespace-nowrap"
+              >
+                <ChevronRight className="h-3.5 w-3.5" />
+                <span>فصل قبلی</span>
+              </button>
+              <button
+                type="button"
+                disabled={currentChapter.chapterNumber >= book.chapters.length}
+                onClick={() =>
+                  onSelect({ kind: 'chapter', chapterNumber: currentChapter.chapterNumber + 1 })
+                }
+                className="inline-flex min-h-[32px] items-center gap-1 rounded-md border border-[#D8D2C5] bg-white px-2.5 py-1 text-[11px] font-semibold text-[#1E3A5F] hover:bg-[#EEF3F8] disabled:opacity-40 disabled:cursor-not-allowed transition-colors cursor-pointer whitespace-nowrap"
+              >
+                <span>فصل بعدی</span>
+                <ChevronLeft className="h-3.5 w-3.5" />
+              </button>
+            </div>
+          )}
+        </nav>
+      )}
+
+      <div className="px-4 py-6 sm:px-8 lg:py-8">
+      {/* Paper Sheet Container */}
+      <article className="mx-auto max-w-[820px] border border-[#E2DDD3] bg-white px-6 py-8 shadow-[0_1px_4px_rgba(26,24,22,0.04)] sm:px-12 sm:py-12">
+        {/* COVER & AUTOMATIC TOC VIEW */}
+        {selected.kind === 'cover' && (
+          <div>
+            <div className="border-b-2 border-[#1E3A5F] pb-3 text-xs font-semibold text-[#57534E]">
+              پیش‌نمایش صفحه جلد و فهرست خودکار سند ورد · فونت {config.fontFamily} · کاملاً راست‌چین (RTL)
+            </div>
+
+            <div className="py-10">
+              <h1 className="text-2xl font-extrabold leading-tight text-[#1E3A5F] sm:text-3xl">
+                {book.title}
+              </h1>
+              <p className="mt-3 text-sm leading-relaxed text-[#57534E] sm:text-base">
+                {book.subtitle}
+              </p>
+
+              {/* Archival Accession Grid */}
+              <dl className="mt-8 grid grid-cols-1 gap-px border border-[#E2DDD3] bg-[#E2DDD3] sm:grid-cols-2">
+                <div className="bg-[#FBF9F5] p-4">
+                  <dt className="text-[11px] font-semibold text-[#78716C]">تنظیمات تایپوگرافی ورد</dt>
+                  <dd className="mt-1 text-sm font-bold text-[#1A1816]">
+                    {config.fontFamily} · اندازه {toPersianDigits(config.baseFontSizePt)}pt · راست‌چین
+                  </dd>
+                </div>
+                <div className="bg-[#FBF9F5] p-4">
+                  <dt className="text-[11px] font-semibold text-[#78716C]">حجم و ساختار نهایی</dt>
+                  <dd className="mt-1 text-sm font-bold tabular-nums text-[#1A1816]">
+                    {toPersianDigits(book.volumes.length)} مجلد · {toPersianDigits(book.chapters.length)} فصل ·{' '}
+                    {toPersianDigits(book.tableIndex.length)} جدول
+                  </dd>
+                </div>
+                <div className="bg-[#FBF9F5] p-4">
+                  <dt className="text-[11px] font-semibold text-[#78716C]">سرفصل‌های استاندارد ورد</dt>
+                  <dd className="mt-1 text-sm font-bold text-[#1A1816]">
+                    Heading 1 (مجلد) تا Heading 4 + فهرست خودکار (TOC)
+                  </dd>
+                </div>
+                <div className="bg-[#FBF9F5] p-4">
+                  <dt className="text-[11px] font-semibold text-[#78716C]">تضمین یکپارچه‌سازی</dt>
+                  <dd className="mt-1 text-sm font-bold text-[#14532D]">
+                    {toPersianDigits(book.audit?.conceptRetentionRate ?? 100)}٪ حفظ مفاهیم ·{' '}
+                    {toPersianDigits(book.audit?.duplicateFootnotesMerged ?? 0)} پانویس تکراری ادغام شد
+                  </dd>
+                </div>
+              </dl>
+            </div>
+
+            {/* Interactive Automatic TOC Preview */}
+            <div className="mt-4 border-t border-[#E2DDD3] pt-8">
+              <div className="mb-4 flex items-center justify-between border-b border-[#1E3A5F] pb-2">
+                <h2 className="text-lg font-bold text-[#1E3A5F]">فهرست مطالب خودکار (ساختار Word TOC)</h2>
+                <span className="font-mono-ltr text-[11px] text-[#78716C]">TOC \o &quot;1-3&quot; \h</span>
+              </div>
+
+              <div className="space-y-5">
+                {book.volumes.map((vol) => {
+                  const volChapters = book.chapters.filter((c) => c.volumeIndex === vol.index);
+                  return (
+                    <div key={vol.id}>
+                      <div className="mb-2 flex items-center justify-between bg-[#EEF3F8] px-3 py-2 text-xs font-bold text-[#1E3A5F]">
+                        <span>{vol.title}</span>
+                        <span className="font-mono-ltr text-[10px] font-normal text-[#57534E]">
+                          Heading 1
+                        </span>
+                      </div>
+                      <ul className="divide-y divide-[#F0ECE3] pr-3">
+                        {volChapters.map((ch) => (
+                          <li key={ch.id} className="py-2">
+                            <button
+                              type="button"
+                              onClick={() => onSelect({ kind: 'chapter', chapterNumber: ch.chapterNumber })}
+                              className="group flex w-full items-baseline justify-between gap-3 text-right"
+                            >
+                              <span className="text-[13.5px] font-bold text-[#1A1816] group-hover:text-[#1E3A5F]">
+                                {ch.title}
+                              </span>
+                              <span className="shrink-0 text-[11px] text-[#78716C]">
+                                {toPersianDigits(ch.sections.length)} زیربخش · Heading 2
+                              </span>
+                            </button>
+                            {ch.sections.length > 0 && (
+                              <ul className="mt-1.5 space-y-1 pr-4 text-xs text-[#57534E]">
+                                {ch.sections.slice(0, 4).map((sec) => (
+                                  <li key={sec.id} className="truncate">
+                                    {sec.numberLabel ? `${sec.numberLabel}. ` : ''}
+                                    {sec.title}
+                                  </li>
+                                ))}
+                                {ch.sections.length > 4 && (
+                                  <li className="text-[11px] text-[#8C857B]">
+                                    و {toPersianDigits(ch.sections.length - 4)} زیربخش دیگر...
+                                  </li>
+                                )}
+                              </ul>
+                            )}
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* CHAPTER MANUSCRIPT VIEW */}
+        {selected.kind === 'chapter' && currentChapter && (
+          <div>
+            {/* Volume Kicker */}
+            <div className="mb-2 flex items-center justify-between text-[11px] font-semibold text-[#78716C]">
+              <span>{currentChapter.volumeTitle}</span>
+              <span className="font-mono-ltr">Word Style: Heading 2</span>
+            </div>
+
+            {/* Chapter Title */}
+            <h1 className="border-b-2 border-[#1E3A5F] pb-3 text-xl font-extrabold leading-snug text-[#1E3A5F] sm:text-2xl">
+              {currentChapter.title}
+            </h1>
+
+            {/* Chapter Metadata Table */}
+            {config.includeChapterMetaCards && currentChapter.meta.length > 0 && (
+              <div className="my-5 border border-[#E2DDD3] bg-[#FBF9F5]">
+                <div className="border-b border-[#E2DDD3] bg-[#F3F0E8] px-4 py-2 text-xs font-bold text-[#1E3A5F]">
+                  شناسنامه فصل
+                </div>
+                <dl className="divide-y divide-[#EAE5DA] text-xs">
+                  {currentChapter.meta.map((m, idx) => (
+                    <div key={idx} className="grid grid-cols-1 gap-1 px-4 py-2 sm:grid-cols-4">
+                      <dt className="font-bold text-[#57534E]">{m.label}</dt>
+                      <dd className="text-[#1A1816] sm:col-span-3">{m.value}</dd>
+                    </div>
+                  ))}
+                </dl>
+              </div>
+            )}
+
+            {/* Intro Blocks */}
+            {currentChapter.introBlocks.map((b) => (
+              <BlockRenderer
+                key={b.id}
+                block={b}
+                footnoteMap={footnoteMap}
+                onSelectFootnote={setActiveFootnote}
+                onInspectProvenance={setActiveProvenance}
+              />
+            ))}
+
+            {/* Sections */}
+            {currentChapter.sections.map((sec) => (
+              <section key={sec.id} className="mt-9">
+                <div className="mb-3 flex items-baseline justify-between gap-3 border-b border-[#E2DDD3] pb-2">
+                  <h2 className="text-[17px] font-bold leading-snug text-[#1E3A5F]">
+                    {sec.numberLabel ? (
+                      <span className="ml-1.5 tabular-nums text-[#1E3A5F]">{sec.numberLabel}.</span>
+                    ) : null}
+                    {sec.title}
+                  </h2>
+                  <span className="font-mono-ltr shrink-0 text-[10px] text-[#8C857B]">Heading 3</span>
+                </div>
+                {sec.blocks.map((b) => (
+                  <BlockRenderer
+                    key={b.id}
+                    block={b}
+                    footnoteMap={footnoteMap}
+                    onSelectFootnote={setActiveFootnote}
+                    onInspectProvenance={setActiveProvenance}
+                  />
+                ))}
+              </section>
+            ))}
+
+            {/* Embedded Visual Suggestions Preview for Chapter */}
+            {config.includeVisualSuggestions && chapterSuggestions.length > 0 && (
+              <div className="mt-10 rounded-sm border border-[#C6D5E6] bg-[#F3F7FB] p-5">
+                <div className="mb-3 border-b border-[#D2DFEE] pb-2 text-sm font-bold text-[#1E3A5F]">
+                  پیشنهادهای افزودن جدول و تصویر آموزشی برای این فصل (درج خودکار در سند ورد)
+                </div>
+                <ul className="space-y-3 text-[13px] leading-relaxed text-[#292524]">
+                  {chapterSuggestions.map((s, idx) => (
+                    <li key={s.id}>
+                      <span className="font-bold text-[#1E3A5F]">
+                        {toPersianDigits(idx + 1)}. [{s.kindLabel}] {s.title}:{' '}
+                      </span>
+                      <span>{s.rationale}</span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+
+            {/* Chapter Prev/Next + Return-to-TOC Navigation */}
+            <div className="mt-10 flex flex-wrap items-center justify-between gap-3 border-t border-[#E2DDD3] pt-5">
+              {currentChapter.chapterNumber > 1 ? (
+                <button
+                  type="button"
+                  onClick={() =>
+                    onSelect({ kind: 'chapter', chapterNumber: currentChapter.chapterNumber - 1 })
+                  }
+                  className="inline-flex items-center gap-1.5 text-xs font-semibold text-[#1E3A5F] hover:underline cursor-pointer"
+                >
+                  <ChevronRight className="h-4 w-4" />
+                  <span>فصل قبلی (فصل {toPersianDigits(currentChapter.chapterNumber - 1)})</span>
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => onSelect({ kind: 'cover' })}
+                  className="inline-flex items-center gap-1.5 text-xs font-semibold text-[#1E3A5F] hover:underline cursor-pointer"
+                >
+                  <ChevronRight className="h-4 w-4" />
+                  <span>صفحه جلد و فهرست</span>
+                </button>
+              )}
+
+              <button
+                type="button"
+                onClick={() => onSelect({ kind: 'cover' })}
+                className="inline-flex min-h-[34px] items-center gap-1.5 rounded-md border border-[#E2DDD3] bg-[#FAF8F4] px-3 py-1 text-xs font-bold text-[#1E3A5F] hover:bg-[#EEF3F8] transition-colors cursor-pointer"
+              >
+                <ArrowRight className="h-3.5 w-3.5" />
+                <span>بازگشت به فهرست سرفصل‌ها</span>
+              </button>
+
+              {currentChapter.chapterNumber < book.chapters.length ? (
+                <button
+                  type="button"
+                  onClick={() =>
+                    onSelect({ kind: 'chapter', chapterNumber: currentChapter.chapterNumber + 1 })
+                  }
+                  className="inline-flex items-center gap-1.5 text-xs font-semibold text-[#1E3A5F] hover:underline cursor-pointer"
+                >
+                  <span>فصل بعدی (فصل {toPersianDigits(currentChapter.chapterNumber + 1)})</span>
+                  <ChevronLeft className="h-4 w-4" />
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => onSelect({ kind: 'tables' })}
+                  className="inline-flex items-center gap-1.5 text-xs font-semibold text-[#1E3A5F] hover:underline cursor-pointer"
+                >
+                  <span>پیوست فهرست جداول</span>
+                  <ChevronLeft className="h-4 w-4" />
+                </button>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* MASTER CHEAT SHEETS APPENDIX */}
+        {selected.kind === 'cheatsheets' && (
+          <div>
+            <h1 className="border-b-2 border-[#1E3A5F] pb-3 text-xl font-extrabold text-[#1E3A5F]">
+              پیوست ویژه: برگه تقلب جامع و قوانین طلایی کارگاهی
+            </h1>
+            <p className="mt-3 text-xs leading-relaxed text-[#57534E]">
+              تمامی برگه‌های تقلب، قوانین طلایی و هشدارهای بحرانی پراکنده در فصل‌ها به‌صورت یکتا و بدون تکرار در این مرجع سریع گردآوری شده‌اند.
+            </p>
+            <div className="mt-6 space-y-4">
+              {book.cheatSheets.map((cs) => (
+                <div key={cs.id} className="border border-[#E2DDD3] bg-[#FBF9F5] p-4">
+                  <div className="mb-1.5 flex items-baseline justify-between gap-2">
+                    <h3 className="text-sm font-bold text-[#1E3A5F]">{cs.title}</h3>
+                    <button
+                      type="button"
+                      onClick={() => onSelect({ kind: 'chapter', chapterNumber: cs.chapterNumber })}
+                      className="shrink-0 text-[11px] font-semibold text-[#854D0E] hover:underline"
+                    >
+                      فصل {toPersianDigits(cs.chapterNumber)}
+                    </button>
+                  </div>
+                  <div className="space-y-1.5 text-[13px] leading-relaxed text-[#292524]">
+                    {cs.highlights.map((h, i) => (
+                      <p key={i}>
+                        <RichText text={h} footnoteMap={footnoteMap} onSelectFootnote={setActiveFootnote} />
+                      </p>
+                    ))}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* LIST OF TABLES APPENDIX */}
+        {selected.kind === 'tables' && (
+          <div>
+            <h1 className="border-b-2 border-[#1E3A5F] pb-3 text-xl font-extrabold text-[#1E3A5F]">
+              پیوست الف: فهرست کامل جداول (شماره‌گذاری یکپارچه و پیوسته)
+            </h1>
+            <p className="mt-3 text-xs leading-relaxed text-[#57534E]">
+              تمام {toPersianDigits(book.tableIndex.length)} جدول موجود در سند بر اساس شماره فصل واقعی بازشماره‌گذاری شده و هرگونه تکرار شماره جدول برطرف شده است.
+            </p>
+            <div className="mt-6 overflow-x-auto border border-[#D8D2C5]">
+              <table className="w-full border-collapse text-right text-xs">
+                <thead>
+                  <tr className="bg-[#1E3A5F] text-white">
+                    <th className="w-28 border-l border-[#2F527F] px-3 py-2.5">شماره جدید</th>
+                    <th className="border-l border-[#2F527F] px-3 py-2.5">عنوان جدول</th>
+                    <th className="w-24 px-3 py-2.5">فصل</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {book.tableIndex.map((t, idx) => (
+                    <tr
+                      key={`${t.tableNumber}_${idx}`}
+                      className={`border-t border-[#E2DDD3] ${idx % 2 === 1 ? 'bg-[#F8F6F1]' : 'bg-white'}`}
+                    >
+                      <td className="border-l border-[#E2DDD3] px-3 py-2 font-bold tabular-nums text-[#1E3A5F]">
+                        جدول {t.tableNumber}
+                      </td>
+                      <td className="border-l border-[#E2DDD3] px-3 py-2 leading-relaxed text-[#1A1816]">
+                        {t.caption.replace(/^جدول\s*[۰-۹0-9]+[-–][۰-۹0-9]+\s*[:：-]?\s*/, '')}
+                      </td>
+                      <td className="px-3 py-2">
+                        <button
+                          type="button"
+                          onClick={() => onSelect({ kind: 'chapter', chapterNumber: t.chapterNumber })}
+                          className="font-semibold text-[#1E3A5F] hover:underline"
+                        >
+                          فصل {toPersianDigits(t.chapterNumber)}
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
+
+        {/* UNIFIED GLOSSARY APPENDIX */}
+        {selected.kind === 'glossary' && (
+          <div>
+            <div className="flex flex-wrap items-center justify-between gap-3 border-b-2 border-[#1E3A5F] pb-3">
+              <h1 className="text-xl font-extrabold text-[#1E3A5F]">
+                پیوست ب: واژه‌نامه یکپارچه اصطلاحات تخصصی ({toPersianDigits(book.glossary.length)} مدخل)
+              </h1>
+              <div className="relative w-60">
+                <Search className="pointer-events-none absolute top-1/2 right-2.5 h-3.5 w-3.5 -translate-y-1/2 text-[#78716C]" />
+                <input
+                  type="text"
+                  value={glossarySearch}
+                  onChange={(e) => setGlossarySearch(e.target.value)}
+                  placeholder="جستجو در واژه‌نامه..."
+                  className="w-full rounded-sm border border-[#D8D2C5] bg-[#FBF9F5] py-1.5 pr-8 pl-3 text-xs focus:border-[#1E3A5F] focus:outline-none"
+                />
+              </div>
+            </div>
+
+            <div className="mt-5 divide-y divide-[#EAE5DA]">
+              {book.glossary
+                .filter(
+                  (g) =>
+                    !glossarySearch.trim() ||
+                    g.term.toLowerCase().includes(glossarySearch.toLowerCase()) ||
+                    g.definition.toLowerCase().includes(glossarySearch.toLowerCase())
+                )
+                .map((g, idx) => (
+                  <div key={`${g.term}_${idx}`} className="py-3">
+                    <div className="flex items-baseline justify-between gap-2">
+                      <span className="text-sm font-bold text-[#1E3A5F]" dir="auto">
+                        {g.term}
+                      </span>
+                      {g.chapters.length > 0 && (
+                        <span className="shrink-0 text-[11px] text-[#78716C]">
+                          فصل‌های {g.chapters.map((c) => toPersianDigits(c)).join('، ')}
+                        </span>
+                      )}
+                    </div>
+                    <p className="mt-1 text-[13px] leading-relaxed text-[#292524]">{g.definition}</p>
+                  </div>
+                ))}
+            </div>
+          </div>
+        )}
+
+        {/* UNIQUE FOOTNOTES APPENDIX */}
+        {selected.kind === 'footnotes' && (
+          <div>
+            <h1 className="border-b-2 border-[#1E3A5F] pb-3 text-xl font-extrabold text-[#1E3A5F]">
+              پیوست ج: پانویس‌های یکتا ({toPersianDigits(book.footnotes.length)} مدخل یکپارچه‌شده)
+            </h1>
+            <p className="mt-3 text-xs leading-relaxed text-[#57534E]">
+              پانویس‌های تکراری در فصل‌های مختلف ادغام و تمام ارجاعات درون متن به‌صورت خودکار به شماره یکتای جدید بازنگاشت شده‌اند.
+            </p>
+            <div className="mt-5 divide-y divide-[#EAE5DA] text-[13px] leading-relaxed">
+              {book.footnotes.map((fn) => (
+                <div key={fn.canonicalId} className="flex gap-3 py-2.5">
+                  <span className="w-10 shrink-0 font-bold tabular-nums text-[#1E3A5F]">
+                    [{toPersianDigits(fn.canonicalId)}]
+                  </span>
+                  <div className="min-w-0 flex-1 text-[#292524]">
+                    <div>{fn.text}</div>
+                    {fn.mergedFromIds && fn.mergedFromIds.length > 1 && (
+                      <div className="mt-1 text-[11px] text-[#14532D]">
+                        یکپارچه‌شده از {toPersianDigits(fn.mergedFromIds.length)} پانویس تکراری (
+                        {fn.mergedFromIds.map((id) => `#${toPersianDigits(id)}`).join('، ')})
+                      </div>
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+      </article>
+      </div>
+
+      {/* Footnote Preview Bar when clicking a superscript citation */}
+      {activeFootnote && (
+        <div className="fixed right-4 bottom-4 left-4 z-40 mx-auto max-w-[740px] border border-[#1E3A5F] bg-[#FBF9F5] p-4 shadow-lg">
+          <div className="flex items-start justify-between gap-3">
+            <div className="flex items-start gap-2.5">
+              <BookOpen className="mt-0.5 h-4 w-4 shrink-0 text-[#1E3A5F]" />
+              <div>
+                <div className="text-xs font-bold text-[#1E3A5F]">
+                  پانویس یکتا [{toPersianDigits(activeFootnote.canonicalId)}]
+                  {activeFootnote.mergedFromIds && activeFootnote.mergedFromIds.length > 1 && (
+                    <span className="mr-2 font-normal text-[#14532D]">
+                      (ادغام‌شده از {toPersianDigits(activeFootnote.mergedFromIds.length)} تکرار)
+                    </span>
+                  )}
+                </div>
+                <p className="mt-1 text-[13px] leading-relaxed text-[#1A1816]">{activeFootnote.text}</p>
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={() => setActiveFootnote(null)}
+              aria-label="بستن پانویس"
+              className="rounded-sm p-1 text-[#57534E] hover:bg-[#EAE5DA] hover:text-[#1A1816]"
+            >
+              <X className="h-4 w-4" />
+            </button>
+          </div>
+        </div>
+      )}
+      {/* Block Source File Provenance Bar */}
+      {activeProvenance && !activeFootnote && (
+        <div className="fixed right-4 bottom-4 left-4 z-40 mx-auto max-w-[740px] border border-[#1E3A5F] bg-[#FBF9F5] p-3.5 shadow-lg">
+          <div className="flex items-center justify-between gap-3">
+            <div className="flex items-center gap-2.5 min-w-0">
+              <FileText className="h-4 w-4 shrink-0 text-[#1E3A5F]" />
+              <div className="text-xs text-[#1A1816] truncate">
+                <span className="font-bold text-[#1E3A5F] ml-1.5">منبع این بلوک:</span>
+                <span>{activeProvenance.join(' · ')}</span>
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={() => setActiveProvenance(null)}
+              aria-label="بستن نمایش منبع"
+              className="rounded-sm p-1 text-[#57534E] hover:bg-[#EAE5DA] hover:text-[#1A1816]"
+            >
+              <X className="h-4 w-4" />
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}

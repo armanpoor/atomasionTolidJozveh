@@ -1,0 +1,50 @@
+@import "tailwindcss";
+
+@layer base {
+  :root {
+    --font-persian: "Vazir Medium", "Vazirmatn", "Vazir", system-ui, -apple-system, sans-serif;
+    --font-mono-code: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+
+  html {
+    font-family: var(--font-persian);
+    font-weight: 500;
+    direction: rtl;
+    text-align: right;
+    scroll-behavior: smooth;
+  }
+
+  body {
+    font-family: var(--font-persian);
+    font-weight: 500;
+    background-color: #F8F6F1;
+    color: #1A1816;
+  }
+
+  code,
+  pre,
+  .font-mono-ltr {
+    font-family: var(--font-mono-code);
+    direction: ltr;
+    unicode-bidi: isolate;
+  }
+}
+
+/* Custom subtle scrollbars for editorial sidebars */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #D6D0C4;
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #A8A092;
+}
