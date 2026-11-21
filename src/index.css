@@ -4,6 +4,11 @@
   :root {
     --font-persian: "Vazir Medium", "Vazirmatn", "Vazir", system-ui, -apple-system, sans-serif;
     --font-mono-code: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+    --print-margin-top: 20mm;
+    --print-margin-right: 22mm;
+    --print-margin-bottom: 22mm;
+    --print-margin-left: 22mm;
+    --print-font-size: 11pt;
   }
 
   html {
@@ -47,4 +52,138 @@
 
 ::-webkit-scrollbar-thumb:hover {
   background: #A8A092;
+}
+
+/* ============================================================================
+   A4 PRINT PREVIEW & STANDARD EDITORIAL PRINT MEDIA QUERIES
+   ============================================================================ */
+.a4-sheet-surface {
+  width: 210mm;
+  min-height: 297mm;
+  background-color: #FFFFFF;
+  color: #111111;
+  font-family: var(--font-persian);
+  font-size: var(--print-font-size, 11pt);
+  line-height: 1.85;
+  box-sizing: border-box;
+  position: relative;
+}
+
+.a4-sheet-guides::before {
+  content: "";
+  position: absolute;
+  top: var(--print-margin-top, 20mm);
+  right: var(--print-margin-right, 22mm);
+  bottom: var(--print-margin-bottom, 22mm);
+  left: var(--print-margin-left, 22mm);
+  border: 1px dashed rgba(30, 58, 95, 0.28);
+  pointer-events: none;
+  z-index: 1;
+}
+
+@page {
+  size: A4 portrait;
+  margin: 20mm 22mm 22mm 22mm;
+}
+
+@media print {
+  html,
+  body {
+    background: #FFFFFF !important;
+    color: #111111 !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    width: 100% !important;
+    height: auto !important;
+    overflow: visible !important;
+    font-family: var(--font-persian) !important;
+    font-size: var(--print-font-size, 11pt) !important;
+    line-height: 1.85 !important;
+    -webkit-print-color-adjust: exact !important;
+    print-color-adjust: exact !important;
+  }
+
+  .no-print {
+    display: none !important;
+  }
+
+  /* When Print Preview modal is open, isolate ONLY the A4 print canvas */
+  body.printing-a4-preview .studio-app-shell {
+    display: none !important;
+  }
+
+  body.printing-a4-preview .print-a4-portal {
+    position: static !important;
+    inset: auto !important;
+    display: block !important;
+    width: 100% !important;
+    height: auto !important;
+    overflow: visible !important;
+    background: #FFFFFF !important;
+    padding: 0 !important;
+    margin: 0 !important;
+  }
+
+  body.printing-a4-preview .print-a4-scroll-stage {
+    overflow: visible !important;
+    padding: 0 !important;
+    margin: 0 !important;
+    background: #FFFFFF !important;
+    transform: none !important;
+    display: block !important;
+  }
+
+  .a4-sheet-surface {
+    width: 100% !important;
+    min-height: auto !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    border: none !important;
+    box-shadow: none !important;
+    border-radius: 0 !important;
+    background: #FFFFFF !important;
+  }
+
+  .a4-sheet-guides::before {
+    display: none !important;
+  }
+
+  .print-page-break {
+    break-before: page;
+    page-break-before: always;
+  }
+
+  .print-avoid-break {
+    break-inside: avoid;
+    page-break-inside: avoid;
+  }
+
+  h1,
+  h2,
+  h3,
+  h4 {
+    break-after: avoid;
+    page-break-after: avoid;
+  }
+
+  p {
+    orphans: 3;
+    widows: 3;
+  }
+
+  table,
+  figure,
+  aside {
+    break-inside: avoid;
+    page-break-inside: avoid;
+  }
+
+  thead {
+    display: table-header-group;
+  }
+
+  tr {
+    break-inside: avoid;
+    page-break-inside: avoid;
+  }
 }

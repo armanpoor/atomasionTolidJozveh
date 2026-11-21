@@ -88,7 +88,7 @@ void testConnection();
 
 export interface UserWorkspacePrefs {
   defaultWorkflowMode: 'single_polish' | 'multi_merge' | 'master_update' | 'raw_synthesis';
-  defaultAiModel: 'gemini-4-hydrogen' | 'gemini-3.1-flash-lite';
+  defaultAiModel: 'gemini-4-hydrogen' | 'gemini-3.8-flash';
   defaultThinkingLevel: 'MINIMAL' | 'LOW' | 'MEDIUM' | 'HIGH' | 'XHIGH';
   defaultFontFamily: string;
   defaultPageSize: 'A4' | 'B5';

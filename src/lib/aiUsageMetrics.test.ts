@@ -2,9 +2,11 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
   buildProjectQuotaTechnicalSpec,
+  buildSimpleTokenExplanation,
   computeProjectQuotaSnapshot,
   EMPTY_AI_USAGE,
   estimatePersianTokensFromWords,
+  estimateWordPagesFromWords,
   extractAiUsageFromCheckpoint,
   formatCompactTokensFa,
   mergeAiUsageDelta,
@@ -52,7 +54,7 @@ test('mergeAiUsageDelta accumulates token counts and request counters accurately
     thinkingTokens: 1800,
     requestCount: 1,
     deepReviewCount: 1,
-    modelUsed: 'gemini-4-hydrogen',
+    modelUsed: 'gemini-3.8-flash',
   });
   assert.equal(step2.promptTokens, 8000);
   assert.equal(step2.outputTokens, 1900);
@@ -61,6 +63,22 @@ test('mergeAiUsageDelta accumulates token counts and request counters accurately
   assert.equal(step2.requestCount, 2);
   assert.equal(step2.deepReviewCount, 1);
   assert.equal(step2.groundingCallCount, 1);
+});
+
+test('simplified Persian token formula uses clean 2x word rule and 800 tokens/page rule', () => {
+  assert.equal(estimatePersianTokensFromWords(400), 800);
+  assert.equal(estimatePersianTokensFromWords(5000), 10_000);
+  assert.equal(estimateWordPagesFromWords(4000), 10);
+
+  const simple = buildSimpleTokenExplanation({
+    ingestedWordCount: 4000,
+    consumedTokens: 10_000,
+    softBudgetTokens: 250_000,
+  });
+  assert.ok(simple.wordRuleText.includes('۲ توکن'));
+  assert.ok(simple.pageRuleText.includes('۸۰۰ توکن'));
+  assert.ok(simple.projectWorkedExample.includes('× ۲'));
+  assert.ok(simple.remainingSimpleText.includes('۲۴۰ هزار'));
 });
 
 test('computeProjectQuotaSnapshot transitions status levels cleanly from normal to warning to critical', () => {
@@ -74,8 +92,10 @@ test('computeProjectQuotaSnapshot transitions status levels cleanly from normal 
     useAiBackend: true,
   });
   assert.equal(fresh.consumedTokens, 0);
+  assert.equal(fresh.remainingTokens, 250_000);
   assert.equal(fresh.consumedPercent, 0);
-  assert.equal(fresh.estimatedDocumentTokens, estimatePersianTokensFromWords(5000));
+  assert.equal(fresh.remainingPercent, 100);
+  assert.equal(fresh.estimatedDocumentTokens, 10_000);
   assert.equal(fresh.statusLevel, 'normal');
   assert.equal(fresh.formattedCostUsd, '$0.00');
 
@@ -96,6 +116,7 @@ test('computeProjectQuotaSnapshot transitions status levels cleanly from normal 
     useAiBackend: true,
   });
   assert.equal(warn.consumedPercent, 66);
+  assert.equal(warn.remainingPercent, 34);
   assert.equal(warn.statusLevel, 'warning');
   assert.ok(warn.estimatedPaidCostUsd > 0.1);
 
@@ -126,7 +147,7 @@ test('formatCompactTokensFa formats small, thousand, and million token counts in
   assert.equal(formatCompactTokensFa(1_250_000), '۱.۲۵ میلیون');
 });
 
-test('buildProjectQuotaTechnicalSpec computes model rates, shares, remaining budgets, and grounding labels accurately', () => {
+test('buildProjectQuotaTechnicalSpec computes rates and budgets for Gemini 4 Hydrogen and Gemini 3.8 Flash', () => {
   const hydro = buildProjectQuotaTechnicalSpec({
     usage: {
       ...EMPTY_AI_USAGE,
@@ -150,25 +171,23 @@ test('buildProjectQuotaTechnicalSpec computes model rates, shares, remaining bud
   assert.equal(hydro.promptSharePercent, 60);
   assert.equal(hydro.thinkingSharePercent, 15);
   assert.equal(hydro.outputSharePercent, 25);
-  assert.equal(hydro.inputRatePerMillionUsd, 0.3);
-  assert.equal(hydro.outputRatePerMillionUsd, 2.5);
-  assert.equal(hydro.httpPayloadLimitMb, 30);
-  assert.ok(hydro.groundingModeLabel.includes('کل سند'));
+  assert.equal(hydro.persianWordTokenMultiplier, 2);
+  assert.equal(hydro.tokensPerWordPage, 800);
 
-  const lite = buildProjectQuotaTechnicalSpec({
+  const flash38 = buildProjectQuotaTechnicalSpec({
     usage: EMPTY_AI_USAGE,
     ingestedWordCount: 0,
     queuedBytesCount: 50_000,
     chapterCount: 2,
-    aiModel: 'gemini-3.1-flash-lite',
+    aiModel: 'gemini-3.8-flash',
     googleSearchMode: 'conflicts_only',
     useAiBackend: false,
   });
-  assert.equal(lite.softBudgetTokens, 400_000);
-  assert.equal(lite.softRequestCap, 40);
-  assert.equal(lite.estimatedNextPassTokens, 0);
-  assert.equal(lite.promptSharePercent, 0);
-  assert.equal(lite.inputRatePerMillionUsd, 0.1);
-  assert.equal(lite.outputRatePerMillionUsd, 0.4);
+  assert.equal(flash38.modelId, 'gemini-3.8-flash');
+  assert.equal(flash38.modelDisplayName, 'Gemini 3.8 Flash');
+  assert.equal(flash38.softBudgetTokens, 350_000);
+  assert.equal(flash38.softRequestCap, 35);
+  assert.equal(flash38.estimatedNextPassTokens, 0);
+  assert.equal(flash38.inputRatePerMillionUsd, 0.15);
+  assert.equal(flash38.outputRatePerMillionUsd, 0.6);
 });
-

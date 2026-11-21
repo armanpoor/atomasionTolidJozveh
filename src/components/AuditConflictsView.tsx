@@ -1,7 +1,9 @@
 import React, { useState } from 'react';
 import {
   AlertTriangle,
+  ArrowLeft,
   CheckCircle2,
+  Cpu,
   ExternalLink,
   FileCheck2,
   Globe,
@@ -15,7 +17,10 @@ import {
   ConflictDto,
   DedupClusterDto,
 } from '../lib/bookTypes';
+import type { TechnicalIntegrityAuditReport } from '../lib/ecuTechnicalIntegrity';
+import type { NumericDiscrepancyReport } from '../lib/numericDiscrepancyAnalyzer';
 import { toPersianDigits } from '../lib/formatParsers';
+import { NumericDiscrepancyAnalyzer } from './NumericDiscrepancyAnalyzer';
 
 interface AuditConflictsViewProps {
   auditReport: AuditReportDto | null;
@@ -24,6 +29,12 @@ interface AuditConflictsViewProps {
   groundingConflictId: string | null;
   resolvingConflictId: string | null;
   rescanningConflicts?: boolean;
+  hasIngestedFiles?: boolean;
+  hasDedupResults?: boolean;
+  hasOutline?: boolean;
+  runningDedup?: boolean;
+  onRunDedup?: () => Promise<void>;
+  onProceedToOutline?: () => void;
   onRescanConflicts?: () => Promise<void>;
   onCheckConflictWithGoogle: (conflictId: string) => Promise<void>;
   onResolveConflict: (
@@ -48,6 +59,12 @@ export const AuditConflictsView: React.FC<AuditConflictsViewProps> = ({
   groundingConflictId,
   resolvingConflictId,
   rescanningConflicts = false,
+  hasIngestedFiles = true,
+  hasDedupResults = true,
+  hasOutline = false,
+  runningDedup = false,
+  onRunDedup,
+  onProceedToOutline,
   onRescanConflicts,
   onCheckConflictWithGoogle,
   onResolveConflict,
@@ -66,21 +83,79 @@ export const AuditConflictsView: React.FC<AuditConflictsViewProps> = ({
         }>
       | undefined) || [];
 
+  const technicalIntegrity = auditReport?.detailsJson?.technicalIntegrity as
+    | TechnicalIntegrityAuditReport
+    | undefined;
+
+  const numericDiscrepancyReport = auditReport?.detailsJson?.numericDiscrepancyReport as
+    | NumericDiscrepancyReport
+    | undefined;
+
   return (
     <div className="mx-auto max-w-5xl px-4 py-6 sm:px-8 space-y-8">
       {/* Header & KPI Strip */}
       <div className="space-y-4">
-        <div className="flex items-center gap-2.5 text-[#14532D]">
-          <ShieldCheck className="h-6 w-6 shrink-0" />
-          <div>
-            <h2 className="text-lg sm:text-xl font-extrabold text-[#1A1816]">
-              داشبورد ممیزی پوشش ۱۰۰٪ و مدیریت تناقض‌ها
-            </h2>
-            <p className="text-xs text-[#57534E]">
-              گزارش مستند حفظ تمام نکات یکتا از فایل‌های ورودی، ادغام تکراری‌ها و مقایسه روایت‌های متناقض
-            </p>
+        <div className="flex flex-wrap items-start justify-between gap-4">
+          <div className="flex items-center gap-2.5 text-[#14532D]">
+            <ShieldCheck className="h-6 w-6 shrink-0" />
+            <div>
+              <p className="text-[11px] font-bold text-[#1E3A5F]">
+                مرحله ۲ از ۵ · ادغام بدون افت و بررسی تناقض‌ها
+              </p>
+              <h2 className="text-lg sm:text-xl font-extrabold text-[#1A1816]">
+                داشبورد ممیزی پوشش ۱۰۰٪ و مدیریت تناقض‌ها
+              </h2>
+              <p className="text-xs text-[#57534E]">
+                گزارش مستند حفظ تمام نکات یکتا از فایل‌های ورودی، ادغام تکراری‌ها و مقایسه روایت‌های متناقض
+              </p>
+            </div>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-2">
+            {hasIngestedFiles && onRunDedup && (
+              <button
+                type="button"
+                disabled={runningDedup}
+                onClick={() => void onRunDedup()}
+                className={`inline-flex min-h-[40px] items-center gap-1.5 rounded-lg px-3.5 py-2 text-xs font-bold cursor-pointer disabled:opacity-60 ${
+                  !hasDedupResults
+                    ? 'bg-[#1E3A5F] text-white hover:bg-[#162C49]'
+                    : 'border border-[#C6D5E6] bg-[#EEF3F8] text-[#1E3A5F] hover:bg-[#DFEAF5]'
+                }`}
+              >
+                {runningDedup ? (
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                ) : (
+                  <RefreshCw className="h-4 w-4" />
+                )}
+                <span>
+                  {runningDedup
+                    ? 'در حال ادغام و کشف تناقض...'
+                    : hasDedupResults
+                      ? 'اجرای مجدد ادغام و ممیزی'
+                      : 'اجرای مرحله ۲: ادغام و کشف تناقض'}
+                </span>
+              </button>
+            )}
+
+            {hasOutline && onProceedToOutline && (
+              <button
+                type="button"
+                onClick={onProceedToOutline}
+                className="inline-flex min-h-[40px] items-center gap-1.5 rounded-lg bg-[#1E3A5F] px-4 py-2 text-xs font-bold text-white hover:bg-[#162C49] cursor-pointer shadow-xs"
+              >
+                <span>ادامه به مرحله ۳: چیدمان فصل‌ها</span>
+                <ArrowLeft className="h-4 w-4" />
+              </button>
+            )}
           </div>
         </div>
+
+        {hasIngestedFiles && !hasDedupResults && (
+          <div className="rounded-xl border border-[#C6D5E6] bg-[#EEF3F8] p-5 text-xs text-[#1E3A5F] leading-6">
+            فایل‌های مرحله ۱ استخراج شده‌اند، اما هنوز ادغام بدون افت و بررسی تناقض اجرا نشده است. دکمه <strong>«اجرای مرحله ۲: ادغام و کشف تناقض»</strong> را بزنید تا فقط همین مرحله اجرا شود و نتایج را بررسی کنید.
+          </div>
+        )}
 
         {auditReport && (
           <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
@@ -124,7 +199,123 @@ export const AuditConflictsView: React.FC<AuditConflictsViewProps> = ({
             </div>
           </div>
         )}
+
+        {/* Deterministic Technical Entity Integrity Gate (0% AI) */}
+        {technicalIntegrity && technicalIntegrity.totalEntitiesInSources > 0 && (() => {
+          const passed = technicalIntegrity.missingEntities.length === 0;
+          const allSamples = [
+            ...(technicalIntegrity.samples?.hexAddresses || []),
+            ...(technicalIntegrity.samples?.dtcCodes || []),
+            ...(technicalIntegrity.samples?.ecuModels || []),
+            ...(technicalIntegrity.samples?.mapIdentifiers || []),
+          ].slice(0, 14);
+          return (
+            <div
+              data-testid="ecu-technical-integrity-card"
+              className={`rounded-xl border p-4 sm:p-5 space-y-4 ${
+                passed ? 'border-[#C7DDD0] bg-white' : 'border-[#E6BFB7] bg-[#FDF2F0]'
+              }`}
+            >
+              <div className="flex flex-wrap items-start justify-between gap-3 border-b border-[#EFECE4] pb-3">
+                <div className="flex items-start gap-2.5">
+                  <Cpu
+                    className={`mt-0.5 h-5 w-5 shrink-0 ${
+                      passed ? 'text-[#1E3A5F]' : 'text-[#9A3412]'
+                    }`}
+                  />
+                  <div>
+                    <h3 className="text-sm font-extrabold text-[#1A1816]">
+                      ممیزی قطعی ضدتوهم کدهای فنی و مهندسی (۰٪ هوش مصنوعی)
+                    </h3>
+                    <p className="text-xs text-[#57534E] mt-0.5">
+                      تطبیق خودکار و دقیق تمام آدرس‌های هگز، کدهای خطای OBD-II، مدل‌های ECU و نام مپ‌های کالیبراسیون میان فایل‌های ورودی و خروجی نهایی
+                    </p>
+                  </div>
+                </div>
+                <div className="text-left">
+                  <div
+                    className={`text-lg font-extrabold tabular-nums ${
+                      passed ? 'text-[#14532D]' : 'text-[#9A3412]'
+                    }`}
+                  >
+                    {toPersianDigits(technicalIntegrity.retentionPercent)}٪ حفظ کامل
+                  </div>
+                  <div className="text-[11px] text-[#57534E] tabular-nums">
+                    {toPersianDigits(technicalIntegrity.preservedEntitiesCount)} از{' '}
+                    {toPersianDigits(technicalIntegrity.totalEntitiesInSources)} شناسه فنی
+                  </div>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 divide-x divide-x-reverse divide-[#EFECE4]">
+                <div className="pr-0 sm:pr-2 first:pr-0">
+                  <div className="text-[11px] font-semibold text-[#57534E]">آدرس‌های هگز (Hex)</div>
+                  <div className="mt-1 text-lg font-extrabold tabular-nums text-[#1E3A5F]">
+                    {toPersianDigits(technicalIntegrity.counts.hexAddresses)}
+                  </div>
+                </div>
+                <div className="pr-3">
+                  <div className="text-[11px] font-semibold text-[#57534E]">کدهای خطا (DTC)</div>
+                  <div className="mt-1 text-lg font-extrabold tabular-nums text-[#1E3A5F]">
+                    {toPersianDigits(technicalIntegrity.counts.dtcCodes)}
+                  </div>
+                </div>
+                <div className="pr-3">
+                  <div className="text-[11px] font-semibold text-[#57534E]">مدل‌های ایسیو (ECU)</div>
+                  <div className="mt-1 text-lg font-extrabold tabular-nums text-[#1E3A5F]">
+                    {toPersianDigits(technicalIntegrity.counts.ecuModels)}
+                  </div>
+                </div>
+                <div className="pr-3">
+                  <div className="text-[11px] font-semibold text-[#57534E]">نام مپ‌ها (WinOLS)</div>
+                  <div className="mt-1 text-lg font-extrabold tabular-nums text-[#1E3A5F]">
+                    {toPersianDigits(technicalIntegrity.counts.mapIdentifiers)}
+                  </div>
+                </div>
+              </div>
+
+              {allSamples.length > 0 && (
+                <div className="flex flex-wrap items-center gap-1.5 pt-1 text-[11px]">
+                  <span className="font-semibold text-[#57534E] ml-1">شناسه‌های راستی‌آزمایی‌شده:</span>
+                  {allSamples.map((val) => (
+                    <code
+                      key={val}
+                      dir="ltr"
+                      className="rounded border border-[#E2DDD3] bg-[#FAF9F6] px-2 py-0.5 font-mono text-[11px] font-semibold text-[#1E3A5F]"
+                    >
+                      {val}
+                    </code>
+                  ))}
+                </div>
+              )}
+
+              {technicalIntegrity.missingEntities.length > 0 && (
+                <div className="rounded-lg border border-[#E6BFB7] bg-white p-3 space-y-1.5">
+                  <div className="flex items-center gap-1.5 text-xs font-bold text-[#9A3412]">
+                    <AlertTriangle className="h-4 w-4 shrink-0" />
+                    <span>
+                      هشدار امنیتی: {toPersianDigits(technicalIntegrity.missingEntities.length)} شناسه فنی در خروجی نهایی یافت نشد:
+                    </span>
+                  </div>
+                  <div className="flex flex-wrap gap-1.5" dir="ltr">
+                    {technicalIntegrity.missingEntities.map((val) => (
+                      <code
+                        key={`missing-${val}`}
+                        className="rounded border border-[#E6BFB7] bg-[#FDF2F0] px-2 py-0.5 font-mono text-[11px] font-bold text-[#9A3412]"
+                      >
+                        {val}
+                      </code>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+          );
+        })()}
       </div>
+
+      {/* Deterministic Numeric Discrepancy & Statistical Comparison Module (Tables & Charts) */}
+      <NumericDiscrepancyAnalyzer report={numericDiscrepancyReport} />
 
       {/* Conflicts Section */}
       <section className="space-y-3.5">

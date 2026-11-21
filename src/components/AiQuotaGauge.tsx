@@ -1,6 +1,21 @@
 import React, { useMemo, useState } from 'react';
-import { ChevronDown, ChevronUp, Gauge, Info } from 'lucide-react';
+import {
+  AlertCircle,
+  CheckCircle2,
+  ChevronDown,
+  ChevronUp,
+  Gauge,
+  Info,
+  KeyRound,
+  Loader2,
+  RefreshCw,
+} from 'lucide-react';
 import { AiModelId, GoogleSearchMode, ProjectAiUsageLedger } from '../lib/bookTypes';
+import {
+  AiProviderConfig,
+  AiQuotaProbeResponse,
+  getProviderDisplaySummary,
+} from '../lib/aiProviderConfig';
 import {
   computeProjectQuotaSnapshot,
   formatCompactTokensFa,
@@ -19,6 +34,11 @@ interface AiQuotaGaugeProps {
   aiModel: AiModelId;
   googleSearchMode: GoogleSearchMode;
   useAiBackend: boolean;
+  providerConfig: AiProviderConfig;
+  probeData: AiQuotaProbeResponse | null;
+  probing: boolean;
+  onRunLiveProbe: () => Promise<void>;
+  onOpenProviderSettings: () => void;
 }
 
 const STATUS_STYLE: Record<
@@ -55,6 +75,11 @@ export const AiQuotaGauge: React.FC<AiQuotaGaugeProps> = ({
   aiModel,
   googleSearchMode,
   useAiBackend,
+  providerConfig,
+  probeData,
+  probing,
+  onRunLiveProbe,
+  onOpenProviderSettings,
 }) => {
   const [expanded, setExpanded] = useState(false);
   const [infoOpen, setInfoOpen] = useState(false);
@@ -81,9 +106,12 @@ export const AiQuotaGauge: React.FC<AiQuotaGaugeProps> = ({
     ]
   );
 
-  const palette = STATUS_STYLE[snapshot.statusLevel];
+  const activeProbe = probeData?.activeProbe ?? null;
+  const effectiveStatusLevel: QuotaStatusLevel =
+    activeProbe && !activeProbe.hasQuota ? 'critical' : snapshot.statusLevel;
+  const palette = STATUS_STYLE[effectiveStatusLevel];
 
-  // Semi-circular arc geometry (radius = 22, circumference of half-circle = PI * 22 ≈ 69.115)
+  // Semi-circular arc geometry showing REMAINING quota intuitively (or consumed fill)
   const radius = 22;
   const arcLength = Math.PI * radius;
   const activePct =
@@ -95,10 +123,20 @@ export const AiQuotaGauge: React.FC<AiQuotaGaugeProps> = ({
   const activeOffset = arcLength * (1 - activePct / 100);
   const projectedOffset = arcLength * (1 - projectedPct / 100);
 
+  const providerSummary = getProviderDisplaySummary(providerConfig, aiModel);
+  const activeModelLabel = providerSummary.modelLabel;
+
+  const keySourceBadge =
+    activeProbe?.switchedFromCreator
+      ? `${providerSummary.providerLabel} · سوئیچ به کلید شما`
+      : activeProbe?.keySource === 'creator'
+        ? `${providerSummary.providerLabel} · سهمیه سازنده`
+        : `${providerSummary.providerLabel} · ${providerSummary.keySourceLabel}`;
+
   return (
     <section
-      aria-label="نشانگر مصرف توکن و سهمیه هوش مصنوعی پروژه"
-      className="rounded-xl border border-[#E2DDD3] bg-white p-3.5"
+      aria-label="نشانگر مصرف توکن و استعلام زنده سهمیه هوش مصنوعی"
+      className="rounded-xl border border-[#E2DDD3] bg-white p-3.5 space-y-2.5"
     >
       <div className="flex items-center justify-between gap-3">
         {/* Compact Semi-Circular Arc Gauge */}
@@ -108,7 +146,6 @@ export const AiQuotaGauge: React.FC<AiQuotaGaugeProps> = ({
             className="h-[34px] w-[56px] overflow-visible"
             aria-hidden="true"
           >
-            {/* Background track arc */}
             <path
               d="M 6 29 A 22 22 0 0 1 50 29"
               fill="none"
@@ -116,7 +153,6 @@ export const AiQuotaGauge: React.FC<AiQuotaGaugeProps> = ({
               strokeWidth="4.5"
               strokeLinecap="round"
             />
-            {/* Projected load arc (shown subtly before first AI call) */}
             {projectedPct > 0 && (
               <path
                 d="M 6 29 A 22 22 0 0 1 50 29"
@@ -129,7 +165,6 @@ export const AiQuotaGauge: React.FC<AiQuotaGaugeProps> = ({
                 strokeDashoffset={projectedOffset}
               />
             )}
-            {/* Active consumed arc */}
             {activePct > 0 && (
               <path
                 d="M 6 29 A 22 22 0 0 1 50 29"
@@ -143,26 +178,36 @@ export const AiQuotaGauge: React.FC<AiQuotaGaugeProps> = ({
             )}
           </svg>
           <span
-            className={`absolute bottom-0 text-[11px] font-extrabold tabular-nums leading-none ${palette.text}`}
+            className={`absolute bottom-0 text-[10.5px] font-extrabold tabular-nums leading-none ${palette.text}`}
           >
-            {toPersianDigits(snapshot.consumedPercent)}٪
+            {toPersianDigits(snapshot.remainingPercent)}٪
           </span>
         </div>
 
         {/* Summary Readout */}
         <div className="min-w-0 flex-1 space-y-0.5">
-          <div className="flex items-center justify-between gap-1.5">
+          <div className="flex items-center justify-between gap-1">
             <div className="flex items-center gap-1 text-[11.5px] font-bold text-[#1A1816] truncate">
               <Gauge className="h-3.5 w-3.5 text-[#1E3A5F] shrink-0" />
-              <span className="truncate">مصرف هوش مصنوعی پروژه</span>
+              <span className="truncate">سهمیه هوش مصنوعی</span>
             </div>
             <div className="flex items-center gap-0.5 shrink-0">
               <button
                 type="button"
+                onClick={() => void onRunLiveProbe()}
+                disabled={probing}
+                aria-label="استعلام زنده باقی‌مانده سهمیه"
+                title="استعلام زنده سهمیه از سرور"
+                className="inline-flex h-7 w-7 items-center justify-center rounded-md text-[#57534E] hover:bg-[#EEF3F8] hover:text-[#1E3A5F] disabled:opacity-50 cursor-pointer"
+              >
+                <RefreshCw className={`h-3.5 w-3.5 ${probing ? 'animate-spin' : ''}`} />
+              </button>
+              <button
+                type="button"
                 onClick={() => setInfoOpen(true)}
-                aria-label="راهنمای فنی محاسبه مصرف و سهمیه هوش مصنوعی"
-                title="راهنمای فنی محاسبه مصرف، لیمیت‌ها و سهمیه"
-                className="inline-flex h-7 w-7 items-center justify-center rounded-md text-[#57534E] hover:bg-[#EEF3F8] hover:text-[#1E3A5F] focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-[#1E3A5F] transition-colors cursor-pointer"
+                aria-label="راهنمای محاسبه ساده توکن و سهمیه"
+                title="محاسبه ساده توکن و راهنمای سهمیه"
+                className="inline-flex h-7 w-7 items-center justify-center rounded-md text-[#57534E] hover:bg-[#EEF3F8] hover:text-[#1E3A5F] cursor-pointer"
               >
                 <Info className="h-3.5 w-3.5" />
               </button>
@@ -170,7 +215,7 @@ export const AiQuotaGauge: React.FC<AiQuotaGaugeProps> = ({
                 type="button"
                 onClick={() => setExpanded((v) => !v)}
                 aria-expanded={expanded}
-                className="inline-flex min-h-[28px] shrink-0 items-center gap-0.5 rounded-md px-1.5 py-0.5 text-[10.5px] font-semibold text-[#1E3A5F] hover:bg-[#EEF3F8] transition-colors cursor-pointer whitespace-nowrap"
+                className="inline-flex min-h-[28px] shrink-0 items-center gap-0.5 rounded-md px-1.5 py-0.5 text-[10.5px] font-semibold text-[#1E3A5F] hover:bg-[#EEF3F8] cursor-pointer whitespace-nowrap"
               >
                 <span>{expanded ? 'بستن' : 'جزئیات'}</span>
                 {expanded ? (
@@ -183,111 +228,125 @@ export const AiQuotaGauge: React.FC<AiQuotaGaugeProps> = ({
           </div>
 
           <div className="flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-[11px] text-[#57534E] tabular-nums">
-            <span className={`font-semibold ${palette.text}`}>{snapshot.statusLabel}</span>
-            <span aria-hidden="true" className="text-[#CFC8B9]">·</span>
-            <span>
-              {formatCompactTokensFa(snapshot.consumedTokens)} از{' '}
-              {formatCompactTokensFa(snapshot.softBudgetTokens)} توکن
+            <span className="font-bold text-[#14532D]">
+              مانده: {formatCompactTokensFa(snapshot.remainingTokens)}
             </span>
+            <span aria-hidden="true" className="text-[#CFC8B9]">·</span>
+            <span>مصرف: {formatCompactTokensFa(snapshot.consumedTokens)}</span>
           </div>
 
           <div className="flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-[10.5px] text-[#78716C] tabular-nums">
-            <span>{toPersianDigits(snapshot.requestCount)} درخواست</span>
+            <span>{activeModelLabel}</span>
             <span aria-hidden="true" className="text-[#CFC8B9]">·</span>
-            <span>مدل {snapshot.modelDisplayName}</span>
-            {snapshot.consumedTokens > 0 && (
-              <>
-                <span aria-hidden="true" className="text-[#CFC8B9]">·</span>
-                <span dir="ltr" className="font-mono text-[10px]">
-                  {snapshot.formattedCostUsd}
-                </span>
-              </>
-            )}
+            <span>{keySourceBadge}</span>
           </div>
         </div>
       </div>
 
-      {/* Expandable Transparent Breakdown (flat hairline grid, no nested cards) */}
-      {expanded && (
-        <div className="mt-3 border-t border-[#EFECE4] pt-2.5 space-y-2.5 text-[11px]">
-          {/* Dual-segment slim reference bar */}
-          <div className="space-y-1">
-            <div className="flex items-center justify-between text-[10.5px] text-[#57534E] tabular-nums">
-              <span>نسبت مصرف به سقف پیشنهادی پروژه</span>
-              <span className="font-bold text-[#1A1816]">
-                {toPersianDigits(snapshot.consumedPercent)}٪
-              </span>
-            </div>
-            <div className={`h-1.5 w-full overflow-hidden rounded-full ${palette.track} relative`}>
-              {snapshot.consumedTokens === 0 && snapshot.projectedPercent > 0 && (
-                <div
-                  className="absolute inset-y-0 right-0 rounded-full bg-[#94A3B8]/40"
-                  style={{ width: `${snapshot.projectedPercent}%` }}
-                />
+      {/* Live Probe Status Strip + Quick Provider Button */}
+      <div className="flex items-center justify-between gap-2 border-t border-[#EFECE4] pt-2 text-[10.5px]">
+        <div className="flex items-center gap-1.5 min-w-0">
+          {probing ? (
+            <>
+              <Loader2 className="h-3.5 w-3.5 animate-spin text-[#1E3A5F] shrink-0" />
+              <span className="text-[#57534E] truncate">در حال استعلام زنده سهمیه...</span>
+            </>
+          ) : activeProbe ? (
+            <>
+              {activeProbe.hasQuota ? (
+                <CheckCircle2 className="h-3.5 w-3.5 text-[#14532D] shrink-0" />
+              ) : (
+                <AlertCircle className="h-3.5 w-3.5 text-[#9A3412] shrink-0" />
               )}
-              <div
-                className={`h-full rounded-full ${palette.bar}`}
-                style={{ width: `${snapshot.consumedPercent}%` }}
-              />
-            </div>
+              <span
+                className={`font-semibold truncate ${
+                  activeProbe.hasQuota ? 'text-[#14532D]' : 'text-[#9A3412]'
+                }`}
+              >
+                {activeProbe.statusLabelFa}
+              </span>
+            </>
+          ) : (
+            <span className="text-[#78716C] truncate">
+              هر کلمه ≈ ۲ توکن · هر صفحه ≈ ۸۰۰ توکن
+            </span>
+          )}
+        </div>
+
+        <button
+          type="button"
+          onClick={onOpenProviderSettings}
+          className="inline-flex min-h-[26px] shrink-0 items-center gap-1 rounded-md border border-[#D6D0C4] bg-[#FAF9F6] px-2 py-0.5 text-[10.5px] font-bold text-[#1E3A5F] hover:bg-[#EEF3F8] cursor-pointer whitespace-nowrap"
+        >
+          <KeyRound className="h-3 w-3" />
+          <span>ارائه‌دهنده / کلید</span>
+        </button>
+      </div>
+
+      {/* Expandable Simple Breakdown */}
+      {expanded && (
+        <div className="border-t border-[#EFECE4] pt-2.5 space-y-2.5 text-[11px]">
+          <div className="rounded-lg border border-[#E5E0D6] bg-[#FAF9F6] px-2.5 py-2 text-[10.5px] leading-5 text-[#44403C] tabular-nums">
+            <strong>فرمول ساده:</strong> هر کلمه فارسی ≈ <strong>۲ توکن</strong> و هر صفحه ورد ≈{' '}
+            <strong>۸۰۰ توکن</strong>. سند فعلی شما حدود{' '}
+            <strong>{formatCompactTokensFa(snapshot.estimatedDocumentTokens)} توکن</strong> (≈{' '}
+            {toPersianDigits(snapshot.estimatedDocumentPages)} صفحه) است.
           </div>
 
-          {/* 2x2 Flat Metric Grid */}
-          <div className="grid grid-cols-2 gap-x-3 gap-y-2 border-t border-[#F2EFE8] pt-2 tabular-nums">
+          <div className="grid grid-cols-2 gap-x-3 gap-y-2 tabular-nums">
             <div>
-              <div className="text-[10px] text-[#78716C]">توکن ورودی / خروجی</div>
+              <div className="text-[10px] text-[#78716C]">باقی‌مانده این پروژه</div>
+              <div className="font-bold text-[#14532D] mt-0.5">
+                {formatCompactTokensFa(snapshot.remainingTokens)} (≈{' '}
+                {toPersianDigits(snapshot.remainingPagesEquivalent)} صفحه)
+              </div>
+            </div>
+
+            <div>
+              <div className="text-[10px] text-[#78716C]">درخواست‌های ثبت‌شده</div>
               <div className="font-bold text-[#1A1816] mt-0.5">
+                {toPersianDigits(snapshot.requestCount)} از {toPersianDigits(snapshot.softRequestCap)}
+              </div>
+            </div>
+
+            <div>
+              <div className="text-[10px] text-[#78716C]">ورودی / خروجی</div>
+              <div className="font-semibold text-[#44403C] mt-0.5">
                 {formatCompactTokensFa(usage.promptTokens)} /{' '}
                 {formatCompactTokensFa(usage.outputTokens + usage.thinkingTokens)}
               </div>
             </div>
 
             <div>
-              <div className="text-[10px] text-[#78716C]">تخمین حجم فایل‌های پروژه</div>
-              <div className="font-bold text-[#1A1816] mt-0.5">
-                ~{formatCompactTokensFa(snapshot.estimatedDocumentTokens)} توکن
-              </div>
-            </div>
-
-            <div>
-              <div className="text-[10px] text-[#78716C]">تفکیک عملیات هوش مصنوعی</div>
-              <div className="font-semibold text-[#44403C] mt-0.5">
-                گوگل {toPersianDigits(usage.groundingCallCount)} · بازبینی{' '}
-                {toPersianDigits(usage.deepReviewCount)} · چت{' '}
-                {toPersianDigits(usage.chatCallCount)}
-              </div>
-            </div>
-
-            <div>
               <div className="text-[10px] text-[#78716C]">معادل هزینه پلن پولی</div>
-              <div className="mt-0.5 flex items-baseline gap-1 text-[11px] font-bold text-[#1A1816]">
-                <span dir="ltr" className="font-mono">
-                  {snapshot.formattedCostUsd}
-                </span>
-                <span className="text-[10px] font-normal text-[#78716C]">
-                  (تقریبی)
-                </span>
+              <div className="font-bold text-[#1A1816] mt-0.5 font-mono" dir="ltr">
+                <span className="block text-right">{snapshot.formattedCostUsd}</span>
               </div>
             </div>
           </div>
 
           <div className="flex items-center justify-between gap-2 border-t border-[#F2EFE8] pt-2">
-            <span className="text-[10px] text-[#78716C]">
-              مبنای سهمیه: کلید Gemini سرور پروژه
-            </span>
+            <button
+              type="button"
+              onClick={() => void onRunLiveProbe()}
+              disabled={probing}
+              className="inline-flex min-h-[28px] items-center gap-1 rounded-md px-2 py-0.5 text-[10.5px] font-bold text-[#14532D] hover:bg-[#F2F7F4] cursor-pointer"
+            >
+              <RefreshCw className={`h-3 w-3 ${probing ? 'animate-spin' : ''}`} />
+              <span>استعلام زنده مجدد</span>
+            </button>
             <button
               type="button"
               onClick={() => setInfoOpen(true)}
-              className="inline-flex min-h-[28px] shrink-0 items-center gap-1 rounded-md px-2 py-0.5 text-[10.5px] font-bold text-[#1E3A5F] hover:bg-[#EEF3F8] transition-colors cursor-pointer whitespace-nowrap"
+              className="inline-flex min-h-[28px] shrink-0 items-center gap-1 rounded-md px-2 py-0.5 text-[10.5px] font-bold text-[#1E3A5F] hover:bg-[#EEF3F8] cursor-pointer whitespace-nowrap"
             >
               <Info className="h-3 w-3" />
-              <span>راهنمای فنی و مقایسه سهمیه</span>
+              <span>محاسبه ساده و جزئیات</span>
             </button>
           </div>
         </div>
       )}
 
-      {/* Technical Quota & Calculation Info Modal */}
       <AiQuotaInfoModal
         open={infoOpen}
         onClose={() => setInfoOpen(false)}
@@ -301,8 +360,12 @@ export const AiQuotaGauge: React.FC<AiQuotaGaugeProps> = ({
         aiModel={aiModel}
         googleSearchMode={googleSearchMode}
         useAiBackend={useAiBackend}
+        providerConfig={providerConfig}
+        probeData={probeData}
+        probing={probing}
+        onRunLiveProbe={onRunLiveProbe}
+        onOpenProviderSettings={onOpenProviderSettings}
       />
     </section>
   );
 };
-

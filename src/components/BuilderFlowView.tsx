@@ -54,10 +54,10 @@ const MODELS: Array<{
     levels: ['LOW', 'MEDIUM', 'HIGH', 'XHIGH'],
   },
   {
-    id: 'gemini-3.1-flash-lite',
-    name: 'Gemini 3.1 Flash Lite (سریع)',
-    badge: 'سرعت بالا',
-    desc: 'مناسب برای فایل‌های سبک و کوتاه یا زمانی که سرعت پردازش اولویت اصلی است.',
+    id: 'gemini-3.8-flash',
+    name: 'Gemini 3.8 Flash (فلش ۳.۸)',
+    badge: 'سرعت بالا و دقیق',
+    desc: 'مناسب برای پردازش سریع اسناد، فصل‌بندی و بازبینی روان با دقت بالا.',
     levels: ['MINIMAL', 'LOW', 'MEDIUM', 'HIGH'],
   },
 ];

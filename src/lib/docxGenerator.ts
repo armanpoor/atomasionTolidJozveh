@@ -6,11 +6,13 @@ import {
   Header,
   HeadingLevel,
   ImageRun,
+  LeaderType,
   Packer,
   PageBreak,
   PageNumber,
   Paragraph,
   ShadingType,
+  TabStopType,
   Table,
   TableCell,
   TableLayoutType,
@@ -21,13 +23,19 @@ import {
 } from 'docx';
 import {
   CalloutBlock,
-  CalloutVariant,
   ContentBlock,
   DocxExportConfig,
   ParsedBook,
   TableBlock,
 } from './bookTypes';
 import { rasterizeBookDiagrams } from './aiOrganizer';
+import { getCalloutTheme, SPECIAL_FRAME_THEMES } from './calloutThemes';
+import {
+  computeContentWidthDxa,
+  enforceRtlOoxmlIntegrity,
+  HEADER_CHAPTER_STYLEREF_MARKER,
+} from './docxRtlPostProcessor';
+import { segmentBidiTechnicalRuns } from './ecuTechnicalIntegrity';
 import { toPersianDigits } from './formatParsers';
 
 const COLORS = {
@@ -62,8 +70,9 @@ function makeFontSpec(fontFamily: string) {
 }
 
 /**
- * Splits text containing inline **bold**, inline `code`, and [[N]](#footnote-N) citations
- * into properly styled RTL TextRuns with Vazir Medium applied on complex scripts (cs).
+ * Splits text containing inline **bold**, inline `code`, [[N]](#footnote-N) citations,
+ * and technical LTR tokens (hex 0x..., DTC P0135, ECU ME7.4.4, ratios 14.7:1, signed -2.5°)
+ * into UAX #9 BiDi-safe TextRuns with Vazir Medium on Persian runs and isolated LTR runs for technical tokens.
  */
 function buildInlineRuns(
   rawText: string,
@@ -74,6 +83,50 @@ function buildInlineRuns(
 ): TextRun[] {
   const runs: TextRun[] = [];
   const font = makeFontSpec(fontFamily);
+  const codeFont = { ascii: 'Consolas', hAnsi: 'Consolas', cs: fontFamily, eastAsia: fontFamily };
+
+  const pushBidiSegmentedRuns = (textChunk: string, bold: boolean) => {
+    const bidiSegments = segmentBidiTechnicalRuns(textChunk);
+    for (const part of bidiSegments) {
+      if (part.kind === 'ltr_code') {
+        runs.push(
+          new TextRun({
+            text: `\u2066${part.text}\u2069`,
+            font: codeFont,
+            size: Math.max(16, sizeHalfPt - 1),
+            bold,
+            color: baseColor === COLORS.white ? COLORS.white : COLORS.primary,
+            rightToLeft: false,
+            language: { value: 'en-US' },
+          })
+        );
+      } else if (part.kind === 'ltr_tech') {
+        runs.push(
+          new TextRun({
+            text: `\u2066${part.text}\u2069`,
+            font,
+            size: sizeHalfPt,
+            bold,
+            color: baseColor,
+            rightToLeft: false,
+            language: { value: 'en-US' },
+          })
+        );
+      } else {
+        runs.push(
+          new TextRun({
+            text: part.text,
+            font,
+            size: sizeHalfPt,
+            bold,
+            color: baseColor,
+            rightToLeft: true,
+            language: { value: 'fa-IR', bidirectional: 'fa-IR' },
+          })
+        );
+      }
+    }
+  };
 
   // Tokenize bold (**...**), inline footnote [[N]](#footnote-N), and inline code (`...`)
   const tokenRx = /(\*\*[^*]+\*\*|\[\[\d+\]\]\(#footnote-\d+\)|`[^`]+`)/g;
@@ -96,104 +149,70 @@ function buildInlineRuns(
     }
 
     if (seg.startsWith('**') && seg.endsWith('**') && seg.length > 4) {
-      runs.push(
-        new TextRun({
-          text: seg.slice(2, -2),
-          font,
-          size: sizeHalfPt,
-          bold: true,
-          color: baseColor,
-          rightToLeft: true,
-        })
-      );
+      pushBidiSegmentedRuns(seg.slice(2, -2), true);
       continue;
     }
 
     if (seg.startsWith('`') && seg.endsWith('`') && seg.length > 2) {
       runs.push(
         new TextRun({
-          text: seg.slice(1, -1),
-          font: { ascii: 'Consolas', hAnsi: 'Consolas', cs: fontFamily, eastAsia: fontFamily },
+          text: `\u2066${seg.slice(1, -1)}\u2069`,
+          font: codeFont,
           size: Math.max(16, sizeHalfPt - 2),
-          color: COLORS.primary,
+          color: baseColor === COLORS.white ? COLORS.white : COLORS.primary,
           rightToLeft: false,
+          language: { value: 'en-US' },
         })
       );
       continue;
     }
 
-    runs.push(
-      new TextRun({
-        text: seg,
-        font,
-        size: sizeHalfPt,
-        bold: forceBold,
-        color: baseColor,
-        rightToLeft: true,
-      })
-    );
+    pushBidiSegmentedRuns(seg, forceBold);
   }
 
   return runs;
 }
 
-function getCalloutPalette(variant: CalloutVariant): { bg: string; accent: string; label: string } {
-  switch (variant) {
-    case 'warning':
-      return { bg: COLORS.warningBg, accent: COLORS.warningAccent, label: 'هشدار و الزام بحرانی' };
-    case 'qa':
-      return { bg: COLORS.qaBg, accent: COLORS.qaAccent, label: 'پرسش و پاسخ کارگاهی' };
-    case 'engineering':
-      return { bg: COLORS.engBg, accent: COLORS.engAccent, label: 'نکته مهندسی و کارگاهی' };
-    case 'revision':
-      return { bg: COLORS.revBg, accent: COLORS.revAccent, label: 'اصلاحیه و تدقیق علمی' };
-    case 'project':
-      return { bg: COLORS.primaryLight, accent: COLORS.primary, label: 'جمع‌بندی و نقشه راه' };
-    case 'concept':
-    default:
-      return { bg: COLORS.conceptBg, accent: COLORS.conceptAccent, label: 'مبانی علمی و پیش‌نیاز' };
-  }
-}
-
 function renderCalloutBox(callout: CalloutBlock, config: DocxExportConfig): Table {
-  const palette = getCalloutPalette(callout.variant);
+  const theme = getCalloutTheme(callout.variant);
   const bodySize = Math.round(config.baseFontSizePt * 2);
+  const cleanTitle = callout.title.replace(/^[⛔💡⚙️🔄❓📘]+\s*/, '').trim();
+  const titleText =
+    cleanTitle && !cleanTitle.includes(theme.labelFa)
+      ? `${theme.labelFa} · ${cleanTitle}`
+      : cleanTitle || theme.labelFa;
 
-  const cellParagraphs: Paragraph[] = [
-    new Paragraph({
-      bidirectional: true,
-      alignment: AlignmentType.RIGHT,
-      spacing: { before: 40, after: 80, line: 320 },
-      children: buildInlineRuns(callout.title, config.fontFamily, bodySize, palette.accent, true),
-    }),
-    ...callout.paragraphs.map(
-      (p) =>
-        new Paragraph({
-          bidirectional: true,
-          alignment: AlignmentType.RIGHT,
-          spacing: { before: 30, after: 60, line: 340 },
-          children: buildInlineRuns(p, config.fontFamily, bodySize - 1, COLORS.ink, false),
-        })
-    ),
-  ];
+  const headerParagraph = new Paragraph({
+    bidirectional: true,
+    alignment: AlignmentType.START,
+    keepNext: true,
+    widowControl: true,
+    spacing: { before: 30, after: 30, line: 300 },
+    children: buildInlineRuns(titleText, config.fontFamily, bodySize, theme.docxAccentHex, true),
+  });
+
+  const bodyParagraphs: Paragraph[] = callout.paragraphs.map(
+    (p) =>
+      new Paragraph({
+        bidirectional: true,
+        alignment: config.bodyAlignment === 'right' ? AlignmentType.START : AlignmentType.BOTH,
+        widowControl: true,
+        spacing: { before: 40, after: 65, line: 345 },
+        children: buildInlineRuns(p, config.fontFamily, bodySize - 1, COLORS.ink, false),
+      })
+  );
 
   return new Table({
     visuallyRightToLeft: true,
     width: { size: 100, type: WidthType.PERCENTAGE },
     layout: TableLayoutType.FIXED,
-    margins: {
-      top: 120,
-      bottom: 120,
-      left: 180,
-      right: 180,
-    },
     borders: {
-      top: { style: BorderStyle.SINGLE, size: 4, color: COLORS.border },
-      bottom: { style: BorderStyle.SINGLE, size: 4, color: COLORS.border },
-      left: { style: BorderStyle.SINGLE, size: 4, color: COLORS.border },
-      // Right accent border for RTL reading flow
-      right: { style: BorderStyle.SINGLE, size: 18, color: palette.accent },
-      insideHorizontal: { style: BorderStyle.NONE, size: 0, color: 'auto' },
+      top: { style: BorderStyle.SINGLE, size: 6, color: theme.docxBorderHex },
+      bottom: { style: BorderStyle.SINGLE, size: 6, color: theme.docxBorderHex },
+      left: { style: BorderStyle.SINGLE, size: 6, color: theme.docxBorderHex },
+      // Strong RTL right-edge accent stripe for clean technical book callouts
+      right: { style: BorderStyle.SINGLE, size: 28, color: theme.docxAccentHex },
+      insideHorizontal: { style: BorderStyle.SINGLE, size: 4, color: theme.docxDividerHex },
       insideVertical: { style: BorderStyle.NONE, size: 0, color: 'auto' },
     },
     rows: [
@@ -201,13 +220,57 @@ function renderCalloutBox(callout: CalloutBlock, config: DocxExportConfig): Tabl
         cantSplit: true,
         children: [
           new TableCell({
-            shading: { fill: palette.bg, type: ShadingType.CLEAR, color: 'auto' },
-            children: cellParagraphs,
+            shading: { fill: theme.docxHeaderBgHex, type: ShadingType.CLEAR, color: 'auto' },
+            margins: { top: 90, bottom: 90, left: 180, right: 200 },
+            children: [headerParagraph],
+          }),
+        ],
+      }),
+      new TableRow({
+        cantSplit: true,
+        children: [
+          new TableCell({
+            shading: { fill: theme.docxBodyBgHex, type: ShadingType.CLEAR, color: 'auto' },
+            margins: { top: 120, bottom: 120, left: 180, right: 200 },
+            children:
+              bodyParagraphs.length > 0
+                ? bodyParagraphs
+                : [
+                    new Paragraph({
+                      bidirectional: true,
+                      alignment: AlignmentType.START,
+                      children: [],
+                    }),
+                  ],
           }),
         ],
       }),
     ],
   });
+}
+
+function computeProportionalColumnWidths(headers: string[], rows: string[][]): number[] {
+  const colCount = Math.max(1, headers.length);
+  if (colCount === 1) return [100];
+  const scores = Array.from({ length: colCount }, (_, colIdx) => {
+    const headerLen = (headers[colIdx] || '').trim().length;
+    let avgCellLen = 0;
+    const sampleRows = rows.slice(0, 12);
+    for (const r of sampleRows) {
+      avgCellLen += Math.min(90, (r[colIdx] || '').trim().length);
+    }
+    const meanLen = sampleRows.length > 0 ? avgCellLen / sampleRows.length : headerLen;
+    return Math.max(8, Math.round(headerLen * 0.45 + meanLen * 0.55));
+  });
+  const total = scores.reduce((a, b) => a + b, 0) || colCount;
+  const minPct = Math.max(10, Math.floor(60 / colCount));
+  const rawPcts = scores.map((s) => Math.max(minPct, Math.round((s / total) * 100)));
+  const sum = rawPcts.reduce((a, b) => a + b, 0);
+  if (sum !== 100) {
+    const maxIdx = rawPcts.indexOf(Math.max(...rawPcts));
+    rawPcts[maxIdx] = Math.max(minPct, rawPcts[maxIdx] + (100 - sum));
+  }
+  return rawPcts;
 }
 
 function renderDataTable(table: TableBlock, config: DocxExportConfig): Array<Paragraph | Table> {
@@ -219,30 +282,31 @@ function renderDataTable(table: TableBlock, config: DocxExportConfig): Array<Par
     elements.push(
       new Paragraph({
         bidirectional: true,
-        alignment: AlignmentType.RIGHT,
+        alignment: AlignmentType.START,
         keepNext: true,
+        widowControl: true,
         spacing: { before: 200, after: 80, line: 300 },
         children: buildInlineRuns(table.caption, config.fontFamily, bodySize, COLORS.primary, true),
       })
     );
   }
 
-  const colCount = Math.max(1, table.headers.length);
-  const colPct = Math.floor(100 / colCount);
+  const colWidths = computeProportionalColumnWidths(table.headers, table.rows);
 
   const headerRow = new TableRow({
     tableHeader: true,
     cantSplit: true,
     children: table.headers.map(
-      (h) =>
+      (h, colIdx) =>
         new TableCell({
-          width: { size: colPct, type: WidthType.PERCENTAGE },
+          width: { size: colWidths[colIdx] ?? Math.floor(100 / Math.max(1, table.headers.length)), type: WidthType.PERCENTAGE },
           shading: { fill: COLORS.primary, type: ShadingType.CLEAR, color: 'auto' },
-          margins: { top: 90, bottom: 90, left: 110, right: 110 },
+          margins: { top: 95, bottom: 95, left: 110, right: 110 },
           children: [
             new Paragraph({
               bidirectional: true,
-              alignment: AlignmentType.RIGHT,
+              alignment: AlignmentType.START,
+              widowControl: true,
               spacing: { before: 20, after: 20, line: 280 },
               children: buildInlineRuns(h, config.fontFamily, cellSize, COLORS.white, true),
             }),
@@ -256,18 +320,19 @@ function renderDataTable(table: TableBlock, config: DocxExportConfig): Array<Par
       new TableRow({
         cantSplit: true,
         children: row.map(
-          (cell) =>
+          (cell, colIdx) =>
             new TableCell({
-              width: { size: colPct, type: WidthType.PERCENTAGE },
+              width: { size: colWidths[colIdx] ?? Math.floor(100 / Math.max(1, table.headers.length)), type: WidthType.PERCENTAGE },
               shading:
                 rIdx % 2 === 1
                   ? { fill: COLORS.zebra, type: ShadingType.CLEAR, color: 'auto' }
                   : undefined,
-              margins: { top: 75, bottom: 75, left: 110, right: 110 },
+              margins: { top: 80, bottom: 80, left: 110, right: 110 },
               children: [
                 new Paragraph({
                   bidirectional: true,
-                  alignment: AlignmentType.RIGHT,
+                  alignment: AlignmentType.START,
+                  widowControl: true,
                   spacing: { before: 20, after: 20, line: 300 },
                   children: buildInlineRuns(cell || '—', config.fontFamily, cellSize, COLORS.ink, false),
                 }),
@@ -283,8 +348,8 @@ function renderDataTable(table: TableBlock, config: DocxExportConfig): Array<Par
       width: { size: 100, type: WidthType.PERCENTAGE },
       layout: TableLayoutType.FIXED,
       borders: {
-        top: { style: BorderStyle.SINGLE, size: 6, color: COLORS.primary },
-        bottom: { style: BorderStyle.SINGLE, size: 6, color: COLORS.primary },
+        top: { style: BorderStyle.SINGLE, size: 10, color: COLORS.primary },
+        bottom: { style: BorderStyle.SINGLE, size: 10, color: COLORS.primary },
         left: { style: BorderStyle.SINGLE, size: 4, color: COLORS.border },
         right: { style: BorderStyle.SINGLE, size: 4, color: COLORS.border },
         insideHorizontal: { style: BorderStyle.SINGLE, size: 4, color: COLORS.border },
@@ -313,8 +378,9 @@ function renderContentBlock(block: ContentBlock, config: DocxExportConfig): Arra
       return [
         new Paragraph({
           bidirectional: true,
-          alignment: AlignmentType.RIGHT,
-          spacing: { before: 60, after: 110, line: 360 },
+          alignment: config.bodyAlignment === 'right' ? AlignmentType.START : AlignmentType.BOTH,
+          widowControl: true,
+          spacing: { before: 60, after: 115, line: 360 },
           children: buildInlineRuns(block.text, config.fontFamily, bodySize, COLORS.ink),
         }),
       ];
@@ -324,8 +390,10 @@ function renderContentBlock(block: ContentBlock, config: DocxExportConfig): Arra
         new Paragraph({
           heading: HeadingLevel.HEADING_4,
           bidirectional: true,
-          alignment: AlignmentType.RIGHT,
+          alignment: AlignmentType.START,
           keepNext: true,
+          keepLines: true,
+          widowControl: true,
           spacing: { before: 200, after: 80, line: 320 },
           children: buildInlineRuns(block.text, config.fontFamily, bodySize + 2, COLORS.primary, true),
         }),
@@ -341,24 +409,50 @@ function renderContentBlock(block: ContentBlock, config: DocxExportConfig): Arra
     case 'table':
       return renderDataTable(block, config);
 
-    case 'equation':
+    case 'equation': {
+      const eqTheme = SPECIAL_FRAME_THEMES.equation;
       return [
         new Table({
-          visuallyRightToLeft: false,
+          visuallyRightToLeft: true,
           width: { size: 100, type: WidthType.PERCENTAGE },
-          margins: { top: 100, bottom: 100, left: 160, right: 160 },
+          layout: TableLayoutType.FIXED,
           borders: {
-            top: { style: BorderStyle.SINGLE, size: 4, color: COLORS.border },
-            bottom: { style: BorderStyle.SINGLE, size: 4, color: COLORS.border },
-            left: { style: BorderStyle.SINGLE, size: 4, color: COLORS.border },
-            right: { style: BorderStyle.SINGLE, size: 4, color: COLORS.border },
+            top: { style: BorderStyle.SINGLE, size: 6, color: eqTheme.docxBorderHex },
+            bottom: { style: BorderStyle.SINGLE, size: 6, color: eqTheme.docxBorderHex },
+            left: { style: BorderStyle.SINGLE, size: 6, color: eqTheme.docxBorderHex },
+            right: { style: BorderStyle.SINGLE, size: 6, color: eqTheme.docxBorderHex },
+            insideHorizontal: { style: BorderStyle.SINGLE, size: 4, color: eqTheme.docxBorderHex },
+            insideVertical: { style: BorderStyle.NONE, size: 0, color: 'auto' },
           },
           rows: [
             new TableRow({
               cantSplit: true,
               children: [
                 new TableCell({
-                  shading: { fill: COLORS.zebra, type: ShadingType.CLEAR, color: 'auto' },
+                  shading: { fill: eqTheme.docxHeaderBgHex, type: ShadingType.CLEAR, color: 'auto' },
+                  margins: { top: 60, bottom: 60, left: 140, right: 140 },
+                  children: [
+                    new Paragraph({
+                      bidirectional: true,
+                      alignment: AlignmentType.RIGHT,
+                      children: buildInlineRuns(
+                        eqTheme.labelFa,
+                        config.fontFamily,
+                        Math.max(16, bodySize - 3),
+                        eqTheme.docxAccentHex,
+                        true
+                      ),
+                    }),
+                  ],
+                }),
+              ],
+            }),
+            new TableRow({
+              cantSplit: true,
+              children: [
+                new TableCell({
+                  shading: { fill: eqTheme.docxBodyBgHex, type: ShadingType.CLEAR, color: 'auto' },
+                  margins: { top: 100, bottom: 100, left: 160, right: 160 },
                   children: [
                     new Paragraph({
                       bidirectional: false,
@@ -375,7 +469,7 @@ function renderContentBlock(block: ContentBlock, config: DocxExportConfig): Arra
                           },
                           size: bodySize + 1,
                           bold: true,
-                          color: COLORS.primary,
+                          color: eqTheme.docxAccentHex,
                           rightToLeft: false,
                         }),
                       ],
@@ -388,15 +482,18 @@ function renderContentBlock(block: ContentBlock, config: DocxExportConfig): Arra
         }),
         new Paragraph({ bidirectional: true, spacing: { before: 0, after: 90 }, children: [] }),
       ];
+    }
 
     case 'list':
       return block.items.map(
         (item, idx) =>
           new Paragraph({
             bidirectional: true,
-            alignment: AlignmentType.RIGHT,
-            indent: { right: 320 },
-            spacing: { before: 40, after: 60, line: 340 },
+            alignment: config.bodyAlignment === 'right' ? AlignmentType.START : AlignmentType.BOTH,
+            widowControl: true,
+            // Under <w:bidi/> in OOXML, w:left is the visual RIGHT start-edge indent (hanging bullet)
+            indent: { left: 420, hanging: 240 },
+            spacing: { before: 40, after: 65, line: 345 },
             children: [
               new TextRun({
                 text: block.ordered ? `${toPersianDigits(idx + 1)}. ` : '▪ ',
@@ -599,31 +696,36 @@ export function buildWordDocument(book: ParsedBook, config: DocxExportConfig): D
   const children: Array<Paragraph | Table | TableOfContents> = [];
 
   // =========================================================================
-  // 1. COVER PAGE
+  // 1. ARCHITECTURAL COVER PAGE (RTL)
   // =========================================================================
   if (config.includeCoverPage) {
     children.push(
       new Paragraph({
         bidirectional: true,
-        alignment: AlignmentType.RIGHT,
-        spacing: { before: 400, after: 200 },
+        alignment: AlignmentType.START,
+        spacing: { before: 240, after: 180 },
+        shading: { fill: COLORS.primary, type: ShadingType.CLEAR, color: 'auto' },
         border: {
-          bottom: { style: BorderStyle.SINGLE, size: 18, color: COLORS.primary, space: 10 },
+          bottom: { style: BorderStyle.SINGLE, size: 18, color: 'B45309', space: 4 },
         },
         children: [
           new TextRun({
-            text: 'نسخه صفحه‌آرایی‌شده و یکپارچه برای نشر حرفه‌ای',
+            text: '  نسخه صفحه‌آرایی‌شده و یکپارچه · استاندارد نشر فنی و مهندسی',
             font: fontSpec,
-            size: 22,
-            color: COLORS.muted,
+            size: 20,
+            bold: true,
+            color: COLORS.white,
             rightToLeft: true,
           }),
         ],
       }),
       new Paragraph({
         bidirectional: true,
-        alignment: AlignmentType.RIGHT,
-        spacing: { before: 900, after: 240, line: 420 },
+        alignment: AlignmentType.START,
+        spacing: { before: 780, after: 220, line: 440 },
+        border: {
+          right: { style: BorderStyle.SINGLE, size: 32, color: COLORS.primary, space: 12 },
+        },
         children: [
           new TextRun({
             text: book.title,
@@ -637,8 +739,8 @@ export function buildWordDocument(book: ParsedBook, config: DocxExportConfig): D
       }),
       new Paragraph({
         bidirectional: true,
-        alignment: AlignmentType.RIGHT,
-        spacing: { before: 80, after: 600, line: 380 },
+        alignment: AlignmentType.START,
+        spacing: { before: 80, after: 560, line: 380 },
         children: [
           new TextRun({
             text: book.subtitle,
@@ -649,36 +751,37 @@ export function buildWordDocument(book: ParsedBook, config: DocxExportConfig): D
           }),
         ],
       }),
-      // Summary Edition Card
+      // Summary Edition & Integrity Card
       new Table({
         visuallyRightToLeft: true,
         width: { size: 100, type: WidthType.PERCENTAGE },
         layout: TableLayoutType.FIXED,
         borders: {
-          top: { style: BorderStyle.SINGLE, size: 8, color: COLORS.primary },
-          bottom: { style: BorderStyle.SINGLE, size: 8, color: COLORS.primary },
-          left: { style: BorderStyle.NONE, size: 0, color: 'auto' },
-          right: { style: BorderStyle.NONE, size: 0, color: 'auto' },
+          top: { style: BorderStyle.SINGLE, size: 10, color: COLORS.primary },
+          bottom: { style: BorderStyle.SINGLE, size: 10, color: COLORS.primary },
+          left: { style: BorderStyle.SINGLE, size: 4, color: COLORS.border },
+          right: { style: BorderStyle.SINGLE, size: 24, color: COLORS.primary },
           insideHorizontal: { style: BorderStyle.SINGLE, size: 4, color: COLORS.border },
-          insideVertical: { style: BorderStyle.NONE, size: 0, color: 'auto' },
+          insideVertical: { style: BorderStyle.SINGLE, size: 4, color: COLORS.border },
         },
         rows: [
-          ['فونت استاندارد سند', `${config.fontFamily} (کاملاً راست‌چین / RTL)`],
-          ['ساختار و حجم', `${toPersianDigits(book.volumes.length)} مجلد · ${toPersianDigits(book.chapters.length)} فصل · ${toPersianDigits(book.tableIndex.length)} جدول · ${toPersianDigits(book.footnotes.length)} پانویس یکتا`],
-          ['تضمین حفظ مفاهیم', `${toPersianDigits(book.audit?.conceptRetentionRate ?? 100)}٪ حفظ مفاهیم فنی (یکپارچه‌سازی بدون حذف دانش)`],
+          ['فونت و قطع استاندارد', `${config.fontFamily} · قطع ${config.paperSize} (۱۰۰٪ راست‌چین / RTL)`],
+          ['ساختار و حجم سند', `${toPersianDigits(book.volumes.length)} مجلد · ${toPersianDigits(book.chapters.length)} فصل · ${toPersianDigits(book.tableIndex.length)} جدول · ${toPersianDigits(book.footnotes.length)} پانویس یکتا`],
+          ['تضمین حفظ مفاهیم فنی', `${toPersianDigits(book.audit?.conceptRetentionRate ?? 100)}٪ حفظ بدون افت محتوایی و عددهای کالیبراسیون`],
           ['اسناد ورودی مبنا', book.sourceFiles.join('، ')],
         ].map(
           ([k, v]) =>
             new TableRow({
+              cantSplit: true,
               children: [
                 new TableCell({
                   width: { size: 32, type: WidthType.PERCENTAGE },
                   shading: { fill: COLORS.zebra, type: ShadingType.CLEAR, color: 'auto' },
-                  margins: { top: 90, bottom: 90, left: 120, right: 120 },
+                  margins: { top: 95, bottom: 95, left: 130, right: 140 },
                   children: [
                     new Paragraph({
                       bidirectional: true,
-                      alignment: AlignmentType.RIGHT,
+                      alignment: AlignmentType.START,
                       children: [
                         new TextRun({
                           text: k,
@@ -694,20 +797,12 @@ export function buildWordDocument(book: ParsedBook, config: DocxExportConfig): D
                 }),
                 new TableCell({
                   width: { size: 68, type: WidthType.PERCENTAGE },
-                  margins: { top: 90, bottom: 90, left: 120, right: 120 },
+                  margins: { top: 95, bottom: 95, left: 130, right: 140 },
                   children: [
                     new Paragraph({
                       bidirectional: true,
-                      alignment: AlignmentType.RIGHT,
-                      children: [
-                        new TextRun({
-                          text: v,
-                          font: fontSpec,
-                          size: 20,
-                          color: COLORS.ink,
-                          rightToLeft: true,
-                        }),
-                      ],
+                      alignment: AlignmentType.START,
+                      children: buildInlineRuns(v, config.fontFamily, 20, COLORS.ink, false),
                     }),
                   ],
                 }),
@@ -717,11 +812,15 @@ export function buildWordDocument(book: ParsedBook, config: DocxExportConfig): D
       }),
       new Paragraph({
         bidirectional: true,
-        alignment: AlignmentType.RIGHT,
-        spacing: { before: 700, after: 120 },
+        alignment: AlignmentType.START,
+        spacing: { before: 640, after: 120, line: 320 },
+        shading: { fill: COLORS.zebra, type: ShadingType.CLEAR, color: 'auto' },
+        border: {
+          right: { style: BorderStyle.SINGLE, size: 16, color: COLORS.border, space: 8 },
+        },
         children: [
           new TextRun({
-            text: 'راهنمای بروزرسانی فهرست مطالب در مایکروسافت ورد: هنگام باز کردن فایل، گزینه «Yes / بله» را در پنجره Update Fields انتخاب کنید یا روی فهرست مطالب راست‌کلیک کرده و Update Field را بزنید تا شماره صفحات به‌صورت خودکار محاسبه شوند.',
+            text: 'راهنمای بروزرسانی شماره صفحات فهرست مطالب در Word: فهرست مطالب به‌صورت پیش‌فرض کاملاً راست‌چین و آماده نمایش است. در صورت ویرایش مجدد متن در مایکروسافت ورد، کافی است در پنجره Update Fields گزینه «Yes / بله» را بزنید یا با کلید F9 شماره صفحات را خودکار بروز کنید.',
             font: fontSpec,
             size: 18,
             color: COLORS.muted,
@@ -729,25 +828,28 @@ export function buildWordDocument(book: ParsedBook, config: DocxExportConfig): D
           }),
         ],
       }),
-      new Paragraph({ children: [new PageBreak()] })
+      new Paragraph({ bidirectional: true, children: [new PageBreak()] })
     );
   }
 
   // =========================================================================
-  // 2. AUTOMATIC WORD TABLE OF CONTENTS
+  // 2. 100% RTL AUTOMATIC WORD TABLE OF CONTENTS (Post-processed with pre-rendered rows + dot leaders)
   // =========================================================================
   if (config.includeAutoToc) {
     children.push(
       new Paragraph({
+        style: 'TOCHeading',
         bidirectional: true,
-        alignment: AlignmentType.RIGHT,
-        spacing: { before: 120, after: 200 },
+        alignment: AlignmentType.START,
+        keepNext: true,
+        spacing: { before: 120, after: 220 },
         border: {
+          right: { style: BorderStyle.SINGLE, size: 24, color: COLORS.primary, space: 8 },
           bottom: { style: BorderStyle.SINGLE, size: 10, color: COLORS.primary, space: 6 },
         },
         children: [
           new TextRun({
-            text: 'فهرست مطالب خودکار',
+            text: 'فهرست مطالب',
             font: fontSpec,
             size: 34,
             bold: true,
@@ -760,7 +862,7 @@ export function buildWordDocument(book: ParsedBook, config: DocxExportConfig): D
         hyperlink: true,
         headingStyleRange: '1-3',
       }),
-      new Paragraph({ children: [new PageBreak()] })
+      new Paragraph({ bidirectional: true, children: [new PageBreak()] })
     );
   }
 
@@ -777,20 +879,21 @@ export function buildWordDocument(book: ParsedBook, config: DocxExportConfig): D
       const volTitle = volObj?.title || chapter.volumeTitle;
 
       if (config.includeVolumeDividers && children.length > 0 && lastVolumeIndex > 1) {
-        children.push(new Paragraph({ children: [new PageBreak()] }));
+        children.push(new Paragraph({ bidirectional: true, children: [new PageBreak()] }));
       }
 
       children.push(
         new Paragraph({
           heading: HeadingLevel.HEADING_1,
           bidirectional: true,
-          alignment: AlignmentType.RIGHT,
+          alignment: AlignmentType.START,
           keepNext: true,
+          keepLines: true,
           spacing: { before: 320, after: 200, line: 380 },
           shading: { fill: COLORS.primaryLight, type: ShadingType.CLEAR, color: 'auto' },
           border: {
-            right: { style: BorderStyle.SINGLE, size: 24, color: COLORS.primary, space: 8 },
-            bottom: { style: BorderStyle.SINGLE, size: 6, color: COLORS.primary, space: 6 },
+            right: { style: BorderStyle.SINGLE, size: 28, color: COLORS.primary, space: 10 },
+            bottom: { style: BorderStyle.SINGLE, size: 8, color: COLORS.primary, space: 6 },
           },
           children: [
             new TextRun({
@@ -806,16 +909,19 @@ export function buildWordDocument(book: ParsedBook, config: DocxExportConfig): D
       );
     }
 
-    // Chapter Heading (Heading 2) — always starts cleanly
+    // Chapter Heading (Heading 2) — architectural banner with right vertical accent stripe
     children.push(
       new Paragraph({
         heading: HeadingLevel.HEADING_2,
         bidirectional: true,
-        alignment: AlignmentType.RIGHT,
+        alignment: AlignmentType.START,
         pageBreakBefore: chapter.chapterNumber > 1,
         keepNext: true,
-        spacing: { before: 240, after: 160, line: 360 },
+        keepLines: true,
+        spacing: { before: 220, after: 160, line: 360 },
+        shading: { fill: 'F4F7FA', type: ShadingType.CLEAR, color: 'auto' },
         border: {
+          right: { style: BorderStyle.SINGLE, size: 28, color: COLORS.primary, space: 10 },
           bottom: { style: BorderStyle.SINGLE, size: 12, color: COLORS.primary, space: 6 },
         },
         children: [
@@ -831,18 +937,55 @@ export function buildWordDocument(book: ParsedBook, config: DocxExportConfig): D
       })
     );
 
-    // Chapter Metadata Card
+    // Chapter Metadata Strip (Warm Stone Card)
     if (config.includeChapterMetaCards && chapter.meta.length > 0) {
       children.push(
-        ...renderDataTable(
-          {
-            type: 'table',
-            id: `meta_${chapter.id}`,
-            headers: ['شناسه فصل', 'مشخصات'],
-            rows: chapter.meta.map((m) => [m.label, m.value]),
+        new Table({
+          visuallyRightToLeft: true,
+          width: { size: 100, type: WidthType.PERCENTAGE },
+          layout: TableLayoutType.FIXED,
+          borders: {
+            top: { style: BorderStyle.SINGLE, size: 6, color: COLORS.border },
+            bottom: { style: BorderStyle.SINGLE, size: 6, color: COLORS.border },
+            left: { style: BorderStyle.SINGLE, size: 4, color: COLORS.border },
+            right: { style: BorderStyle.SINGLE, size: 18, color: COLORS.primary },
+            insideHorizontal: { style: BorderStyle.SINGLE, size: 4, color: 'E7E2D8' },
+            insideVertical: { style: BorderStyle.SINGLE, size: 4, color: 'E7E2D8' },
           },
-          config
-        )
+          rows: chapter.meta.map(
+            (m) =>
+              new TableRow({
+                cantSplit: true,
+                children: [
+                  new TableCell({
+                    width: { size: 26, type: WidthType.PERCENTAGE },
+                    shading: { fill: 'EFECE4', type: ShadingType.CLEAR, color: 'auto' },
+                    margins: { top: 65, bottom: 65, left: 100, right: 120 },
+                    children: [
+                      new Paragraph({
+                        bidirectional: true,
+                        alignment: AlignmentType.START,
+                        children: buildInlineRuns(m.label, config.fontFamily, Math.max(17, bodySize - 2), COLORS.primary, true),
+                      }),
+                    ],
+                  }),
+                  new TableCell({
+                    width: { size: 74, type: WidthType.PERCENTAGE },
+                    shading: { fill: COLORS.zebra, type: ShadingType.CLEAR, color: 'auto' },
+                    margins: { top: 65, bottom: 65, left: 100, right: 120 },
+                    children: [
+                      new Paragraph({
+                        bidirectional: true,
+                        alignment: AlignmentType.START,
+                        children: buildInlineRuns(m.value, config.fontFamily, Math.max(17, bodySize - 2), COLORS.ink, false),
+                      }),
+                    ],
+                  }),
+                ],
+              })
+          ),
+        }),
+        new Paragraph({ bidirectional: true, spacing: { before: 0, after: 100 }, children: [] })
       );
     }
 
@@ -858,9 +1001,13 @@ export function buildWordDocument(book: ParsedBook, config: DocxExportConfig): D
         new Paragraph({
           heading: HeadingLevel.HEADING_3,
           bidirectional: true,
-          alignment: AlignmentType.RIGHT,
+          alignment: AlignmentType.START,
           keepNext: true,
+          keepLines: true,
           spacing: { before: 260, after: 110, line: 340 },
+          border: {
+            bottom: { style: BorderStyle.SINGLE, size: 4, color: COLORS.border, space: 4 },
+          },
           children: [
             new TextRun({
               text: headingLabel,
@@ -1059,24 +1206,74 @@ export function buildWordDocument(book: ParsedBook, config: DocxExportConfig): D
   }
 
   // =========================================================================
-  // 5. DOCUMENT STYLES & SECTION CONFIGURATION (RTL + Vazir Medium + UpdateFields)
+  // 5. DOCUMENT STYLES, DYNAMIC STYLEREF HEADER, RTL TOC STYLES & SECTION CONFIG
   // =========================================================================
+  const contentWidthDxa = computeContentWidthDxa(config);
+  const tocTabStop = {
+    type: TabStopType.RIGHT,
+    leader: LeaderType.DOT,
+    position: contentWidthDxa,
+  };
+
   const headerObj = config.includeHeadersAndFooters
     ? new Header({
         children: [
-          new Paragraph({
-            bidirectional: true,
-            alignment: AlignmentType.LEFT,
-            border: {
-              bottom: { style: BorderStyle.SINGLE, size: 4, color: COLORS.border, space: 4 },
+          new Table({
+            visuallyRightToLeft: true,
+            width: { size: 100, type: WidthType.PERCENTAGE },
+            layout: TableLayoutType.FIXED,
+            borders: {
+              top: { style: BorderStyle.NONE, size: 0, color: 'auto' },
+              left: { style: BorderStyle.NONE, size: 0, color: 'auto' },
+              right: { style: BorderStyle.NONE, size: 0, color: 'auto' },
+              insideHorizontal: { style: BorderStyle.NONE, size: 0, color: 'auto' },
+              insideVertical: { style: BorderStyle.NONE, size: 0, color: 'auto' },
+              bottom: { style: BorderStyle.SINGLE, size: 6, color: COLORS.border },
             },
-            children: [
-              new TextRun({
-                text: book.title,
-                font: fontSpec,
-                size: 17,
-                color: COLORS.muted,
-                rightToLeft: true,
+            rows: [
+              new TableRow({
+                cantSplit: true,
+                children: [
+                  new TableCell({
+                    width: { size: 52, type: WidthType.PERCENTAGE },
+                    margins: { top: 0, bottom: 60, left: 60, right: 0 },
+                    children: [
+                      new Paragraph({
+                        bidirectional: true,
+                        alignment: AlignmentType.START,
+                        children: [
+                          new TextRun({
+                            text: book.title,
+                            font: fontSpec,
+                            size: 17,
+                            color: COLORS.muted,
+                            rightToLeft: true,
+                          }),
+                        ],
+                      }),
+                    ],
+                  }),
+                  new TableCell({
+                    width: { size: 48, type: WidthType.PERCENTAGE },
+                    margins: { top: 0, bottom: 60, left: 0, right: 60 },
+                    children: [
+                      new Paragraph({
+                        bidirectional: true,
+                        alignment: AlignmentType.END,
+                        children: [
+                          new TextRun({
+                            text: HEADER_CHAPTER_STYLEREF_MARKER,
+                            font: fontSpec,
+                            size: 17,
+                            bold: true,
+                            color: COLORS.primary,
+                            rightToLeft: true,
+                          }),
+                        ],
+                      }),
+                    ],
+                  }),
+                ],
               }),
             ],
           }),
@@ -1091,8 +1288,9 @@ export function buildWordDocument(book: ParsedBook, config: DocxExportConfig): D
             bidirectional: true,
             alignment: AlignmentType.CENTER,
             border: {
-              top: { style: BorderStyle.SINGLE, size: 4, color: COLORS.border, space: 4 },
+              top: { style: BorderStyle.SINGLE, size: 6, color: COLORS.border, space: 6 },
             },
+            spacing: { before: 80, after: 0 },
             children: [
               new TextRun({
                 text: 'صفحه ',
@@ -1104,7 +1302,7 @@ export function buildWordDocument(book: ParsedBook, config: DocxExportConfig): D
               new TextRun({
                 children: [PageNumber.CURRENT],
                 font: fontSpec,
-                size: 18,
+                size: 19,
                 bold: true,
                 color: COLORS.primary,
               }),
@@ -1142,9 +1340,10 @@ export function buildWordDocument(book: ParsedBook, config: DocxExportConfig): D
             size: bodySize,
             color: COLORS.ink,
             rightToLeft: true,
+            language: { value: 'en-US', bidirectional: 'fa-IR' },
           },
           paragraph: {
-            alignment: AlignmentType.RIGHT,
+            alignment: AlignmentType.START,
             spacing: { line: 360, after: 100 },
           },
         },
@@ -1155,9 +1354,12 @@ export function buildWordDocument(book: ParsedBook, config: DocxExportConfig): D
             bold: true,
             color: COLORS.primary,
             rightToLeft: true,
+            language: { value: 'en-US', bidirectional: 'fa-IR' },
           },
           paragraph: {
-            alignment: AlignmentType.RIGHT,
+            alignment: AlignmentType.START,
+            keepNext: true,
+            keepLines: true,
             spacing: { before: 320, after: 180 },
           },
         },
@@ -1168,9 +1370,12 @@ export function buildWordDocument(book: ParsedBook, config: DocxExportConfig): D
             bold: true,
             color: COLORS.primary,
             rightToLeft: true,
+            language: { value: 'en-US', bidirectional: 'fa-IR' },
           },
           paragraph: {
-            alignment: AlignmentType.RIGHT,
+            alignment: AlignmentType.START,
+            keepNext: true,
+            keepLines: true,
             spacing: { before: 240, after: 140 },
           },
         },
@@ -1181,9 +1386,12 @@ export function buildWordDocument(book: ParsedBook, config: DocxExportConfig): D
             bold: true,
             color: COLORS.primary,
             rightToLeft: true,
+            language: { value: 'en-US', bidirectional: 'fa-IR' },
           },
           paragraph: {
-            alignment: AlignmentType.RIGHT,
+            alignment: AlignmentType.START,
+            keepNext: true,
+            keepLines: true,
             spacing: { before: 220, after: 100 },
           },
         },
@@ -1194,13 +1402,122 @@ export function buildWordDocument(book: ParsedBook, config: DocxExportConfig): D
             bold: true,
             color: COLORS.primary,
             rightToLeft: true,
+            language: { value: 'en-US', bidirectional: 'fa-IR' },
           },
           paragraph: {
-            alignment: AlignmentType.RIGHT,
+            alignment: AlignmentType.START,
+            keepNext: true,
+            keepLines: true,
             spacing: { before: 180, after: 80 },
           },
         },
       },
+      paragraphStyles: [
+        {
+          id: 'TOCHeading',
+          name: 'TOC Heading',
+          basedOn: 'Normal',
+          next: 'Normal',
+          run: {
+            font: fontSpec,
+            size: 34,
+            bold: true,
+            color: COLORS.primary,
+            rightToLeft: true,
+            language: { value: 'fa-IR', bidirectional: 'fa-IR' },
+          },
+          paragraph: {
+            alignment: AlignmentType.START,
+            keepNext: true,
+            spacing: { before: 120, after: 200 },
+          },
+        },
+        {
+          id: 'TOC1',
+          name: 'toc 1',
+          basedOn: 'Normal',
+          next: 'Normal',
+          run: {
+            font: fontSpec,
+            size: 23,
+            bold: true,
+            color: COLORS.primary,
+            rightToLeft: true,
+            language: { value: 'fa-IR', bidirectional: 'fa-IR' },
+          },
+          paragraph: {
+            alignment: AlignmentType.START,
+            spacing: { before: 140, after: 45, line: 300 },
+          },
+        },
+        {
+          id: 'TOC2',
+          name: 'toc 2',
+          basedOn: 'Normal',
+          next: 'Normal',
+          run: {
+            font: fontSpec,
+            size: 21,
+            bold: true,
+            color: COLORS.ink,
+            rightToLeft: true,
+            language: { value: 'fa-IR', bidirectional: 'fa-IR' },
+          },
+          paragraph: {
+            alignment: AlignmentType.START,
+            indent: { left: 260 },
+            spacing: { before: 70, after: 35, line: 300 },
+          },
+        },
+        {
+          id: 'TOC3',
+          name: 'toc 3',
+          basedOn: 'Normal',
+          next: 'Normal',
+          run: {
+            font: fontSpec,
+            size: 19,
+            color: COLORS.muted,
+            rightToLeft: true,
+            language: { value: 'fa-IR', bidirectional: 'fa-IR' },
+          },
+          paragraph: {
+            alignment: AlignmentType.START,
+            indent: { left: 560 },
+            spacing: { before: 25, after: 25, line: 290 },
+          },
+        },
+        {
+          id: 'TOC4',
+          name: 'toc 4',
+          basedOn: 'Normal',
+          next: 'Normal',
+          run: {
+            font: fontSpec,
+            size: 18,
+            color: COLORS.muted,
+            rightToLeft: true,
+            language: { value: 'fa-IR', bidirectional: 'fa-IR' },
+          },
+          paragraph: {
+            alignment: AlignmentType.START,
+            indent: { left: 820 },
+            spacing: { before: 20, after: 20, line: 280 },
+          },
+        },
+      ],
+      characterStyles: [
+        {
+          id: 'Hyperlink',
+          name: 'Hyperlink',
+          run: {
+            font: fontSpec,
+            color: COLORS.primary,
+            rightToLeft: true,
+            language: { value: 'fa-IR', bidirectional: 'fa-IR' },
+          },
+        },
+      ],
     },
     sections: [
       {
@@ -1224,18 +1541,25 @@ export function buildWordDocument(book: ParsedBook, config: DocxExportConfig): D
   });
 }
 
-export async function generateDocxBlob(book: ParsedBook, config: DocxExportConfig): Promise<Blob> {
-  const readyBook = await rasterizeBookDiagrams(book);
-  const doc = buildWordDocument(readyBook, config);
-  return Packer.toBlob(doc);
-}
-
 export async function generateDocxUint8Array(
   book: ParsedBook,
   config: DocxExportConfig
 ): Promise<Uint8Array> {
   const readyBook = await rasterizeBookDiagrams(book);
   const doc = buildWordDocument(readyBook, config);
-  const buffer = await Packer.toBuffer(doc);
-  return new Uint8Array(buffer);
+  const rawBuffer = await Packer.toBuffer(doc);
+  return enforceRtlOoxmlIntegrity(new Uint8Array(rawBuffer), readyBook, config);
+}
+
+export async function generateDocxBlob(book: ParsedBook, config: DocxExportConfig): Promise<Blob> {
+  const readyBook = await rasterizeBookDiagrams(book);
+  const doc = buildWordDocument(readyBook, config);
+  const rawBlob = await Packer.toBlob(doc);
+  const rawBytes = new Uint8Array(await rawBlob.arrayBuffer());
+  const hardenedBytes = await enforceRtlOoxmlIntegrity(rawBytes, readyBook, config);
+  const safeBuffer = new ArrayBuffer(hardenedBytes.byteLength);
+  new Uint8Array(safeBuffer).set(hardenedBytes);
+  return new Blob([safeBuffer], {
+    type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  });
 }

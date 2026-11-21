@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import {
   Check,
   ExternalLink,
+  FileAudio,
   Globe,
   Loader2,
   MessageSquare,
@@ -28,10 +29,13 @@ interface AssistantDrawerProps {
   open: boolean;
   onClose: () => void;
   uid: string;
+  isGuest?: boolean;
   projectId: string | null;
   outlineNodes: OutlineNodeDto[];
   aiModel: string;
   getIdToken: () => Promise<string>;
+  webSearchEngineLabel?: string;
+  onTranscribeAudio?: (file: File) => Promise<{ transcript: string; providerLabelFa: string }>;
   onSendChat: (payload: {
     message: string;
     history: Array<{ role: 'user' | 'model'; text: string }>;
@@ -86,10 +90,13 @@ export const AssistantDrawer: React.FC<AssistantDrawerProps> = ({
   open,
   onClose,
   uid,
+  isGuest = false,
   projectId,
   outlineNodes,
   aiModel,
   getIdToken,
+  webSearchEngineLabel = 'جستجوی زنده وب',
+  onTranscribeAudio,
   onSendChat,
   onApplyProposal,
 }) => {
@@ -97,12 +104,14 @@ export const AssistantDrawer: React.FC<AssistantDrawerProps> = ({
   const [messages, setMessages] = useState<FirestoreChatMessage[]>([]);
   const [inputText, setInputText] = useState('');
   const [sending, setSending] = useState(false);
+  const [transcribingFile, setTranscribingFile] = useState(false);
   const [enableWebSearch, setEnableWebSearch] = useState(false);
   const [localProposals, setLocalProposals] = useState<Record<string, ChatProposal[]>>({});
   const [localSources, setLocalSources] = useState<Record<string, WebGroundingSource[]>>({});
   const [appliedIds, setAppliedIds] = useState<Set<string>>(new Set());
   const [applyingId, setApplyingId] = useState<string | null>(null);
   const [chatError, setChatError] = useState<string | null>(null);
+  const chatAudioInputRef = useRef<HTMLInputElement | null>(null);
 
   // Live Voice states
   const [voiceActive, setVoiceActive] = useState(false);
@@ -129,7 +138,7 @@ export const AssistantDrawer: React.FC<AssistantDrawerProps> = ({
   }, [outlineNodes, targetNodeId]);
 
   useEffect(() => {
-    if (!uid || !projectId) {
+    if (!uid || !projectId || isGuest) {
       setMessages([]);
       return;
     }
@@ -137,7 +146,7 @@ export const AssistantDrawer: React.FC<AssistantDrawerProps> = ({
       setMessages(docs);
     });
     return () => unsub();
-  }, [uid, projectId]);
+  }, [uid, projectId, isGuest]);
 
   useEffect(() => {
     listEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -336,12 +345,30 @@ export const AssistantDrawer: React.FC<AssistantDrawerProps> = ({
 
     try {
       const userMsgId = `msg_u_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
-      await addProjectChatMessage(uid, projectId, {
-        id: userMsgId,
-        role: 'user',
-        source: 'text',
-        text,
-      });
+      if (isGuest) {
+        setMessages((prev) => [
+          ...prev,
+          {
+            id: userMsgId,
+            ownerId: uid,
+            projectId,
+            role: 'user',
+            source: 'text',
+            text,
+            hasProposal: false,
+            proposalApplied: false,
+            proposalSummary: '',
+            createdAt: Date.now(),
+          },
+        ]);
+      } else {
+        await addProjectChatMessage(uid, projectId, {
+          id: userMsgId,
+          role: 'user',
+          source: 'text',
+          text,
+        });
+      }
 
       const history = messages.slice(-8).map((m) => ({
         role: (m.role === 'assistant' ? 'model' : 'user') as 'user' | 'model',
@@ -356,14 +383,32 @@ export const AssistantDrawer: React.FC<AssistantDrawerProps> = ({
       });
 
       const assistantMsgId = `msg_a_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
-      await addProjectChatMessage(uid, projectId, {
-        id: assistantMsgId,
-        role: 'assistant',
-        source: 'text',
-        text: res.reply,
-        hasProposal: res.proposals.length > 0,
-        proposalSummary: res.proposals.map((p) => p.title).join(' · '),
-      });
+      if (isGuest) {
+        setMessages((prev) => [
+          ...prev,
+          {
+            id: assistantMsgId,
+            ownerId: uid,
+            projectId,
+            role: 'assistant',
+            source: 'text',
+            text: res.reply,
+            hasProposal: res.proposals.length > 0,
+            proposalApplied: false,
+            proposalSummary: res.proposals.map((p) => p.title).join(' · '),
+            createdAt: Date.now(),
+          },
+        ]);
+      } else {
+        await addProjectChatMessage(uid, projectId, {
+          id: assistantMsgId,
+          role: 'assistant',
+          source: 'text',
+          text: res.reply,
+          hasProposal: res.proposals.length > 0,
+          proposalSummary: res.proposals.map((p) => p.title).join(' · '),
+        });
+      }
 
       if (res.proposals.length > 0) {
         setLocalProposals((prev) => ({ ...prev, [assistantMsgId]: res.proposals }));
@@ -384,7 +429,7 @@ export const AssistantDrawer: React.FC<AssistantDrawerProps> = ({
     try {
       await onApplyProposal(proposal);
       setAppliedIds((prev) => new Set(prev).add(proposal.id));
-      if (messageId && projectId) {
+      if (messageId && projectId && !isGuest) {
         void markChatProposalApplied(uid, projectId, messageId).catch(() => {});
       }
     } catch (err) {
@@ -558,16 +603,67 @@ export const AssistantDrawer: React.FC<AssistantDrawerProps> = ({
             onSubmit={handleSubmitChat}
             className="border-t border-[#E2DDD3] bg-white p-3 space-y-2"
           >
-            <label className="inline-flex items-center gap-1.5 text-[11px] font-semibold text-[#5B21B6] cursor-pointer">
-              <input
-                type="checkbox"
-                checked={enableWebSearch}
-                onChange={(e) => setEnableWebSearch(e.target.checked)}
-                className="h-3.5 w-3.5 accent-[#5B21B6]"
-              />
-              <Globe className="h-3.5 w-3.5" />
-              <span>استفاده از جستجوی گوگل در این پاسخ</span>
-            </label>
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <label className="inline-flex items-center gap-1.5 text-[11px] font-semibold text-[#5B21B6] cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={enableWebSearch}
+                  onChange={(e) => setEnableWebSearch(e.target.checked)}
+                  className="h-3.5 w-3.5 accent-[#5B21B6]"
+                />
+                <Globe className="h-3.5 w-3.5" />
+                <span>
+                  جستجوی وب:{' '}
+                  <bdi dir="ltr" className="font-mono text-[10.5px]">
+                    {webSearchEngineLabel}
+                  </bdi>
+                </span>
+              </label>
+
+              {onTranscribeAudio && (
+                <>
+                  <input
+                    ref={chatAudioInputRef}
+                    type="file"
+                    accept="audio/*,.mp3,.wav,.m4a,.ogg,.webm,.flac"
+                    onChange={async (e) => {
+                      const file = e.target.files?.[0];
+                      e.target.value = '';
+                      if (!file || !projectId) return;
+                      setTranscribingFile(true);
+                      setChatError(null);
+                      try {
+                        const out = await onTranscribeAudio(file);
+                        setInputText((prev) =>
+                          prev.trim() ? `${prev.trim()}\n${out.transcript}` : out.transcript
+                        );
+                      } catch (err) {
+                        setChatError(
+                          err instanceof Error ? err.message : 'تبدیل ویس به متن ناموفق بود.'
+                        );
+                      } finally {
+                        setTranscribingFile(false);
+                      }
+                    }}
+                    className="hidden"
+                  />
+                  <button
+                    type="button"
+                    disabled={transcribingFile || sending || !projectId}
+                    onClick={() => chatAudioInputRef.current?.click()}
+                    title="آپلود فایل صوتی (MP3 / WAV / M4A / OGG) برای تبدیل خودکار به متن"
+                    className="inline-flex items-center gap-1 rounded-md border border-[#D6D0C4] bg-[#FAF9F6] px-2 py-1 text-[10.5px] font-bold text-[#1E3A5F] hover:bg-[#EEF3F8] disabled:opacity-50 cursor-pointer"
+                  >
+                    {transcribingFile ? (
+                      <Loader2 className="h-3 w-3 animate-spin" />
+                    ) : (
+                      <FileAudio className="h-3 w-3" />
+                    )}
+                    <span>{transcribingFile ? 'در حال پیاده‌سازی ویس...' : 'آپلود ویس به متن'}</span>
+                  </button>
+                </>
+              )}
+            </div>
 
             <div className="flex items-end gap-2">
               <textarea
@@ -580,12 +676,12 @@ export const AssistantDrawer: React.FC<AssistantDrawerProps> = ({
                     void handleSubmitChat(e);
                   }
                 }}
-                placeholder="فرمان ویرایش یا پرسش درباره سند بنویسید..."
+                placeholder="فرمان ویرایش بنویسید یا ویس آپلود کنید..."
                 className="flex-1 resize-none rounded-lg border border-[#D6D0C4] bg-[#FAF9F6] px-3 py-2 text-xs text-[#1A1816] focus:border-[#1E3A5F] focus:bg-white focus:outline-none"
               />
               <button
                 type="submit"
-                disabled={sending || !inputText.trim() || !projectId}
+                disabled={sending || transcribingFile || !inputText.trim() || !projectId}
                 aria-label="ارسال پیام"
                 className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-[#1E3A5F] text-white hover:bg-[#162C49] disabled:opacity-40 cursor-pointer"
               >

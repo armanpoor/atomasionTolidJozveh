@@ -1,22 +1,23 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   AlertCircle,
+  ArrowLeft,
   ArrowRight,
   BookOpen,
   Brain,
   CheckCircle2,
   Download,
-  FileCode,
-  FileText,
   Globe,
-  Layers,
+  Grid2x2,
+  History,
   ListTree,
   Loader2,
+  LogIn,
   LogOut,
   Menu,
   Printer,
-  ShieldCheck,
   Sparkles,
+  UserRound,
   X,
 } from 'lucide-react';
 import { useAuth } from './contexts/AuthContext';
@@ -25,17 +26,28 @@ import { WorkspaceSidebar } from './components/WorkspaceSidebar';
 import { PipelineStepper } from './components/PipelineStepper';
 import { OutlineEditorView } from './components/OutlineEditorView';
 import { AuditConflictsView } from './components/AuditConflictsView';
+import { StageExportView, StageIngestView } from './components/WorkflowStageViews';
+import { ProjectsDashboardWidget } from './components/ProjectsDashboardWidget';
 import { AssistantDrawer } from './components/AssistantDrawer';
 import { BookPreview } from './components/BookPreview';
 import {
   DeepReviewPanel,
-  DeepReviewProgressBanner,
   DeepReviewProgressState,
 } from './components/DeepReviewPanel';
+import { WinolsMapWorkbench } from './components/WinolsMapWorkbench';
+import { AiProviderModal } from './components/AiProviderModal';
+import { ProjectChangeLogModal } from './components/ProjectChangeLogModal';
+import { PrintPreviewModal } from './components/PrintPreviewModal';
 import { ChapterSidebar, SelectedChapterKey } from './components/ChapterSidebar';
 import { QueuedUploadFile } from './components/FileDropzone';
 import { ApiClient } from './lib/apiClient';
 import {
+  extractWinolsMapGuides,
+  WinolsExtractionReport,
+} from './lib/winolsMapGuide';
+import type { ProjectRevisionDto } from './lib/changeLogUtils';
+import {
+  AiModelId,
   ChatProposal,
   DEFAULT_DOCX_CONFIG,
   DeepReviewReportDto,
@@ -46,6 +58,19 @@ import {
   ProjectSummaryDto,
   WorkflowMode,
 } from './lib/bookTypes';
+import {
+  AiProviderConfig,
+  AiQuotaProbeResponse,
+  DEFAULT_AI_PROVIDER_CONFIG,
+  getProviderDisplaySummary,
+  normalizeGoogleModelId,
+  resolveCapabilityRoutingPlan,
+} from './lib/aiProviderConfig';
+import {
+  BOOK_WORKFLOW_STAGES,
+  BookWorkflowStageId,
+  computeWorkflowProgress,
+} from './lib/bookWorkflow';
 import { generateDocxBlob } from './lib/docxGenerator';
 import { extractAiUsageFromCheckpoint } from './lib/aiUsageMetrics';
 import { normalizeDeepReviewReport } from './lib/deepReviewStream';
@@ -59,8 +84,6 @@ import {
   subscribeProjectLiveState,
   upsertProjectLiveState,
 } from './lib/firebase';
-
-type CenterTab = 'outline' | 'preview' | 'audit';
 
 function makeSafeFileName(title: string, ext: 'docx' | 'md'): string {
   const safeBase = title
@@ -94,17 +117,44 @@ async function fileToBase64(file: File): Promise<string> {
 }
 
 export default function App() {
-  const { user, loading: authLoading, signOut, getIdToken } = useAuth();
-  const api = useMemo(() => new ApiClient(getIdToken), [getIdToken]);
+  const {
+    user,
+    isGuest,
+    loading: authLoading,
+    signInWithGoogle,
+    signOut,
+    getIdToken,
+  } = useAuth();
+
+  // Keep user's optional personal / custom API keys strictly in session memory (never persisted)
+  const [providerConfig, setProviderConfig] = useState<AiProviderConfig>(
+    DEFAULT_AI_PROVIDER_CONFIG
+  );
+  const providerConfigRef = useRef<AiProviderConfig>(providerConfig);
+  providerConfigRef.current = providerConfig;
+
+  const api = useMemo(
+    () => new ApiClient(getIdToken, () => providerConfigRef.current),
+    [getIdToken]
+  );
 
   const [projects, setProjects] = useState<ProjectSummaryDto[]>([]);
   const [activeProjectId, setActiveProjectId] = useState<string | null>(null);
   const [bundle, setBundle] = useState<ProjectBundleDto | null>(null);
   const [liveState, setLiveState] = useState<FirestoreProjectLiveState | null>(null);
 
-  const [centerTab, setCenterTab] = useState<CenterTab>('outline');
+  const [activeStage, setActiveStage] = useState<BookWorkflowStageId>(1);
   const [selectedView, setSelectedView] = useState<SelectedChapterKey>({ kind: 'cover' });
   const [assistantOpen, setAssistantOpen] = useState(false);
+  const [winolsWorkbenchOpen, setWinolsWorkbenchOpen] = useState(false);
+  const [providerModalOpen, setProviderModalOpen] = useState(false);
+  const [changeLogOpen, setChangeLogOpen] = useState(false);
+  const [revisions, setRevisions] = useState<ProjectRevisionDto[]>([]);
+  const [loadingRevisions, setLoadingRevisions] = useState(false);
+  const [revisionsError, setRevisionsError] = useState<string | null>(null);
+  const [rollingBackId, setRollingBackId] = useState<string | null>(null);
+  const [printPreviewOpen, setPrintPreviewOpen] = useState(false);
+  const [showDashboardOverview, setShowDashboardOverview] = useState(false);
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
   const [mobileChaptersOpen, setMobileChaptersOpen] = useState(false);
 
@@ -112,8 +162,13 @@ export default function App() {
   const [workflowMode, setWorkflowMode] = useState<WorkflowMode>('multi_merge');
   const [config, setConfig] = useState<DocxExportConfig>(DEFAULT_DOCX_CONFIG);
 
+  const [quotaProbe, setQuotaProbe] = useState<AiQuotaProbeResponse | null>(null);
+  const [probingQuota, setProbingQuota] = useState(false);
+  const lastAutoProbedProjectRef = useRef<string | null>(null);
+
   const [loadingProjects, setLoadingProjects] = useState(false);
   const [processing, setProcessing] = useState(false);
+  const [transcribingAudio, setTranscribingAudio] = useState(false);
   const [savingOutline, setSavingOutline] = useState(false);
   const [finalizing, setFinalizing] = useState(false);
   const [exportingDocx, setExportingDocx] = useState(false);
@@ -130,9 +185,9 @@ export default function App() {
   const [bannerToast, setBannerToast] = useState<string | null>(null);
   const pauseRequestedRef = useRef(false);
 
-  // Sync Firestore real-time state for active project
+  // Sync Firestore real-time state for active project (skipped in Guest Mode — no Firebase Auth session)
   useEffect(() => {
-    if (!user?.uid || !activeProjectId) {
+    if (!user?.uid || !activeProjectId || isGuest) {
       setLiveState(null);
       return;
     }
@@ -140,7 +195,7 @@ export default function App() {
       setLiveState(st);
     });
     return () => unsub();
-  }, [user?.uid, activeProjectId]);
+  }, [user?.uid, activeProjectId, isGuest]);
 
   const syncFirestoreJobState = useCallback(
     async (
@@ -153,7 +208,7 @@ export default function App() {
         workflowMode: WorkflowMode;
       }
     ) => {
-      if (!user?.uid) return;
+      if (!user?.uid || isGuest) return;
       const mappedStatus: FirestoreProjectLiveState['status'] =
         patch.status === 'ingesting' || patch.status === 'deduping' || patch.status === 'structuring'
           ? 'running'
@@ -177,7 +232,7 @@ export default function App() {
         console.error('Firestore live state sync warning:', err);
       }
     },
-    [user?.uid, bundle?.project.title, bundle?.sourceFiles.length, queuedFiles.length]
+    [user?.uid, isGuest, bundle?.project.title, bundle?.sourceFiles.length, queuedFiles.length]
   );
 
   const loadProjectBundle = useCallback(
@@ -191,6 +246,7 @@ export default function App() {
         setConfig({
           ...DEFAULT_DOCX_CONFIG,
           ...savedSettings,
+          aiModel: normalizeGoogleModelId(savedSettings.aiModel),
           optimization: {
             ...DEFAULT_DOCX_CONFIG.optimization,
             ...(savedSettings.optimization || {}),
@@ -200,11 +256,8 @@ export default function App() {
           (b.project.checkpointJson as { lastDeepReview?: unknown } | null)?.lastDeepReview
         );
         setDeepReviewReport(savedReview);
-        if (b.project.bookSnapshotJson) {
-          setCenterTab('preview');
-        } else if (b.outlineNodes.length > 0) {
-          setCenterTab('outline');
-        }
+        const progress = computeWorkflowProgress({ bundle: b, queuedFilesCount: 0 });
+        setActiveStage(progress.recommendedStage);
       } catch (err) {
         setBannerError(err instanceof Error ? err.message : 'خطا در بارگذاری پروژه.');
       }
@@ -212,12 +265,80 @@ export default function App() {
     [api]
   );
 
-  // Initial Cloud SQL projects load on sign-in
+  const handleRunLiveProbe = useCallback(
+    async (overrideConfig?: AiProviderConfig, overrideModel?: AiModelId) => {
+      if (!user) return;
+      setProbingQuota(true);
+      try {
+        const targetModel = overrideModel || config.aiModel;
+        const result = await api.probeAiQuota(
+          {
+            projectId: activeProjectId || undefined,
+            model: targetModel,
+          },
+          overrideConfig
+        );
+        setQuotaProbe(result);
+      } catch (err) {
+        setBannerError(
+          err instanceof Error ? err.message : 'خطا در استعلام زنده سهمیه هوش مصنوعی.'
+        );
+      } finally {
+        setProbingQuota(false);
+      }
+    },
+    [user, api, activeProjectId, config.aiModel]
+  );
+
+  const handleSaveProviderConfig = useCallback(
+    (nextConfig: AiProviderConfig, nextGoogleModel?: AiModelId) => {
+      providerConfigRef.current = nextConfig;
+      setProviderConfig(nextConfig);
+      if (nextGoogleModel) {
+        const normalized = normalizeGoogleModelId(nextGoogleModel);
+        setConfig((prev) => {
+          const updated = { ...prev, aiModel: normalized };
+          if (activeProjectId) {
+            void api
+              .updateProject(activeProjectId, {
+                settingsJson: updated as unknown as Record<string, unknown>,
+              })
+              .catch(() => {
+                // ignore transient save warning
+              });
+          }
+          return updated;
+        });
+      }
+      const providerSummary = getProviderDisplaySummary(
+        nextConfig,
+        nextGoogleModel || config.aiModel
+      );
+      setBannerToast(
+        `${providerSummary.providerLabel} (${providerSummary.modelLabel} · ${providerSummary.keySourceLabel}) برای این نشست فعال شد.`
+      );
+      void handleRunLiveProbe(nextConfig, nextGoogleModel);
+    },
+    [activeProjectId, api, config.aiModel, handleRunLiveProbe]
+  );
+
+  // Automatic live quota probe once per active project
+  useEffect(() => {
+    if (!user || !activeProjectId) return;
+    if (lastAutoProbedProjectRef.current === activeProjectId) return;
+    lastAutoProbedProjectRef.current = activeProjectId;
+    void handleRunLiveProbe();
+  }, [user, activeProjectId, handleRunLiveProbe]);
+
+  // Initial Cloud SQL projects load on sign-in or Guest entry
   useEffect(() => {
     if (!user) {
       setProjects([]);
       setActiveProjectId(null);
       setBundle(null);
+      setRevisions([]);
+      setChangeLogOpen(false);
+      setPrintPreviewOpen(false);
       return;
     }
     let cancelled = false;
@@ -229,15 +350,30 @@ export default function App() {
       .then(async ({ projects: list }) => {
         if (cancelled) return;
         if (list.length === 0) {
-          const created = await api.createProject({
-            title: 'پروژه تدوین و یکپارچه‌سازی جدید',
-            workflowMode: 'multi_merge',
-            settingsJson: DEFAULT_DOCX_CONFIG as unknown as Record<string, unknown>,
-          });
-          if (cancelled) return;
-          setProjects([created.project]);
-          setBundle(created);
-          setActiveProjectId(created.project.id);
+          if (isGuest) {
+            const seeded = await api.seedGuestDemoProject();
+            if (cancelled) return;
+            setProjects([seeded.project]);
+            setBundle(seeded);
+            setActiveProjectId(seeded.project.id);
+            setWorkflowMode(seeded.project.workflowMode);
+            setSelectedView({ kind: 'cover' });
+            const progress = computeWorkflowProgress({ bundle: seeded, queuedFilesCount: 0 });
+            setActiveStage(progress.recommendedStage);
+            setBannerToast(
+              'حالت مهمان فعال شد — یک پروژه نمونه آماده با تاریخچه تغییرات و پیش‌نمایش چاپ A4 برای بررسی شما ایجاد شد.'
+            );
+          } else {
+            const created = await api.createProject({
+              title: 'پروژه تدوین و یکپارچه‌سازی جدید',
+              workflowMode: 'multi_merge',
+              settingsJson: DEFAULT_DOCX_CONFIG as unknown as Record<string, unknown>,
+            });
+            if (cancelled) return;
+            setProjects([created.project]);
+            setBundle(created);
+            setActiveProjectId(created.project.id);
+          }
         } else {
           setProjects(list);
           await loadProjectBundle(list[0].id);
@@ -255,7 +391,7 @@ export default function App() {
     return () => {
       cancelled = true;
     };
-  }, [user, api, loadProjectBundle]);
+  }, [user, isGuest, api, loadProjectBundle]);
 
   const refreshProjectsList = useCallback(async () => {
     try {
@@ -265,6 +401,77 @@ export default function App() {
       // ignore transient list refresh error
     }
   }, [api]);
+
+  const refreshProjectRevisions = useCallback(
+    async (projectId?: string | null) => {
+      const pid = projectId ?? activeProjectId;
+      if (!pid) {
+        setRevisions([]);
+        return;
+      }
+      setLoadingRevisions(true);
+      setRevisionsError(null);
+      try {
+        const res = await api.listProjectRevisions(pid);
+        setRevisions(res.revisions || []);
+      } catch (err) {
+        setRevisionsError(
+          err instanceof Error ? err.message : 'خطا در دریافت تاریخچه تغییرات پروژه.'
+        );
+      } finally {
+        setLoadingRevisions(false);
+      }
+    },
+    [activeProjectId, api]
+  );
+
+  const handleOpenChangeLog = useCallback(() => {
+    setChangeLogOpen(true);
+    void refreshProjectRevisions(activeProjectId);
+  }, [activeProjectId, refreshProjectRevisions]);
+
+  const handleRollbackRevision = useCallback(
+    async (revision: ProjectRevisionDto) => {
+      if (!activeProjectId) return;
+      setRollingBackId(revision.id);
+      setRevisionsError(null);
+      setBannerError(null);
+      try {
+        const res = await api.rollbackProjectRevision(activeProjectId, revision.id);
+        setBundle(res.bundle);
+        setRevisions(res.revisions || []);
+        setWorkflowMode(res.bundle.project.workflowMode);
+        const savedSettings = (res.bundle.project.settingsJson || {}) as Partial<DocxExportConfig>;
+        setConfig({
+          ...DEFAULT_DOCX_CONFIG,
+          ...savedSettings,
+          aiModel: normalizeGoogleModelId(savedSettings.aiModel),
+          optimization: {
+            ...DEFAULT_DOCX_CONFIG.optimization,
+            ...(savedSettings.optimization || {}),
+          },
+        });
+        setSelectedView({ kind: 'cover' });
+        const progress = computeWorkflowProgress({
+          bundle: res.bundle,
+          queuedFilesCount: 0,
+        });
+        setActiveStage(progress.recommendedStage);
+        await refreshProjectsList();
+        setBannerToast(
+          `پروژه با موفقیت به نسخه «${revision.title}» بازگردانده شد و این بازگشت در تاریخچه ثبت گردید.`
+        );
+      } catch (err) {
+        const msg =
+          err instanceof Error ? err.message : 'بازگشت به نسخه قبلی با خطا مواجه شد.';
+        setRevisionsError(msg);
+        setBannerError(msg);
+      } finally {
+        setRollingBackId(null);
+      }
+    },
+    [activeProjectId, api, refreshProjectsList]
+  );
 
   const handleCreateProject = useCallback(
     async (mode: WorkflowMode) => {
@@ -279,7 +486,7 @@ export default function App() {
         setBundle(created);
         setActiveProjectId(created.project.id);
         setWorkflowMode(mode);
-        setCenterTab('outline');
+        setActiveStage(1);
         await refreshProjectsList();
         setBannerToast('پروژه جدید ایجاد شد. فایل‌های خود را برای شروع بارگذاری کنید.');
       } catch (err) {
@@ -406,9 +613,21 @@ export default function App() {
     setBannerToast('۲ فایل نمونه (دارای هم‌پوشانی و یک تناقض عددی ۴ بار در برابر ۶ بار) آماده پردازش شد.');
   }, [workflowMode]);
 
-  // Stages 1 -> 2 -> 3 (Batch Ingestion with Pause/Resume + Two-Pass Lossless Dedup + Proposed Outline)
-  const handleStartPipeline = useCallback(async () => {
+  // Stage 1 ONLY: Chunked Batch File Ingestion & Atomic Extraction (no dedup/formatting yet)
+  const handleRunStage1Ingest = useCallback(async () => {
     if (!activeProjectId) return;
+
+    if (queuedFiles.length === 0) {
+      if (bundle && bundle.sourceFiles.length > 0) {
+        const progress = computeWorkflowProgress({ bundle, queuedFilesCount: 0 });
+        setActiveStage(progress.recommendedStage);
+        setBannerToast('فایل‌های این پروژه قبلاً استخراج شده‌اند. می‌توانید مرحله بعدی را اجرا کنید.');
+      } else {
+        setBannerError('لطفاً ابتدا حداقل یک فایل را به صف بارگذاری اضافه کنید.');
+      }
+      return;
+    }
+
     setProcessing(true);
     pauseRequestedRef.current = false;
     setBannerError(null);
@@ -416,68 +635,58 @@ export default function App() {
     setMobileSidebarOpen(false);
 
     try {
-      // Save latest settings & mode first
       await api.updateProject(activeProjectId, {
         workflowMode,
         settingsJson: config as unknown as Record<string, unknown>,
       });
 
-      // Stage 1: Chunked Batch Ingestion (supports 100+ files cleanly)
-      if (queuedFiles.length > 0) {
-        const batchSize = 5;
-        let processedCount = 0;
+      const batchSize = 5;
+      let processedCount = 0;
+      let latestBundle: ProjectBundleDto | null = null;
 
-        for (let i = 0; i < queuedFiles.length; i += batchSize) {
-          if (pauseRequestedRef.current) {
-            await api.updateProject(activeProjectId, { status: 'paused', pipelineStage: 1 });
-            await syncFirestoreJobState(activeProjectId, {
-              stage: 1,
-              status: 'paused',
-              progressPercent: Math.round((processedCount / queuedFiles.length) * 45),
-              message: `توقف موقت پس از استخراج ${toPersianDigits(processedCount)} از ${toPersianDigits(queuedFiles.length)} فایل`,
-              workflowMode,
-            });
-            setBannerToast('پردازش به‌صورت موقت متوقف شد. هر زمان خواستید ادامه دهید.');
-            setProcessing(false);
-            return;
-          }
-
-          const slice = queuedFiles.slice(i, i + batchSize);
+      for (let i = 0; i < queuedFiles.length; i += batchSize) {
+        if (pauseRequestedRef.current) {
+          await api.updateProject(activeProjectId, { status: 'paused', pipelineStage: 1 });
           await syncFirestoreJobState(activeProjectId, {
             stage: 1,
-            status: 'ingesting',
-            progressPercent: Math.round((processedCount / queuedFiles.length) * 45) + 5,
-            message: `در حال استخراج اتمی فایل‌های ${toPersianDigits(i + 1)} تا ${toPersianDigits(Math.min(queuedFiles.length, i + batchSize))}...`,
+            status: 'paused',
+            progressPercent: Math.round((processedCount / queuedFiles.length) * 100),
+            message: `توقف موقت پس از استخراج ${toPersianDigits(processedCount)} از ${toPersianDigits(queuedFiles.length)} فایل`,
             workflowMode,
           });
+          setBannerToast('استخراج فایل‌ها به‌صورت موقت متوقف شد. هر زمان خواستید ادامه دهید.');
+          setProcessing(false);
+          return;
+        }
 
-          const prepared = await Promise.all(
-            slice.map(async (item) => {
-              if (item.presetText !== undefined) {
+        const slice = queuedFiles.slice(i, i + batchSize);
+        await syncFirestoreJobState(activeProjectId, {
+          stage: 1,
+          status: 'ingesting',
+          progressPercent: Math.round((processedCount / queuedFiles.length) * 90) + 5,
+          message: `مرحله ۱: استخراج اتمی فایل‌های ${toPersianDigits(i + 1)} تا ${toPersianDigits(Math.min(queuedFiles.length, i + batchSize))}...`,
+          workflowMode,
+        });
+
+        const prepared = await Promise.all(
+          slice.map(async (item) => {
+            if (item.presetText !== undefined) {
+              return {
+                name: item.name,
+                format: item.format,
+                role: item.role || 'standard',
+                sizeBytes: item.sizeBytes,
+                text: item.presetText,
+              };
+            }
+            if (item.file) {
+              if (item.format === 'docx' || item.format === 'pdf') {
                 return {
                   name: item.name,
                   format: item.format,
                   role: item.role || 'standard',
                   sizeBytes: item.sizeBytes,
-                  text: item.presetText,
-                };
-              }
-              if (item.file) {
-                if (item.format === 'docx' || item.format === 'pdf') {
-                  return {
-                    name: item.name,
-                    format: item.format,
-                    role: item.role || 'standard',
-                    sizeBytes: item.sizeBytes,
-                    base64: await fileToBase64(item.file),
-                  };
-                }
-                return {
-                  name: item.name,
-                  format: item.format,
-                  role: item.role || 'standard',
-                  sizeBytes: item.sizeBytes,
-                  text: await item.file.text(),
+                  base64: await fileToBase64(item.file),
                 };
               }
               return {
@@ -485,27 +694,162 @@ export default function App() {
                 format: item.format,
                 role: item.role || 'standard',
                 sizeBytes: item.sizeBytes,
-                text: '',
+                text: await item.file.text(),
               };
-            })
-          );
+            }
+            return {
+              name: item.name,
+              format: item.format,
+              role: item.role || 'standard',
+              sizeBytes: item.sizeBytes,
+              text: '',
+            };
+          })
+        );
 
-          const res = await api.ingestFilesBatch(activeProjectId, {
-            replaceExisting: i === 0,
-            files: prepared,
-          });
-          setBundle(res.bundle);
-          processedCount += slice.length;
-        }
-        setQueuedFiles([]);
+        const res = await api.ingestFilesBatch(activeProjectId, {
+          replaceExisting: i === 0,
+          files: prepared,
+        });
+        latestBundle = res.bundle;
+        setBundle(res.bundle);
+        processedCount += slice.length;
       }
 
-      // Stage 2: Two-Pass Lossless Union & Conflict Detection
+      setQueuedFiles([]);
+      await refreshProjectsList();
+      await syncFirestoreJobState(activeProjectId, {
+        stage: 1,
+        status: 'draft',
+        progressPercent: 100,
+        message: 'مرحله ۱ (استخراج فایل‌ها) تکمیل شد. آماده اجرای مرحله ۲.',
+        workflowMode,
+      });
+
+      setActiveStage(1);
+      setBannerToast(
+        `مرحله ۱ تکمیل شد: ${toPersianDigits(latestBundle?.sourceFiles.length ?? processedCount)} فایل و ${toPersianDigits(latestBundle?.contentUnits.length ?? 0)} واحد متنی استخراج شد. پس از بررسی، دکمه اجرای مرحله ۲ را بزنید.`
+      );
+    } catch (err) {
+      setBannerError(err instanceof Error ? err.message : 'خطا هنگام اجرای مرحله ۱ (استخراج فایل‌ها).');
+      if (activeProjectId) {
+        await syncFirestoreJobState(activeProjectId, {
+          stage: 1,
+          status: 'error',
+          progressPercent: 0,
+          message: 'خطا در مرحله ۱ (استخراج فایل‌ها)',
+          workflowMode,
+        });
+      }
+    } finally {
+      setProcessing(false);
+    }
+  }, [
+    activeProjectId,
+    api,
+    bundle,
+    workflowMode,
+    config,
+    queuedFiles,
+    syncFirestoreJobState,
+    refreshProjectsList,
+  ]);
+
+  const handleTranscribeAudioToSourceFile = useCallback(
+    async (file: File) => {
+      if (file.size > 20 * 1024 * 1024) {
+        setBannerError('حجم فایل صوتی باید حداکثر ۲۰ مگابایت باشد.');
+        return;
+      }
+      setTranscribingAudio(true);
+      setBannerError(null);
+      setBannerToast(null);
+      try {
+        let targetProjectId = activeProjectId;
+        if (!targetProjectId) {
+          const created = await api.createProject({
+            title: 'پروژه تدوین از فایل صوتی',
+            workflowMode,
+            settingsJson: config as unknown as Record<string, unknown>,
+          });
+          targetProjectId = created.project.id;
+          setBundle(created);
+          setActiveProjectId(created.project.id);
+        }
+
+        const audioBase64 = await fileToBase64(file);
+        const res = await api.transcribeAudio(targetProjectId, {
+          audioBase64,
+          mimeType: file.type || 'audio/mpeg',
+          fileName: file.name,
+          addAsSourceFile: true,
+          role: workflowMode === 'master_update' ? 'supplement' : 'standard',
+        });
+
+        if (res.bundle) {
+          setBundle(res.bundle);
+        }
+        await refreshProjectsList();
+        const words = res.sourceFileAdded?.wordCount ?? 0;
+        const units = res.sourceFileAdded?.unitCount ?? 0;
+        setBannerToast(
+          `فایل صوتی «${file.name}» با موتور ${res.providerLabelFa} به متن تبدیل شد (${toPersianDigits(words)} کلمه · ${toPersianDigits(units)} واحد متنی) و مستقیماً به منابع پروژه اضافه گردید.`
+        );
+      } catch (err) {
+        setBannerError(
+          err instanceof Error
+            ? err.message
+            : 'خطا در تبدیل فایل صوتی به متن. لطفاً تنظیمات اسلات صوتی را بررسی کنید.'
+        );
+      } finally {
+        setTranscribingAudio(false);
+      }
+    },
+    [activeProjectId, api, config, refreshProjectsList, workflowMode]
+  );
+
+  const handleTranscribeAudioToText = useCallback(
+    async (file: File): Promise<{ transcript: string; providerLabelFa: string }> => {
+      if (!activeProjectId) {
+        throw new Error('ابتدا یک پروژه فعال انتخاب کنید.');
+      }
+      if (file.size > 20 * 1024 * 1024) {
+        throw new Error('حجم فایل صوتی باید حداکثر ۲۰ مگابایت باشد.');
+      }
+      const audioBase64 = await fileToBase64(file);
+      const res = await api.transcribeAudio(activeProjectId, {
+        audioBase64,
+        mimeType: file.type || 'audio/mpeg',
+        fileName: file.name,
+        addAsSourceFile: false,
+      });
+      return {
+        transcript: res.transcript,
+        providerLabelFa: res.providerLabelFa,
+      };
+    },
+    [activeProjectId, api]
+  );
+
+  // Stage 2 ONLY: Two-Pass Lossless Dedup & Real Conflict Detection -> lands on Stage 2 Audit
+  const handleRunStage2Dedup = useCallback(async () => {
+    if (!activeProjectId) return;
+    setProcessing(true);
+    setBannerError(null);
+    setBannerToast(null);
+    setMobileSidebarOpen(false);
+
+    try {
+      await api.updateProject(activeProjectId, {
+        workflowMode,
+        settingsJson: config as unknown as Record<string, unknown>,
+      });
+
       await syncFirestoreJobState(activeProjectId, {
         stage: 2,
         status: 'deduping',
-        progressPercent: 62,
-        message: 'در حال حذف تکراری‌های بدون افت، کشف تناقض‌ها و چیدمان اولیه فصل‌ها...',
+        progressPercent: 45,
+        message: 'مرحله ۲: در حال حذف تکراری‌های بدون افت و کشف تناقض‌های واقعی...',
         workflowMode,
       });
 
@@ -514,25 +858,25 @@ export default function App() {
       await refreshProjectsList();
 
       await syncFirestoreJobState(activeProjectId, {
-        stage: 3,
+        stage: 2,
         status: 'awaiting_outline',
-        progressPercent: 75,
-        message: 'فصل‌بندی پیشنهادی آماده بررسی و تأیید شماست.',
+        progressPercent: 100,
+        message: 'مرحله ۲ (ممیزی و ادغام) تکمیل شد. تناقض‌ها را بررسی و سپس به مرحله ۳ بروید.',
         workflowMode,
       });
 
-      setCenterTab('outline');
+      setActiveStage(2);
       setBannerToast(
-        `تحلیل بدون افت انجام شد: ${toPersianDigits(afterDedup.outlineNodes.length)} فصل پیشنهادی، ${toPersianDigits(afterDedup.dedupClusters.length)} خوشه ادغام و ${toPersianDigits(afterDedup.conflicts.length)} تناقض شناسایی شد.`
+        `مرحله ۲ تکمیل شد: ${toPersianDigits(afterDedup.dedupClusters.length)} خوشه ادغام و ${toPersianDigits(afterDedup.conflicts.length)} تناقض واقعی شناسایی شد. پس از بررسی به مرحله ۳ (فصل‌بندی) بروید.`
       );
     } catch (err) {
-      setBannerError(err instanceof Error ? err.message : 'خطا هنگام اجرای مراحل پردازش.');
+      setBannerError(err instanceof Error ? err.message : 'خطا هنگام اجرای مرحله ۲ (ادغام و ممیزی).');
       if (activeProjectId) {
         await syncFirestoreJobState(activeProjectId, {
-          stage: bundle?.project.pipelineStage ?? 1,
+          stage: 2,
           status: 'error',
           progressPercent: 0,
-          message: 'خطا در پردازش پروژه',
+          message: 'خطا در مرحله ۲ (ادغام و کشف تناقض)',
           workflowMode,
         });
       }
@@ -544,31 +888,41 @@ export default function App() {
     api,
     workflowMode,
     config,
-    queuedFiles,
     syncFirestoreJobState,
     refreshProjectsList,
-    bundle?.project.pipelineStage,
   ]);
 
   const handleSaveOutline = useCallback(
     async (
       nextNodes: OutlineNodeDto[],
-      reassignments?: Array<{ fromNodeId: string; toNodeId: string }>
-    ) => {
-      if (!activeProjectId) return;
-      setSavingOutline(true);
-      setBannerError(null);
+      reassignments?: Array<{ fromNodeId: string; toNodeId: string }>,
+      options?: { silent?: boolean }
+    ): Promise<boolean> => {
+      if (!activeProjectId) return false;
+      const silent = Boolean(options?.silent);
+      if (!silent) {
+        setSavingOutline(true);
+        setBannerError(null);
+      }
       try {
         const updated = await api.saveOutline(activeProjectId, {
           nodes: nextNodes,
           reassignments,
         });
         setBundle(updated);
-        setBannerToast('چیدمان جدید فصل‌ها ذخیره شد.');
+        if (!silent) {
+          setBannerToast('چیدمان جدید فصل‌ها ذخیره شد.');
+        }
+        return true;
       } catch (err) {
-        setBannerError(err instanceof Error ? err.message : 'ذخیره فصل‌بندی ناموفق بود.');
+        if (!silent) {
+          setBannerError(err instanceof Error ? err.message : 'ذخیره فصل‌بندی ناموفق بود.');
+        }
+        return false;
       } finally {
-        setSavingOutline(false);
+        if (!silent) {
+          setSavingOutline(false);
+        }
       }
     },
     [activeProjectId, api]
@@ -591,16 +945,16 @@ export default function App() {
         const finished = await api.finalizeProject(activeProjectId);
         setBundle(finished);
         setSelectedView({ kind: 'cover' });
-        setCenterTab('preview');
+        setActiveStage(4);
         await refreshProjectsList();
         await syncFirestoreJobState(activeProjectId, {
-          stage: 5,
+          stage: 4,
           status: 'completed',
           progressPercent: 100,
-          message: 'سند یکپارچه و گزارش ممیزی ۱۰۰٪ آماده است.',
+          message: 'مرحله ۴ (صفحه‌آرایی و کادربندی) آماده بازبینی و غنی‌سازی اختیاری است.',
           workflowMode,
         });
-        setBannerToast('سند نهایی با پوشش ۱۰۰٪ آماده پیش‌نمایش و دانلود فایل ورد است.');
+        setBannerToast('مرحله ۴ انجام شد: پیش‌نمایش کادربندی‌شده آماده بازبینی، غنی‌سازی اختیاری و انتقال به مرحله ۵ (خروجی) است.');
       } catch (err) {
         setBannerError(err instanceof Error ? err.message : 'خطا در تدوین نهایی سند.');
       } finally {
@@ -695,14 +1049,19 @@ export default function App() {
 
       setDeepReviewReport(normalizedReview);
       if (res.bundle?.project.bookSnapshotJson) {
-        setCenterTab('preview');
+        setActiveStage(4);
       }
-      const counts = normalizedReview.appliedCounts;
+      const counts = normalizedReview.appliedCounts || {
+        titlesRefined: 0,
+        calloutsAdded: 0,
+        tablesAdded: 0,
+        paragraphsAdded: 0,
+      };
       const totalFixes =
-        counts.titlesRefined +
-        counts.calloutsAdded +
-        counts.tablesAdded +
-        counts.paragraphsAdded;
+        (counts.titlesRefined || 0) +
+        (counts.calloutsAdded || 0) +
+        (counts.tablesAdded || 0) +
+        (counts.paragraphsAdded || 0);
       setBannerToast(
         `بازبینی عمیق هوش مصنوعی (${normalizedReview.thinkingLevel}) انجام شد — امتیاز کیفیت ${toPersianDigits(normalizedReview.overallScore)} از ۱۰۰ و ${toPersianDigits(totalFixes)} بهبود بدون افت روی سند اعمال گردید.`
       );
@@ -834,6 +1193,27 @@ export default function App() {
     return counts;
   }, [bundle]);
 
+  const winolsGuideReport: WinolsExtractionReport = useMemo(() => {
+    const saved = (
+      bundle?.auditReport?.detailsJson as Record<string, unknown> | undefined
+    )?.winolsGuideReport as WinolsExtractionReport | undefined;
+    if (saved && Array.isArray(saved.entries)) {
+      return saved;
+    }
+    if (!bundle) {
+      return {
+        mapsDetected: 0,
+        entries: [],
+        summaryTable: null,
+        generatedAt: '',
+      };
+    }
+    return extractWinolsMapGuides({
+      sourceFiles: bundle.sourceFiles,
+      units: bundle.contentUnits,
+    });
+  }, [bundle]);
+
   const projectAiUsage = useMemo(
     () => extractAiUsageFromCheckpoint(bundle?.project.checkpointJson),
     [bundle?.project.checkpointJson]
@@ -843,6 +1223,20 @@ export default function App() {
     () =>
       (bundle?.sourceFiles || []).reduce((sum, f) => sum + (f.wordCount || 0), 0),
     [bundle?.sourceFiles]
+  );
+
+  const workflowProgress = useMemo(
+    () =>
+      computeWorkflowProgress({
+        bundle,
+        queuedFilesCount: queuedFiles.length,
+      }),
+    [bundle, queuedFiles.length]
+  );
+
+  const capabilityPlan = useMemo(
+    () => resolveCapabilityRoutingPlan(providerConfig, config.aiModel),
+    [providerConfig, config.aiModel]
   );
 
   if (authLoading) {
@@ -865,10 +1259,17 @@ export default function App() {
   const openConflictsCount =
     bundle?.conflicts.filter((c) => c.status === 'open').length ?? 0;
 
+  const activeChapterNumber =
+    selectedView.kind === 'chapter' ? selectedView.chapterNumber : null;
+
   return (
-    <div dir="rtl" className="min-h-screen bg-[#F8F6F1] text-[#1A1816] flex flex-col">
-      {/* Top Studio Header */}
-      <header className="sticky top-0 z-30 h-[58px] border-b border-[#E2DDD3] bg-white px-3 sm:px-5 flex items-center justify-between gap-2">
+    <>
+      <div
+        dir="rtl"
+        className="studio-app-shell min-h-screen bg-[#F8F6F1] text-[#1A1816] flex flex-col"
+      >
+        {/* Top Studio Header */}
+        <header className="no-print sticky top-0 z-30 h-[58px] border-b border-[#E2DDD3] bg-white px-3 sm:px-5 flex items-center justify-between gap-2">
         <div className="flex items-center gap-2.5 min-w-0">
           <button
             type="button"
@@ -893,56 +1294,47 @@ export default function App() {
           </div>
         </div>
 
-        {/* Center Workspace Tabs */}
-        <nav className="hidden md:flex items-center gap-1 rounded-lg bg-[#F5F3EE] p-1">
-          <button
-            type="button"
-            onClick={() => setCenterTab('outline')}
-            className={`inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-bold transition-colors cursor-pointer ${
-              centerTab === 'outline'
-                ? 'bg-white text-[#1E3A5F] shadow-xs'
-                : 'text-[#57534E] hover:text-[#1A1816]'
-            }`}
-          >
-            <ListTree className="h-3.5 w-3.5" />
-            فصل‌بندی ({toPersianDigits(bundle?.outlineNodes.length || 0)})
-          </button>
-
-          <button
-            type="button"
-            onClick={() => setCenterTab('preview')}
-            disabled={!activeBook}
-            className={`inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-bold transition-colors cursor-pointer disabled:opacity-40 ${
-              centerTab === 'preview'
-                ? 'bg-white text-[#1E3A5F] shadow-xs'
-                : 'text-[#57534E] hover:text-[#1A1816]'
-            }`}
-          >
-            <FileText className="h-3.5 w-3.5" />
-            پیش‌نمایش سند
-          </button>
-
-          <button
-            type="button"
-            onClick={() => setCenterTab('audit')}
-            className={`inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-bold transition-colors cursor-pointer ${
-              centerTab === 'audit'
-                ? 'bg-white text-[#1E3A5F] shadow-xs'
-                : 'text-[#57534E] hover:text-[#1A1816]'
-            }`}
-          >
-            <ShieldCheck className="h-3.5 w-3.5" />
-            ممیزی و تناقض‌ها
-            {openConflictsCount > 0 && (
-              <span className="rounded-sm bg-[#9A3412] px-1.5 py-0.5 text-[10px] font-bold text-white tabular-nums">
-                {toPersianDigits(openConflictsCount)}
-              </span>
-            )}
-          </button>
+        {/* Center 5-Stage Workflow Navigation */}
+        <nav className="hidden md:flex items-center gap-1 rounded-lg bg-[#F5F3EE] p-1" aria-label="ناوبری مراحل">
+          {BOOK_WORKFLOW_STAGES.map((st) => {
+            const unlocked = workflowProgress.unlockedStages[st.stage];
+            const isActive = activeStage === st.stage;
+            return (
+              <button
+                key={st.stage}
+                type="button"
+                disabled={!unlocked}
+                onClick={() => unlocked && setActiveStage(st.stage)}
+                className={`inline-flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs font-bold transition-colors cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed ${
+                  isActive
+                    ? 'bg-white text-[#1E3A5F] shadow-xs'
+                    : 'text-[#57534E] hover:text-[#1A1816]'
+                }`}
+              >
+                <span>{st.shortTitleFa}</span>
+                {st.stage === 2 && openConflictsCount > 0 && (
+                  <span className="rounded-sm bg-[#9A3412] px-1.5 py-0.5 text-[10px] font-bold text-white tabular-nums">
+                    {toPersianDigits(openConflictsCount)}
+                  </span>
+                )}
+              </button>
+            );
+          })}
         </nav>
 
-        {/* Trailing Controls: Assistant Drawer Toggle + User */}
+        {/* Trailing Controls: Change Log + Assistant Drawer Toggle + User / Guest */}
         <div className="flex items-center gap-2 shrink-0">
+          <button
+            type="button"
+            onClick={handleOpenChangeLog}
+            disabled={!activeProjectId}
+            aria-label="تاریخچه تغییرات پروژه"
+            className="inline-flex min-h-[38px] items-center gap-1.5 rounded-lg border border-[#D6D0C4] bg-white px-3 py-1.5 text-xs font-bold text-[#1A1816] hover:bg-[#FAF9F6] hover:border-[#1E3A5F]/40 disabled:opacity-40 transition-colors cursor-pointer"
+          >
+            <History className="h-3.5 w-3.5 text-[#1E3A5F]" />
+            <span className="hidden lg:inline">تاریخچه تغییرات</span>
+          </button>
+
           <button
             type="button"
             onClick={() => setAssistantOpen((v) => !v)}
@@ -957,7 +1349,23 @@ export default function App() {
           </button>
 
           <div className="flex items-center gap-1.5 border-r border-[#E2DDD3] pr-2">
-            {user.photoURL ? (
+            {isGuest ? (
+              <>
+                <span className="hidden xl:inline-flex items-center gap-1 text-[11px] font-bold text-[#44403C]">
+                  <UserRound className="h-3.5 w-3.5 text-[#1E3A5F]" />
+                  حالت مهمان
+                </span>
+                <button
+                  type="button"
+                  onClick={() => void signInWithGoogle()}
+                  title="ورود با حساب گوگل برای همگام‌سازی دائمی"
+                  className="inline-flex min-h-[32px] items-center gap-1 rounded-md border border-[#1E3A5F]/30 bg-[#EEF3F8] px-2.5 py-1 text-[11px] font-bold text-[#1E3A5F] hover:bg-[#DFEAF5] cursor-pointer"
+                >
+                  <LogIn className="h-3.5 w-3.5" />
+                  <span className="hidden sm:inline">ورود با گوگل</span>
+                </button>
+              </>
+            ) : user.photoURL ? (
               <img
                 src={user.photoURL}
                 alt={user.displayName || 'کاربر'}
@@ -971,8 +1379,8 @@ export default function App() {
             <button
               type="button"
               onClick={signOut}
-              title="خروج از حساب کاربری"
-              aria-label="خروج از حساب کاربری"
+              title={isGuest ? 'خروج از حالت مهمان' : 'خروج از حساب کاربری'}
+              aria-label={isGuest ? 'خروج از حالت مهمان' : 'خروج از حساب کاربری'}
               className="flex h-8 w-8 items-center justify-center rounded-md text-[#57534E] hover:bg-[#FDF2F0] hover:text-[#9A3412] cursor-pointer"
             >
               <LogOut className="h-4 w-4" />
@@ -981,36 +1389,26 @@ export default function App() {
         </div>
       </header>
 
-      {/* Mobile Center Tabs Bar */}
-      <div className="flex md:hidden items-center justify-around border-b border-[#E2DDD3] bg-white px-2 py-1.5 text-xs">
-        <button
-          type="button"
-          onClick={() => setCenterTab('outline')}
-          className={`flex-1 py-1.5 rounded-md font-bold ${
-            centerTab === 'outline' ? 'bg-[#EEF3F8] text-[#1E3A5F]' : 'text-[#57534E]'
-          }`}
-        >
-          فصل‌بندی
-        </button>
-        <button
-          type="button"
-          onClick={() => setCenterTab('preview')}
-          disabled={!activeBook}
-          className={`flex-1 py-1.5 rounded-md font-bold disabled:opacity-40 ${
-            centerTab === 'preview' ? 'bg-[#EEF3F8] text-[#1E3A5F]' : 'text-[#57534E]'
-          }`}
-        >
-          پیش‌نمایش
-        </button>
-        <button
-          type="button"
-          onClick={() => setCenterTab('audit')}
-          className={`flex-1 py-1.5 rounded-md font-bold ${
-            centerTab === 'audit' ? 'bg-[#EEF3F8] text-[#1E3A5F]' : 'text-[#57534E]'
-          }`}
-        >
-          ممیزی ({toPersianDigits(bundle?.conflicts.length || 0)})
-        </button>
+      {/* Mobile 5-Stage Tabs Bar */}
+      <div className="flex md:hidden items-center gap-1 overflow-x-auto border-b border-[#E2DDD3] bg-white px-2 py-1.5 text-[11px]">
+        {BOOK_WORKFLOW_STAGES.map((st) => {
+          const unlocked = workflowProgress.unlockedStages[st.stage];
+          return (
+            <button
+              key={st.stage}
+              type="button"
+              disabled={!unlocked}
+              onClick={() => unlocked && setActiveStage(st.stage)}
+              className={`shrink-0 px-2.5 py-1.5 rounded-md font-bold disabled:opacity-40 ${
+                activeStage === st.stage
+                  ? 'bg-[#EEF3F8] text-[#1E3A5F]'
+                  : 'text-[#57534E]'
+              }`}
+            >
+              {st.shortTitleFa}
+            </button>
+          );
+        })}
       </div>
 
       {/* Notifications */}
@@ -1052,7 +1450,12 @@ export default function App() {
             chapterCount={bundle?.outlineNodes.length ?? 0}
             aiUsage={projectAiUsage}
             config={config}
+            providerConfig={providerConfig}
+            probeData={quotaProbe}
+            probingQuota={probingQuota}
             processing={processing}
+            onRunLiveProbe={() => handleRunLiveProbe()}
+            onOpenProviderSettings={() => setProviderModalOpen(true)}
             onSelectProject={loadProjectBundle}
             onCreateProject={handleCreateProject}
             onDeleteProject={handleDeleteProject}
@@ -1080,7 +1483,7 @@ export default function App() {
                 optimization: { ...prev.optimization, ...patch },
               }))
             }
-            onStartPipeline={handleStartPipeline}
+            onStartPipeline={handleRunStage1Ingest}
           />
         </div>
 
@@ -1108,7 +1511,15 @@ export default function App() {
                 chapterCount={bundle?.outlineNodes.length ?? 0}
                 aiUsage={projectAiUsage}
                 config={config}
+                providerConfig={providerConfig}
+                probeData={quotaProbe}
+                probingQuota={probingQuota}
                 processing={processing}
+                onRunLiveProbe={() => handleRunLiveProbe()}
+                onOpenProviderSettings={() => {
+                  setMobileSidebarOpen(false);
+                  setProviderModalOpen(true);
+                }}
                 onSelectProject={(pid) => {
                   void loadProjectBundle(pid);
                   setMobileSidebarOpen(false);
@@ -1139,7 +1550,7 @@ export default function App() {
                     optimization: { ...prev.optimization, ...patch },
                   }))
                 }
-                onStartPipeline={handleStartPipeline}
+                onStartPipeline={handleRunStage1Ingest}
               />
             </div>
             <div
@@ -1152,7 +1563,8 @@ export default function App() {
         {/* Center Main Workspace Column */}
         <main className="flex-1 min-w-0 flex flex-col lg:h-[calc(100vh-58px)] lg:overflow-hidden">
           <PipelineStepper
-            currentStage={liveState?.stage ?? bundle?.project.pipelineStage ?? 1}
+            activeStage={activeStage}
+            progress={workflowProgress}
             status={
               (liveState?.status === 'running'
                 ? bundle?.project.status && bundle.project.status !== 'draft'
@@ -1165,63 +1577,92 @@ export default function App() {
             progressPercent={liveState?.percent}
             statusMessage={liveState?.stageMessage}
             busy={processing || finalizing}
+            showDashboardOverview={showDashboardOverview}
+            onToggleDashboardOverview={() => setShowDashboardOverview((v) => !v)}
             onPauseToggle={() => {
               if (bundle?.project.status === 'paused' || liveState?.status === 'paused') {
-                void handleStartPipeline();
+                void handleRunStage1Ingest();
               } else {
                 pauseRequestedRef.current = true;
               }
             }}
             onSelectStageView={(st) => {
-              if (st === 3) setCenterTab('outline');
-              else if (st === 4 || st === 5) {
-                if (activeBook) setCenterTab('preview');
-                else setCenterTab('audit');
+              if (workflowProgress.unlockedStages[st]) {
+                setActiveStage(st);
+                if (st === 1) setShowDashboardOverview(false);
               }
             }}
           />
 
           <div className="flex-1 lg:overflow-y-auto">
+            {showDashboardOverview && activeStage !== 1 && !loadingProjects && (
+              <div className="mx-auto max-w-5xl px-4 pt-4 sm:px-8">
+                <ProjectsDashboardWidget
+                  projects={projects}
+                  activeProjectId={activeProjectId}
+                  activeAiModel={config.aiModel}
+                  probeData={quotaProbe}
+                  onSelectProject={(pid) => {
+                    void loadProjectBundle(pid);
+                    setShowDashboardOverview(false);
+                  }}
+                  onCreateProject={(mode) => {
+                    void handleCreateProject(mode);
+                    setShowDashboardOverview(false);
+                  }}
+                  onOpenProviderSettings={() => setProviderModalOpen(true)}
+                />
+              </div>
+            )}
             {loadingProjects ? (
               <div className="h-full flex items-center justify-center gap-2 text-sm text-[#57534E] py-16">
                 <Loader2 className="h-5 w-5 animate-spin text-[#1E3A5F]" />
                 <span>در حال بارگذاری پروژه‌های ذخیره‌شده...</span>
               </div>
-            ) : centerTab === 'outline' && (!bundle || bundle.outlineNodes.length === 0) ? (
-              <div className="mx-auto max-w-2xl px-4 py-12 text-center space-y-5">
-                <div className="mx-auto flex h-14 w-14 items-center justify-center rounded-2xl bg-[#EEF3F8] text-[#1E3A5F]">
-                  <Layers className="h-7 w-7" />
-                </div>
-                <div className="space-y-2">
-                  <h2 className="text-xl font-extrabold text-[#1A1816]">
-                    آماده شروع تدوین و ادغام بدون افت اسناد
-                  </h2>
-                  <p className="text-sm text-[#57534E] leading-7">
-                    از ستون سمت راست، حالت پردازش دلخواه خود را انتخاب کنید، یک یا چند فایل (.docx، .pdf، .md، .txt، .json) را رها کنید و دکمه «استخراج و ادغام بدون افت» را بزنید.
-                  </p>
-                </div>
-
-                <div className="flex flex-wrap items-center justify-center gap-3 pt-2">
-                  <button
-                    type="button"
-                    onClick={handleLoadQuickDemoFiles}
-                    className="inline-flex min-h-[44px] items-center gap-2 rounded-xl border border-[#1E3A5F] bg-white px-5 py-2.5 text-xs sm:text-sm font-bold text-[#1E3A5F] hover:bg-[#EEF3F8] cursor-pointer"
-                  >
-                    <Sparkles className="h-4 w-4" />
-                    بارگذاری ۲ فایل نمونه برای تست ادغام و کشف تناقض
-                  </button>
-
-                  <button
-                    type="button"
-                    onClick={() => setMobileSidebarOpen(true)}
-                    className="lg:hidden inline-flex min-h-[44px] items-center gap-2 rounded-xl bg-[#1E3A5F] px-5 py-2.5 text-xs font-bold text-white cursor-pointer"
-                  >
-                    انتخاب فایل از دستگاه
-                  </button>
-                </div>
-              </div>
-            ) : centerTab === 'outline' && bundle ? (
+            ) : activeStage === 1 ? (
+              <StageIngestView
+                projects={projects}
+                activeProjectId={activeProjectId}
+                activeAiModel={config.aiModel}
+                audioEngineLabel={capabilityPlan.audioLabelFa}
+                probeData={quotaProbe}
+                sourceFiles={bundle?.sourceFiles ?? []}
+                contentUnitsCount={bundle?.contentUnits.length ?? 0}
+                queuedFilesCount={queuedFiles.length}
+                processing={processing}
+                transcribingAudio={transcribingAudio}
+                progress={workflowProgress}
+                onSelectProject={loadProjectBundle}
+                onCreateProject={handleCreateProject}
+                onOpenProviderSettings={() => setProviderModalOpen(true)}
+                onRunStage1Ingest={handleRunStage1Ingest}
+                onTranscribeAudioFile={handleTranscribeAudioToSourceFile}
+                onRunStage2Dedup={handleRunStage2Dedup}
+                onGoToStage2={() => setActiveStage(2)}
+                onLoadDemoFiles={handleLoadQuickDemoFiles}
+                onOpenMobileSidebar={() => setMobileSidebarOpen(true)}
+              />
+            ) : activeStage === 2 && bundle ? (
+              <AuditConflictsView
+                auditReport={bundle.auditReport}
+                clusters={bundle.dedupClusters}
+                conflicts={bundle.conflicts}
+                groundingConflictId={groundingConflictId}
+                resolvingConflictId={resolvingConflictId}
+                rescanningConflicts={rescanningConflicts}
+                hasIngestedFiles={workflowProgress.hasIngestedFiles}
+                hasDedupResults={workflowProgress.hasDedupResults}
+                hasOutline={workflowProgress.hasOutline}
+                runningDedup={processing}
+                onRunDedup={handleRunStage2Dedup}
+                onProceedToOutline={() => setActiveStage(3)}
+                onRescanConflicts={handleRescanConflicts}
+                onCheckConflictWithGoogle={handleCheckConflictWithGoogle}
+                onResolveConflict={handleResolveConflict}
+              />
+            ) : activeStage === 3 && bundle ? (
               <OutlineEditorView
+                projectId={bundle.project.id}
                 nodes={bundle.outlineNodes}
                 unitCountsByNode={unitCountsByNode}
                 saving={savingOutline}
@@ -1236,21 +1677,22 @@ export default function App() {
                 onEnrichAllWithGoogle={handleEnrichFullDocumentWithGoogle}
                 onRunDeepReview={handleRunDeepAiReview}
               />
-            ) : centerTab === 'audit' && bundle ? (
-              <AuditConflictsView
-                auditReport={bundle.auditReport}
-                clusters={bundle.dedupClusters}
-                conflicts={bundle.conflicts}
-                groundingConflictId={groundingConflictId}
-                resolvingConflictId={resolvingConflictId}
-                rescanningConflicts={rescanningConflicts}
-                onRescanConflicts={handleRescanConflicts}
-                onCheckConflictWithGoogle={handleCheckConflictWithGoogle}
-                onResolveConflict={handleResolveConflict}
+            ) : activeStage === 5 && activeBook ? (
+              <StageExportView
+                book={activeBook}
+                auditReport={bundle?.auditReport ?? null}
+                conflicts={bundle?.conflicts ?? []}
+                config={config}
+                exportingDocx={exportingDocx}
+                onDownloadDocx={handleDownloadDocx}
+                onDownloadMarkdown={handleDownloadMarkdown}
+                onPrintPdf={() => setPrintPreviewOpen(true)}
+                onGoToStage4Preview={() => setActiveStage(4)}
+                onGoToStage2Audit={() => setActiveStage(2)}
               />
             ) : activeBook ? (
               <div className="flex flex-col h-full">
-                {/* Export & Deep Enhancement Action Bar */}
+                {/* Stage 4 Preview & Optional Single-Step Enrichment Bar */}
                 <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[#E2DDD3] bg-[#F3F0E8] px-4 py-2.5">
                   <div className="flex flex-wrap items-center gap-2">
                     <button
@@ -1276,9 +1718,6 @@ export default function App() {
                       <strong className="text-[#14532D]">
                         {toPersianDigits(bundle?.auditReport?.coveragePercent ?? 100)}٪
                       </strong>
-                      <span className="hidden sm:inline text-[#78716C] mr-2">
-                        (برای دیدن فایل منبع روی هر پاراگراف کلیک کنید)
-                      </span>
                     </span>
                   </div>
 
@@ -1287,7 +1726,7 @@ export default function App() {
                       type="button"
                       onClick={handleEnrichFullDocumentWithGoogle}
                       disabled={enrichingFullGoogle || runningDeepReview}
-                      title="تکمیل تمام فصل‌های متن خروجی با جستجوی گوگل و لینک منابع"
+                      title="اقدام اختیاری جداگانه: تکمیل فصل‌ها با جستجوی گوگل و لینک منابع"
                       className="inline-flex min-h-[36px] items-center gap-1.5 rounded-md border border-[#D7CBE6] bg-[#F7F4FA] px-3 py-1.5 text-xs font-bold text-[#5B21B6] hover:bg-[#ECE5F5] disabled:opacity-50 cursor-pointer"
                     >
                       {enrichingFullGoogle ? (
@@ -1296,7 +1735,7 @@ export default function App() {
                         <Globe className="h-3.5 w-3.5" />
                       )}
                       <span>
-                        {enrichingFullGoogle ? 'در حال تکمیل کل متن با گوگل...' : 'تکمیل کل متن با گوگل'}
+                        {enrichingFullGoogle ? 'در حال تکمیل کل متن با گوگل...' : 'تکمیل اختیاری با گوگل'}
                       </span>
                     </button>
 
@@ -1304,7 +1743,7 @@ export default function App() {
                       type="button"
                       onClick={handleRunDeepAiReview}
                       disabled={runningDeepReview || enrichingFullGoogle}
-                      title="بازبینی عمیق سند با بالاترین سطح استدلال (XHIGH) برای کشف و رفع نقص‌ها بدون حذف محتوا"
+                      title="اقدام اختیاری جداگانه: بازبینی عمیق سند برای کشف و رفع نقص‌ها بدون حذف محتوا"
                       className="inline-flex min-h-[36px] items-center gap-1.5 rounded-md border border-[#1E3A5F] bg-[#EEF3F8] px-3 py-1.5 text-xs font-bold text-[#1E3A5F] hover:bg-[#DFE9F4] disabled:opacity-50 cursor-pointer tabular-nums"
                     >
                       {runningDeepReview ? (
@@ -1315,55 +1754,74 @@ export default function App() {
                       <span>
                         {runningDeepReview
                           ? `در حال بازبینی عمیق (${toPersianDigits(deepReviewProgress?.percent ?? 5)}٪)...`
-                          : 'بازبینی با قدرت بیشتر هوش مصنوعی'}
+                          : 'بازبینی عمیق اختیاری'}
                       </span>
                     </button>
 
                     <button
                       type="button"
-                      onClick={handleDownloadMarkdown}
-                      className="inline-flex min-h-[36px] items-center gap-1.5 rounded-md border border-[#C8C1B4] bg-white px-3 py-1.5 text-xs font-semibold text-[#1A1816] hover:bg-[#FAF9F6] cursor-pointer"
+                      onClick={() => setWinolsWorkbenchOpen((prev) => !prev)}
+                      aria-expanded={winolsWorkbenchOpen}
+                      title="مشاهده جدول تولیدشده تغییرات WinOLS و ماتریس ۲بعدی انتخاب سلول‌ها (RPM × بار)"
+                      className={`inline-flex min-h-[36px] items-center gap-1.5 rounded-md border px-3 py-1.5 text-xs font-bold cursor-pointer tabular-nums ${
+                        winolsWorkbenchOpen
+                          ? 'border-[#14532D] bg-[#14532D] text-white'
+                          : 'border-[#14532D]/40 bg-[#ECFDF5] text-[#14532D] hover:bg-[#DCFCE7]'
+                      }`}
                     >
-                      <FileCode className="h-3.5 w-3.5 text-[#1E3A5F]" />
-                      <span>Markdown</span>
+                      <Grid2x2 className="h-3.5 w-3.5" />
+                      <span>
+                        میز کار WinOLS ({toPersianDigits(winolsGuideReport.mapsDetected)} نقشه)
+                      </span>
                     </button>
 
                     <button
                       type="button"
-                      onClick={() => window.print()}
-                      className="inline-flex min-h-[36px] items-center gap-1.5 rounded-md border border-[#C8C1B4] bg-white px-3 py-1.5 text-xs font-semibold text-[#1A1816] hover:bg-[#FAF9F6] cursor-pointer"
+                      onClick={() => setPrintPreviewOpen(true)}
+                      title="نمایش صفحه‌بندی دقیق A4 با حاشیه‌های استاندارد و ذخیره PDF"
+                      className="inline-flex min-h-[36px] items-center gap-1.5 rounded-md border border-[#C8C1B4] bg-white px-3 py-1.5 text-xs font-bold text-[#1A1816] hover:bg-[#FAF9F6] cursor-pointer"
                     >
                       <Printer className="h-3.5 w-3.5 text-[#1E3A5F]" />
-                      <span>چاپ / PDF</span>
+                      <span>پیش‌نمایش چاپ A4</span>
                     </button>
 
                     <button
                       type="button"
-                      onClick={handleDownloadDocx}
-                      disabled={exportingDocx}
-                      className="inline-flex min-h-[36px] items-center gap-1.5 rounded-md bg-[#1E3A5F] px-3.5 py-1.5 text-xs font-bold text-white hover:bg-[#162C49] disabled:opacity-60 cursor-pointer"
+                      onClick={() => setActiveStage(5)}
+                      className="inline-flex min-h-[36px] items-center gap-1.5 rounded-md bg-[#1E3A5F] px-3.5 py-1.5 text-xs font-bold text-white hover:bg-[#162C49] cursor-pointer"
                     >
-                      {exportingDocx ? (
-                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                      ) : (
-                        <Download className="h-3.5 w-3.5" />
-                      )}
-                      <span>دانلود فایل ورد (.docx)</span>
+                      <Download className="h-3.5 w-3.5" />
+                      <span>مرحله ۵: تأیید و خروجی نهایی</span>
+                      <ArrowLeft className="h-3.5 w-3.5" />
                     </button>
                   </div>
                 </div>
 
-                {runningDeepReview && deepReviewProgress && (
-                  <DeepReviewProgressBanner progress={deepReviewProgress} variant="bar" />
-                )}
-
-                {deepReviewReport && (
-                  <DeepReviewPanel
-                    report={deepReviewReport}
-                    running={runningDeepReview}
-                    onRerun={handleRunDeepAiReview}
+                {winolsWorkbenchOpen && (
+                  <WinolsMapWorkbench
+                    report={winolsGuideReport}
+                    onClose={() => setWinolsWorkbenchOpen(false)}
+                    hasWinolsAppendixChapter={activeBook.chapters.some(
+                      (c) => c.id === 'ch_winols_quick_guide'
+                    )}
+                    onJumpToWinolsAppendix={() => {
+                      const chapter = activeBook.chapters.find(
+                        (c) => c.id === 'ch_winols_quick_guide'
+                      );
+                      if (chapter) {
+                        setSelectedView({ kind: 'chapter', chapterNumber: chapter.chapterNumber });
+                        setWinolsWorkbenchOpen(false);
+                      }
+                    }}
                   />
                 )}
+
+                <DeepReviewPanel
+                  report={deepReviewReport}
+                  running={runningDeepReview}
+                  progress={deepReviewProgress}
+                  onRerun={handleRunDeepAiReview}
+                />
 
                 <div className="flex flex-1 min-h-0">
                   <div className="hidden xl:block h-full overflow-y-auto">
@@ -1423,10 +1881,13 @@ export default function App() {
           open={assistantOpen}
           onClose={() => setAssistantOpen(false)}
           uid={user.uid}
+          isGuest={isGuest}
           projectId={activeProjectId}
           outlineNodes={bundle?.outlineNodes ?? []}
           aiModel={config.aiModel}
           getIdToken={getIdToken}
+          webSearchEngineLabel={capabilityPlan.webSearchLabelFa}
+          onTranscribeAudio={handleTranscribeAudioToText}
           onSendChat={async (payload) => {
             if (!activeProjectId) throw new Error('پروژه‌ای انتخاب نشده است.');
             const res = await api.sendChatMessage(activeProjectId, payload);
@@ -1451,6 +1912,40 @@ export default function App() {
           onApplyProposal={handleApplyProposal}
         />
       </div>
-    </div>
+
+      <AiProviderModal
+        open={providerModalOpen}
+        onClose={() => setProviderModalOpen(false)}
+        providerConfig={providerConfig}
+        aiModel={config.aiModel}
+        probeData={quotaProbe}
+        probing={probingQuota}
+        onSaveProviderConfig={handleSaveProviderConfig}
+        onRunLiveProbe={handleRunLiveProbe}
+      />
+
+      <ProjectChangeLogModal
+        open={changeLogOpen}
+        projectTitle={bundle?.project.title || 'پروژه فعال'}
+        revisions={revisions}
+        loading={loadingRevisions}
+        error={revisionsError}
+        rollingBackId={rollingBackId}
+        onClose={() => setChangeLogOpen(false)}
+        onRefresh={() => void refreshProjectRevisions(activeProjectId)}
+        onRollback={handleRollbackRevision}
+      />
+      </div>
+
+      {activeBook && (
+        <PrintPreviewModal
+          open={printPreviewOpen}
+          book={activeBook}
+          config={config}
+          activeChapterNumber={activeChapterNumber}
+          onClose={() => setPrintPreviewOpen(false)}
+        />
+      )}
+    </>
   );
 }

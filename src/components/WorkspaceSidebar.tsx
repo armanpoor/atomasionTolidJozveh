@@ -5,6 +5,7 @@ import {
   FileText,
   FolderOpen,
   Globe,
+  KeyRound,
   Layers,
   Loader2,
   Play,
@@ -15,14 +16,27 @@ import {
 } from 'lucide-react';
 import {
   AiModelId,
+  AiRewriteLevel,
   AiThinkingLevel,
   DocxExportConfig,
   FileRole,
   GoogleSearchMode,
+  OutputTonePreset,
   ProjectAiUsageLedger,
   ProjectSummaryDto,
   WorkflowMode,
 } from '../lib/bookTypes';
+import {
+  AiProviderConfig,
+  AiQuotaProbeResponse,
+  getProviderDisplaySummary,
+  GOOGLE_MODEL_OPTIONS,
+} from '../lib/aiProviderConfig';
+import {
+  AI_REWRITE_LEVEL_OPTIONS,
+  OUTPUT_TONE_OPTIONS,
+  QUICK_CUSTOM_PROMPT_PRESETS,
+} from '../lib/winolsMapGuide';
 import { toPersianDigits } from '../lib/formatParsers';
 import { AiQuotaGauge } from './AiQuotaGauge';
 import { FileDropzone, QueuedUploadFile } from './FileDropzone';
@@ -69,7 +83,12 @@ interface WorkspaceSidebarProps {
   chapterCount: number;
   aiUsage: ProjectAiUsageLedger;
   config: DocxExportConfig;
+  providerConfig: AiProviderConfig;
+  probeData: AiQuotaProbeResponse | null;
+  probingQuota: boolean;
   processing: boolean;
+  onRunLiveProbe: () => Promise<void>;
+  onOpenProviderSettings: () => void;
   onSelectProject: (projectId: string) => void;
   onCreateProject: (mode: WorkflowMode) => Promise<void>;
   onDeleteProject: (projectId: string) => Promise<void>;
@@ -94,7 +113,12 @@ export const WorkspaceSidebar: React.FC<WorkspaceSidebarProps> = ({
   chapterCount,
   aiUsage,
   config,
+  providerConfig,
+  probeData,
+  probingQuota,
   processing,
+  onRunLiveProbe,
+  onOpenProviderSettings,
   onSelectProject,
   onCreateProject,
   onDeleteProject,
@@ -116,7 +140,7 @@ export const WorkspaceSidebar: React.FC<WorkspaceSidebarProps> = ({
   return (
     <aside className="w-full lg:w-[350px] xl:w-[375px] shrink-0 border-l border-[#E2DDD3] bg-[#FCFBF8] flex flex-col lg:h-[calc(100vh-58px)] lg:overflow-y-auto">
       <div className="p-4 space-y-5">
-        {/* 0. Compact AI Token & Quota Gauge */}
+        {/* 0. Compact AI Token & Live Quota Gauge */}
         <AiQuotaGauge
           usage={aiUsage}
           ingestedFilesCount={ingestedFilesCount}
@@ -127,6 +151,11 @@ export const WorkspaceSidebar: React.FC<WorkspaceSidebarProps> = ({
           aiModel={config.aiModel}
           googleSearchMode={config.googleSearchMode}
           useAiBackend={config.useAiBackend}
+          providerConfig={providerConfig}
+          probeData={probeData}
+          probing={probingQuota}
+          onRunLiveProbe={onRunLiveProbe}
+          onOpenProviderSettings={onOpenProviderSettings}
         />
 
         {/* 1. Saved Projects */}
@@ -248,27 +277,32 @@ export const WorkspaceSidebar: React.FC<WorkspaceSidebarProps> = ({
           />
         </section>
 
-        {/* 4. Primary Run CTA */}
-        <button
-          type="button"
-          onClick={onStartPipeline}
-          disabled={!canRun}
-          className="w-full min-h-[46px] flex items-center justify-center gap-2 rounded-xl bg-[#1E3A5F] hover:bg-[#162C49] text-white font-bold text-sm transition-colors shadow-sm disabled:opacity-50 cursor-pointer"
-        >
-          {processing ? (
-            <>
-              <Loader2 className="h-4 w-4 animate-spin" />
-              در حال اجرای مراحل پردازش...
-            </>
-          ) : (
-            <>
-              <Play className="h-4 w-4" />
-              {queuedFiles.length > 0
-                ? `استخراج و ادغام بدون افت (${toPersianDigits(queuedFiles.length)} فایل)`
-                : 'اجرای مجدد تحلیل و فصل‌بندی'}
-            </>
-          )}
-        </button>
+        {/* 4. Primary Stage-1 CTA (Single Responsibility: Ingest & Extract Only) */}
+        <div className="space-y-1.5">
+          <button
+            type="button"
+            onClick={onStartPipeline}
+            disabled={!canRun}
+            className="w-full min-h-[46px] flex items-center justify-center gap-2 rounded-xl bg-[#1E3A5F] hover:bg-[#162C49] text-white font-bold text-sm transition-colors shadow-sm disabled:opacity-50 cursor-pointer"
+          >
+            {processing ? (
+              <>
+                <Loader2 className="h-4 w-4 animate-spin" />
+                در حال استخراج فایل‌ها (مرحله ۱)...
+              </>
+            ) : (
+              <>
+                <Play className="h-4 w-4" />
+                {queuedFiles.length > 0
+                  ? `مرحله ۱: استخراج و ثبت فایل‌ها (${toPersianDigits(queuedFiles.length)})`
+                  : 'باز کردن گام بعدی ورک‌فلو'}
+              </>
+            )}
+          </button>
+          <p className="text-[10.5px] leading-4 text-[#78716C] text-center">
+            هر مرحله جداگانه اجرا می‌شود: ابتدا استخراج فایل‌ها، سپس ممیزی و ادغام، سپس فصل‌بندی و صفحه‌آرایی.
+          </p>
+        </div>
 
         {/* 5. AI Model, Modular Visuals & Isolated Google Search Settings */}
         <section className="border-t border-[#EAE5DA] pt-3 space-y-3">
@@ -288,39 +322,71 @@ export const WorkspaceSidebar: React.FC<WorkspaceSidebarProps> = ({
 
           {showAdvanced && (
             <div className="space-y-3.5 rounded-xl border border-[#E5E0D6] bg-white p-3.5 text-xs">
-              {/* Model */}
-              <div className="space-y-1.5">
-                <label className="block font-bold text-[#1A1816]">مدل هوش مصنوعی پس‌زمینه</label>
-                <select
-                  value={config.aiModel}
-                  onChange={(e) =>
-                    onChangeConfig({ aiModel: e.target.value as AiModelId })
-                  }
-                  className="w-full rounded-lg border border-[#D6D0C4] bg-[#FAF9F6] px-2.5 py-2 text-xs text-[#1A1816]"
-                >
-                  <option value="gemini-4-hydrogen">Gemini 4 Hydrogen (هیدروژن — پیش‌فرض)</option>
-                  <option value="gemini-3.1-flash-lite">Gemini 3.1 Flash Lite (سریع و سبک)</option>
-                </select>
-              </div>
+              {/* Provider & Custom Base URL / API Key Button */}
+              {(() => {
+                const summary = getProviderDisplaySummary(providerConfig, config.aiModel);
+                return (
+                  <div className="flex items-center justify-between gap-2 rounded-lg border border-[#DDE6F0] bg-[#F5F8FC] px-2.5 py-2">
+                    <div className="min-w-0">
+                      <div className="font-bold text-[#1E3A5F] truncate">
+                        {summary.providerLabel} · {summary.keySourceLabel}
+                      </div>
+                      <div className="text-[10.5px] text-[#57534E] truncate">
+                        {summary.modelLabel}
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={onOpenProviderSettings}
+                      className="inline-flex min-h-[30px] shrink-0 items-center gap-1 rounded-md border border-[#1E3A5F] bg-white px-2.5 py-1 text-[11px] font-bold text-[#1E3A5F] hover:bg-[#EEF3F8] cursor-pointer"
+                    >
+                      <KeyRound className="h-3 w-3" />
+                      <span>تغییر</span>
+                    </button>
+                  </div>
+                );
+              })()}
+
+              {/* Model (Strictly Gemini 4 Hydrogen & Gemini 3.8 Flash) */}
+              {providerConfig.provider === 'google_aistudio' && (
+                <div className="space-y-1.5">
+                  <label className="block font-bold text-[#1A1816]">مدل هوش مصنوعی Google AI Studio</label>
+                  <select
+                    value={config.aiModel}
+                    onChange={(e) =>
+                      onChangeConfig({ aiModel: e.target.value as AiModelId })
+                    }
+                    className="w-full rounded-lg border border-[#D6D0C4] bg-[#FAF9F6] px-2.5 py-2 text-xs text-[#1A1816]"
+                  >
+                    {GOOGLE_MODEL_OPTIONS.map((m) => (
+                      <option key={m.id} value={m.id}>
+                        {m.labelFa}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              )}
 
               {/* Thinking level */}
-              <div className="space-y-1.5">
-                <label className="block font-bold text-[#1A1816]">سطح دقت و استدلال</label>
-                <select
-                  value={config.aiThinkingLevel}
-                  onChange={(e) =>
-                    onChangeConfig({ aiThinkingLevel: e.target.value as AiThinkingLevel })
-                  }
-                  className="w-full rounded-lg border border-[#D6D0C4] bg-[#FAF9F6] px-2.5 py-2 text-xs text-[#1A1816]"
-                >
-                  <option value="HIGH">بالا (HIGH — پیش‌فرض)</option>
-                  <option value="MEDIUM">متوسط (MEDIUM)</option>
-                  <option value="LOW">پایین (LOW)</option>
-                  {config.aiModel === 'gemini-4-hydrogen' && (
-                    <option value="XHIGH">بسیار عمیق (XHIGH)</option>
-                  )}
-                </select>
-              </div>
+              {providerConfig.provider === 'google_aistudio' && (
+                <div className="space-y-1.5">
+                  <label className="block font-bold text-[#1A1816]">سطح دقت و استدلال</label>
+                  <select
+                    value={config.aiThinkingLevel}
+                    onChange={(e) =>
+                      onChangeConfig({ aiThinkingLevel: e.target.value as AiThinkingLevel })
+                    }
+                    className="w-full rounded-lg border border-[#D6D0C4] bg-[#FAF9F6] px-2.5 py-2 text-xs text-[#1A1816]"
+                  >
+                    <option value="HIGH">بالا (HIGH — پیش‌فرض)</option>
+                    <option value="MEDIUM">متوسط (MEDIUM)</option>
+                    <option value="LOW">پایین (LOW)</option>
+                    {config.aiModel === 'gemini-4-hydrogen' && (
+                      <option value="XHIGH">بسیار عمیق (XHIGH)</option>
+                    )}
+                  </select>
+                </div>
+              )}
 
               {/* Isolated Google Search Mode */}
               <div className="space-y-1.5">
@@ -351,12 +417,124 @@ export const WorkspaceSidebar: React.FC<WorkspaceSidebarProps> = ({
                 )}
               </div>
 
+              {/* Bounded AI Editorial Control: Rewrite Intensity, Output Tone & Custom Prompt */}
+              <div className="space-y-2.5 border-t border-[#EFECE4] pt-2.5">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="flex items-center gap-1.5 font-bold text-[#1A1816]">
+                    <Wand2 className="h-3.5 w-3.5 text-[#1E3A5F]" />
+                    میزان بازنویسی هوش مصنوعی و لحن خروجی
+                  </span>
+                </div>
+
+                {/* 3-Tier Rewrite Level Segmented Control */}
+                <div className="space-y-1">
+                  <span className="block text-[11px] font-semibold text-[#44403C]">
+                    حد مجاز تغییر متن توسط AI
+                  </span>
+                  <div className="grid grid-cols-3 gap-1">
+                    {AI_REWRITE_LEVEL_OPTIONS.map((opt) => {
+                      const active = (config.aiRewriteLevel || 'light_polish') === opt.id;
+                      return (
+                        <button
+                          key={opt.id}
+                          type="button"
+                          onClick={() =>
+                            onChangeConfig({ aiRewriteLevel: opt.id as AiRewriteLevel })
+                          }
+                          className={`rounded-md border px-1.5 py-1.5 text-[10.5px] font-bold transition-colors cursor-pointer ${
+                            active
+                              ? 'border-[#1E3A5F] bg-[#1E3A5F] text-white'
+                              : 'border-[#D6D0C4] bg-[#FAF9F6] text-[#44403C] hover:bg-[#EFECE4]'
+                          }`}
+                        >
+                          {opt.shortLabelFa}
+                        </button>
+                      );
+                    })}
+                  </div>
+                  <p className="text-[10.5px] leading-5 text-[#57534E]">
+                    {
+                      (
+                        AI_REWRITE_LEVEL_OPTIONS.find(
+                          (o) => o.id === (config.aiRewriteLevel || 'light_polish')
+                        ) || AI_REWRITE_LEVEL_OPTIONS[1]
+                      ).descriptionFa
+                    }
+                  </p>
+                </div>
+
+                {/* Output Tone Selector */}
+                <div className="space-y-1">
+                  <label
+                    htmlFor="sidebar-output-tone"
+                    className="block text-[11px] font-semibold text-[#44403C]"
+                  >
+                    لحن و سبک نگارش سند نهایی
+                  </label>
+                  <select
+                    id="sidebar-output-tone"
+                    value={config.outputTone || 'workshop_practical'}
+                    onChange={(e) =>
+                      onChangeConfig({ outputTone: e.target.value as OutputTonePreset })
+                    }
+                    className="w-full rounded-lg border border-[#D6D0C4] bg-[#FAF9F6] px-2.5 py-2 text-[11.5px] text-[#1A1816]"
+                  >
+                    {OUTPUT_TONE_OPTIONS.map((tone) => (
+                      <option key={tone.id} value={tone.id}>
+                        {tone.labelFa}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                {/* Custom User Style Prompt + Quick Presets */}
+                <div className="space-y-1.5">
+                  <label
+                    htmlFor="sidebar-custom-style-prompt"
+                    className="block text-[11px] font-semibold text-[#44403C]"
+                  >
+                    پرامپت و دستورالعمل اختصاصی خروجی
+                  </label>
+                  <textarea
+                    id="sidebar-custom-style-prompt"
+                    rows={3}
+                    value={config.customStylePrompt || ''}
+                    onChange={(e) => onChangeConfig({ customStylePrompt: e.target.value })}
+                    placeholder="مثلاً: با لحن استاد کارگاهی بنویس، بعد از هر مپ WinOLS نکته ایمنی ناک بگذار و اعداد را تغییر نده..."
+                    className="w-full rounded-lg border border-[#D6D0C4] bg-[#FAF9F6] px-2.5 py-2 text-[11px] leading-5 text-[#1A1816] placeholder:text-[#8C857B] focus:border-[#1E3A5F] focus:outline-none"
+                  />
+                  <div className="flex flex-wrap gap-1">
+                    {QUICK_CUSTOM_PROMPT_PRESETS.map((preset) => (
+                      <button
+                        key={preset.id}
+                        type="button"
+                        onClick={() => onChangeConfig({ customStylePrompt: preset.promptText })}
+                        className="rounded border border-[#D6D0C4] bg-white px-2 py-1 text-[10px] font-semibold text-[#1E3A5F] hover:bg-[#EEF3F8] cursor-pointer"
+                      >
+                        + {preset.labelFa}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              </div>
+
               {/* Modular Visual & Word Toggles */}
               <div className="space-y-2 border-t border-[#EFECE4] pt-2.5">
                 <div className="flex items-center gap-1.5 font-bold text-[#1A1816]">
                   <FileText className="h-3.5 w-3.5 text-[#1E3A5F]" />
                   خروجی ورد و غنی‌سازی بصری
                 </div>
+                <label className="flex items-center justify-between gap-2 cursor-pointer">
+                  <span>تولید خودکار جدول راهنمای تغییرات WinOLS</span>
+                  <input
+                    type="checkbox"
+                    checked={config.includeWinolsActionTables !== false}
+                    onChange={(e) =>
+                      onChangeConfig({ includeWinolsActionTables: e.target.checked })
+                    }
+                    className="h-4 w-4 accent-[#1E3A5F]"
+                  />
+                </label>
                 <label className="flex items-center justify-between gap-2 cursor-pointer">
                   <span>فهرست مطالب خودکار (Word TOC)</span>
                   <input
@@ -404,6 +582,21 @@ export const WorkspaceSidebar: React.FC<WorkspaceSidebarProps> = ({
                     <option value="Vazir Medium">Vazir Medium (پیش‌فرض)</option>
                     <option value="Vazirmatn Medium">Vazirmatn Medium</option>
                     <option value="B Nazanin">B Nazanin</option>
+                  </select>
+                </div>
+                <div className="flex items-center justify-between gap-2">
+                  <span>تراز متن بدنه ورد</span>
+                  <select
+                    value={config.bodyAlignment ?? 'both'}
+                    onChange={(e) =>
+                      onChangeConfig({
+                        bodyAlignment: e.target.value as 'both' | 'right',
+                      })
+                    }
+                    className="rounded-md border border-[#D6D0C4] bg-[#FAF9F6] px-2 py-1 text-[11px]"
+                  >
+                    <option value="both">تراز دوطرفه کتابی (پیشنهادی)</option>
+                    <option value="right">راست‌چین ساده</option>
                   </select>
                 </div>
               </div>

@@ -631,20 +631,145 @@ function decodeXmlEntities(str: string): string {
     .replace(/&#x([0-9a-fA-F]+);/g, (_, hex) => String.fromCharCode(parseInt(hex, 16)));
 }
 
-function extractTextFromWXml(xmlChunk: string): string {
-  const parts: string[] = [];
-  const tokenRegex = /<w:t(?:\s+[^>]*)?>([\s\S]*?)<\/w:t>|<w:tab\s*\/>|<w:br(?:\s+[^>]*)?\/>/g;
-  let match: RegExpExecArray | null;
-  while ((match = tokenRegex.exec(xmlChunk)) !== null) {
-    if (match[1] !== undefined) {
-      parts.push(decodeXmlEntities(match[1]));
-    } else if (match[0].startsWith('<w:tab')) {
-      parts.push(' ');
+function extractTextFromWXml(xmlChunk: string, preserveInlineBold = false): string {
+  // Strip nested Word textboxes when extracting main paragraph text (they are extracted separately as callouts)
+  const sanitizedChunk = xmlChunk.replace(/<w:txbxContent[\s>][\s\S]*?<\/w:txbxContent>/g, '');
+
+  if (!preserveInlineBold) {
+    const parts: string[] = [];
+    const tokenRegex = /<w:t(?:\s+[^>]*)?>([\s\S]*?)<\/w:t>|<w:tab\s*\/>|<w:br(?:\s+[^>]*)?\/>/g;
+    let match: RegExpExecArray | null;
+    while ((match = tokenRegex.exec(sanitizedChunk)) !== null) {
+      if (match[1] !== undefined) {
+        parts.push(decodeXmlEntities(match[1]));
+      } else if (match[0].startsWith('<w:tab')) {
+        parts.push(' ');
+      } else {
+        parts.push('\n');
+      }
+    }
+    return cleanDirectionalMarks(parts.join(''));
+  }
+
+  // Run-aware extraction that preserves inline bold emphasis (<w:b/> or <w:bCs/>) when mixed with normal text
+  const runMatches = sanitizedChunk.match(/<w:r(?:\s+[^>]*)?>[\s\S]*?<\/w:r>/g) || [];
+  if (runMatches.length === 0) {
+    return extractTextFromWXml(sanitizedChunk, false);
+  }
+
+  const runs: Array<{ text: string; bold: boolean }> = [];
+  for (const rXml of runMatches) {
+    const rPrMatch = rXml.match(/<w:rPr[\s>][\s\S]*?<\/w:rPr>/);
+    const rPr = rPrMatch ? rPrMatch[0] : '';
+    const isBold =
+      /(?:<w:b\s*\/>|<w:b\s+w:val="(?:1|true)"\s*\/>|<w:bCs\s*\/>|<w:bCs\s+w:val="(?:1|true)"\s*\/>)/i.test(
+        rPr
+      ) && !/<w:b\s+w:val="(?:0|false)"\s*\/>/i.test(rPr);
+
+    const runText = extractTextFromWXml(rXml, false);
+    if (!runText) continue;
+    const prev = runs[runs.length - 1];
+    if (prev && prev.bold === isBold) {
+      prev.text += runText;
     } else {
-      parts.push('\n');
+      runs.push({ text: runText, bold: isBold });
     }
   }
-  return cleanDirectionalMarks(parts.join(''));
+
+  const allBold = runs.length > 0 && runs.every((r) => r.bold);
+  const combined = runs
+    .map((r) => {
+      if (!r.bold || allBold) return r.text;
+      const trimmed = r.text.trim();
+      if (trimmed.length < 2) return r.text;
+      const leadSpace = r.text.match(/^\s*/)?.[0] || '';
+      const trailSpace = r.text.match(/\s*$/)?.[0] || '';
+      return `${leadSpace}**${trimmed}**${trailSpace}`;
+    })
+    .join('');
+
+  return cleanDirectionalMarks(combined);
+}
+
+/**
+ * Resolves heading outline levels (0..3 -> H1..H4) from word/styles.xml including custom
+ * Persian styles and style inheritance (<w:basedOn>).
+ */
+function parseDocxHeadingStylesMap(stylesXml: string): Map<string, number> {
+  const directLevel = new Map<string, number>();
+  const basedOnMap = new Map<string, string>();
+  const styleBlocks = stylesXml.match(/<w:style\s+[^>]*>[\s\S]*?<\/w:style>/g) || [];
+
+  for (const sb of styleBlocks) {
+    const idMatch = sb.match(/w:styleId="([^"]+)"/);
+    if (!idMatch) continue;
+    const styleId = idMatch[1];
+    const nameMatch = sb.match(/<w:name\s+w:val="([^"]+)"/);
+    const styleName = (nameMatch ? nameMatch[1] : '').toLowerCase();
+    const basedOnMatch = sb.match(/<w:basedOn\s+w:val="([^"]+)"/);
+    if (basedOnMatch) basedOnMap.set(styleId, basedOnMatch[1]);
+
+    const outlineMatch = sb.match(/<w:outlineLvl\s+w:val="(\d+)"/);
+    if (outlineMatch) {
+      const lvl = Number(outlineMatch[1]);
+      if (lvl >= 0 && lvl <= 3) {
+        directLevel.set(styleId, lvl);
+        continue;
+      }
+    }
+
+    if (/^heading\s*1$|^title$|^عنوان\s*[1۱]$|^سرفصل\s*[1۱]?$/i.test(styleName)) {
+      directLevel.set(styleId, 0);
+    } else if (/^heading\s*2$|^عنوان\s*[2۲]$/i.test(styleName)) {
+      directLevel.set(styleId, 1);
+    } else if (/^heading\s*3$|^عنوان\s*[3۳]$/i.test(styleName)) {
+      directLevel.set(styleId, 2);
+    } else if (/^heading\s*4$|^عنوان\s*[4۴]$/i.test(styleName)) {
+      directLevel.set(styleId, 3);
+    }
+  }
+
+  // Follow basedOn chains up to depth 5
+  const resolved = new Map<string, number>(directLevel);
+  for (const styleId of basedOnMap.keys()) {
+    if (resolved.has(styleId)) continue;
+    let curr: string | undefined = basedOnMap.get(styleId);
+    for (let hop = 0; hop < 5 && curr; hop++) {
+      if (directLevel.has(curr)) {
+        resolved.set(styleId, directLevel.get(curr)!);
+        break;
+      }
+      curr = basedOnMap.get(curr);
+    }
+  }
+  return resolved;
+}
+
+/**
+ * Resolves OOXML numId -> 'ordered' | 'bullet' from word/numbering.xml so procedural
+ * lists in Word documents survive merging as true ordered/unordered lists.
+ */
+function parseDocxNumberingFormatMap(numberingXml: string): Map<string, 'ordered' | 'bullet'> {
+  const abstractFmt = new Map<string, 'ordered' | 'bullet'>();
+  const absBlocks = numberingXml.match(/<w:abstractNum\s+[^>]*>[\s\S]*?<\/w:abstractNum>/g) || [];
+  for (const ab of absBlocks) {
+    const idMatch = ab.match(/w:abstractNumId="(\d+)"/);
+    if (!idMatch) continue;
+    const fmtMatch = ab.match(/<w:numFmt\s+w:val="([^"]+)"/);
+    const fmt = (fmtMatch ? fmtMatch[1] : 'bullet').toLowerCase();
+    abstractFmt.set(idMatch[1], fmt === 'bullet' || fmt === 'none' ? 'bullet' : 'ordered');
+  }
+
+  const numMap = new Map<string, 'ordered' | 'bullet'>();
+  const numBlocks = numberingXml.match(/<w:num\s+[^>]*>[\s\S]*?<\/w:num>/g) || [];
+  for (const nb of numBlocks) {
+    const numIdMatch = nb.match(/w:numId="(\d+)"/);
+    const absRefMatch = nb.match(/<w:abstractNumId\s+w:val="(\d+)"/);
+    if (numIdMatch && absRefMatch) {
+      numMap.set(numIdMatch[1], abstractFmt.get(absRefMatch[1]) || 'bullet');
+    }
+  }
+  return numMap;
 }
 
 function extractTopLevelElements(bodyXml: string): Array<{ tag: 'p' | 'tbl'; xml: string }> {
@@ -723,6 +848,65 @@ function bytesToBase64(bytes: Uint8Array): string {
   return btoa(binary);
 }
 
+function parseOoxmlChartXml(
+  chartXml: string,
+  fallbackTitle: string
+): { title: string; items: Array<{ label: string; value: number; detail?: string }> } | null {
+  // Extract chart title from <c:title>...<a:t>...</a:t>
+  const titleBlockMatch = chartXml.match(/<c:title[\s>][\s\S]*?<\/c:title>/);
+  const titleParts = titleBlockMatch
+    ? Array.from(titleBlockMatch[0].matchAll(/<a:t[^>]*>([\s\S]*?)<\/a:t>/g)).map((m) =>
+        decodeXmlEntities(m[1]).trim()
+      )
+    : [];
+  const title = titleParts.filter(Boolean).join(' ').trim() || fallbackTitle;
+
+  // Parse first quantitative series (<c:ser>) categories (<c:cat>/<c:xVal>) and values (<c:val>/<c:yVal>)
+  const serMatches = chartXml.match(/<c:ser[\s>][\s\S]*?<\/c:ser>/g) || [];
+  for (const serXml of serMatches) {
+    const serNameMatch = serXml.match(/<c:tx[\s>][\s\S]*?<c:v[^>]*>([\s\S]*?)<\/c:v>/);
+    const seriesUnitOrName = serNameMatch ? decodeXmlEntities(serNameMatch[1]).trim() : undefined;
+
+    const catBlockMatch =
+      serXml.match(/<c:cat[\s>][\s\S]*?<\/c:cat>/) || serXml.match(/<c:xVal[\s>][\s\S]*?<\/c:xVal>/);
+    const valBlockMatch =
+      serXml.match(/<c:val[\s>][\s\S]*?<\/c:val>/) || serXml.match(/<c:yVal[\s>][\s\S]*?<\/c:yVal>/);
+    if (!valBlockMatch) continue;
+
+    const extractPts = (xml: string): Map<number, string> => {
+      const map = new Map<number, string>();
+      const ptRx = /<c:pt\s+idx="(\d+)"[^>]*>[\s\S]*?<c:v[^>]*>([\s\S]*?)<\/c:v>[\s\S]*?<\/c:pt>/g;
+      let m: RegExpExecArray | null;
+      while ((m = ptRx.exec(xml)) !== null) {
+        map.set(Number(m[1]), decodeXmlEntities(m[2]).trim());
+      }
+      return map;
+    };
+
+    const catPts = catBlockMatch ? extractPts(catBlockMatch[0]) : new Map<number, string>();
+    const valPts = extractPts(valBlockMatch[0]);
+    const items: Array<{ label: string; value: number; detail?: string }> = [];
+
+    const sortedIndices = Array.from(valPts.keys()).sort((a, b) => a - b);
+    for (const idx of sortedIndices) {
+      const rawVal = toAsciiDigits(valPts.get(idx) || '').replace(/,/g, '');
+      const numVal = Number(rawVal);
+      if (!Number.isFinite(numVal)) continue;
+      const label = catPts.get(idx) || `نقطه ${toPersianDigits(idx + 1)}`;
+      items.push({
+        label,
+        value: numVal,
+        ...(seriesUnitOrName ? { detail: seriesUnitOrName } : {}),
+      });
+    }
+
+    if (items.length >= 2) {
+      return { title, items };
+    }
+  }
+  return null;
+}
+
 export async function parseDocxDocument(buffer: ArrayBuffer | Uint8Array, fileName: string): Promise<ParsedBook> {
   const zip = await JSZip.loadAsync(buffer);
   const docFile = zip.file('word/document.xml');
@@ -733,8 +917,24 @@ export async function parseDocxDocument(buffer: ArrayBuffer | Uint8Array, fileNa
   const bodyMatch = docXml.match(/<w:body[^>]*>([\s\S]*?)<\/w:body>/);
   const bodyXml = bodyMatch ? bodyMatch[1] : docXml;
 
-  // Map relationship IDs (rId -> word/media/imageX.png|jpg) to preserve embedded DOCX visuals
+  // Resolve custom Persian/inherited Heading styles from word/styles.xml
+  const stylesFile = zip.file('word/styles.xml');
+  const styleHeadingMap = stylesFile
+    ? parseDocxHeadingStylesMap(await stylesFile.async('string'))
+    : new Map<string, number>();
+
+  // Resolve ordered vs bullet list formats from word/numbering.xml
+  const numberingFile = zip.file('word/numbering.xml');
+  const numberingFormatMap = numberingFile
+    ? parseDocxNumberingFormatMap(await numberingFile.async('string'))
+    : new Map<string, 'ordered' | 'bullet'>();
+
+  // Map relationship IDs (rId -> word/media/imageX.png|jpg AND word/charts/chartX.xml)
   const relImageMap = new Map<string, { dataUrl: string; mimeType: 'image/png' | 'image/jpeg'; target: string }>();
+  const relChartMap = new Map<
+    string,
+    { title: string; items: Array<{ label: string; value: number; detail?: string }> }
+  >();
   const relsFile = zip.file('word/_rels/document.xml.rels');
   if (relsFile) {
     const relsXml = await relsFile.async('string');
@@ -745,6 +945,23 @@ export async function parseDocxDocument(buffer: ArrayBuffer | Uint8Array, fileNa
       const target = relMatch[2].replace(/^\/+/, '');
       const fullPath = target.startsWith('word/') ? target : `word/${target}`;
       const lowerPath = fullPath.toLowerCase();
+
+      if (/^word\/charts\/chart\d+\.xml$/.test(lowerPath)) {
+        const chartFile = zip.file(fullPath);
+        if (chartFile) {
+          try {
+            const chartXml = await chartFile.async('string');
+            const parsedChart = parseOoxmlChartXml(chartXml, `نمودار استخراج‌شده از ${fileName}`);
+            if (parsedChart) {
+              relChartMap.set(rId, parsedChart);
+            }
+          } catch {
+            // Ignore malformed chart XML
+          }
+        }
+        continue;
+      }
+
       if (!/\.(png|jpe?g)$/.test(lowerPath)) continue;
       const mediaFile = zip.file(fullPath);
       if (!mediaFile) continue;
@@ -772,23 +989,39 @@ export async function parseDocxDocument(buffer: ArrayBuffer | Uint8Array, fileNa
     string,
     { dataUrl: string; mimeType: 'image/png' | 'image/jpeg'; caption: string }
   >();
+  const extractedChartsByMarker = new Map<
+    string,
+    { title: string; items: Array<{ label: string; value: number; detail?: string }> }
+  >();
 
   const mdLines: string[] = [];
   const baseTitle = fileName.replace(/\.docx$/i, '').replace(/[_-]+/g, ' ').trim();
   let detectedHeading = false;
   let imageSeq = 0;
+  let chartSeq = 0;
+  const listCounters = new Map<string, number>();
 
   for (const el of elements) {
     if (el.tag === 'p') {
-      // Check for embedded drawing / image reference inside this paragraph
-      const embedMatch = el.xml.match(/r:embed="([^"]+)"/);
-      if (embedMatch && relImageMap.has(embedMatch[1])) {
-        const imgAsset = relImageMap.get(embedMatch[1])!;
+      // Extract ALL embedded images in this paragraph (modern DrawingML r:embed AND legacy VML v:imagedata r:id)
+      const imgRefIds = new Set<string>();
+      for (const m of el.xml.matchAll(/r:embed="([^"]+)"/g)) {
+        if (relImageMap.has(m[1])) imgRefIds.add(m[1]);
+      }
+      for (const m of el.xml.matchAll(/<v:imagedata[^>]+r:id="([^"]+)"/g)) {
+        if (relImageMap.has(m[1])) imgRefIds.add(m[1]);
+      }
+      const descrMatches = Array.from(el.xml.matchAll(/descr="([^"]+)"/g)).map((m) =>
+        decodeXmlEntities(m[1]).trim()
+      );
+      let localImgIdx = 0;
+      for (const rId of imgRefIds) {
+        const imgAsset = relImageMap.get(rId)!;
         const marker = `DOCX_IMG_${++imageSeq}`;
-        const descrMatch = el.xml.match(/descr="([^"]+)"/) || el.xml.match(/name="([^"]+)"/);
-        const caption = descrMatch
-          ? decodeXmlEntities(descrMatch[1]).trim()
-          : `تصویر استخراج‌شده ${toPersianDigits(imageSeq)} از ${fileName}`;
+        const caption =
+          descrMatches[localImgIdx] ||
+          `تصویر استخراج‌شده ${toPersianDigits(imageSeq)} از ${fileName}`;
+        localImgIdx++;
         extractedImagesByMarker.set(marker, {
           dataUrl: imgAsset.dataUrl,
           mimeType: imgAsset.mimeType,
@@ -797,40 +1030,124 @@ export async function parseDocxDocument(buffer: ArrayBuffer | Uint8Array, fileNa
         mdLines.push(`[DOCX_IMAGE_TOKEN:${marker}]`, '');
       }
 
-      const text = extractTextFromWXml(el.xml);
-      if (!text) continue;
-      // Skip TOC instruction field lines
-      if (/\bTOC\b.*\\o/i.test(el.xml) || /^PAGEREF\s+_Toc/i.test(text)) continue;
+      // Extract native OOXML embedded Word charts (<c:chart r:id="..."/>)
+      for (const m of el.xml.matchAll(/<c:chart[^>]+r:id="([^"]+)"/g)) {
+        const chartAsset = relChartMap.get(m[1]);
+        if (chartAsset) {
+          const marker = `DOCX_CHART_${++chartSeq}`;
+          extractedChartsByMarker.set(marker, chartAsset);
+          mdLines.push(`[DOCX_CHART_TOKEN:${marker}]`, '');
+        }
+      }
+
+      // Extract embedded Word TextBoxes (<w:txbxContent>) cleanly as callout boxes
+      const txbxMatches = el.xml.match(/<w:txbxContent[\s>][\s\S]*?<\/w:txbxContent>/g) || [];
+      for (const txbx of txbxMatches) {
+        const tbParas = (txbx.match(/<w:p[\s>][\s\S]*?<\/w:p>/g) || [])
+          .map((p) => extractTextFromWXml(p, true).trim())
+          .filter(Boolean);
+        if (tbParas.length > 0) {
+          const boxContent = tbParas.join('<br>').replace(/\|/g, '\\|');
+          mdLines.push('|  |', '| --- |', `| ${boxContent} |`, '');
+        }
+      }
 
       const styleMatch = el.xml.match(/<w:pStyle\s+w:val="([^"]+)"/);
       const style = styleMatch ? styleMatch[1] : '';
       const outlineMatch = el.xml.match(/<w:outlineLvl\s+w:val="(\d+)"/);
+      const resolvedStyleLevel = styleHeadingMap.get(style);
 
-      if (/^Heading1$|^1$|^Title$/i.test(style) || outlineMatch?.[1] === '0') {
+      const isHeading =
+        /^Heading[1-4]$|^[1-4]$|^Title$/i.test(style) ||
+        outlineMatch !== null ||
+        resolvedStyleLevel !== undefined;
+
+      const text = extractTextFromWXml(el.xml, !isHeading);
+      if (!text) continue;
+      // Skip TOC instruction field lines
+      if (/\bTOC\b.*\\o/i.test(el.xml) || /^PAGEREF\s+_Toc/i.test(text)) continue;
+
+      if (
+        /^Heading1$|^1$|^Title$/i.test(style) ||
+        outlineMatch?.[1] === '0' ||
+        resolvedStyleLevel === 0
+      ) {
         detectedHeading = true;
-        mdLines.push(`# ${text}`);
-      } else if (/^Heading2$|^2$/i.test(style) || outlineMatch?.[1] === '1') {
+        mdLines.push(`# ${text}`, '');
+      } else if (
+        /^Heading2$|^2$/i.test(style) ||
+        outlineMatch?.[1] === '1' ||
+        resolvedStyleLevel === 1
+      ) {
         detectedHeading = true;
-        mdLines.push(`# ${text}`);
-      } else if (/^Heading3$|^3$/i.test(style) || outlineMatch?.[1] === '2') {
-        mdLines.push(`## ${text}`);
-      } else if (/^Heading4$|^4$/i.test(style) || outlineMatch?.[1] === '3') {
-        mdLines.push(`### ${text}`);
+        mdLines.push(`# ${text}`, '');
+      } else if (
+        /^Heading3$|^3$/i.test(style) ||
+        outlineMatch?.[1] === '2' ||
+        resolvedStyleLevel === 2
+      ) {
+        mdLines.push(`## ${text}`, '');
+      } else if (
+        /^Heading4$|^4$/i.test(style) ||
+        outlineMatch?.[1] === '3' ||
+        resolvedStyleLevel === 3
+      ) {
+        mdLines.push(`### ${text}`, '');
       } else {
-        mdLines.push(text);
+        // Preserve OOXML Word numbered & bulleted lists (<w:numPr>)
+        const numPrMatch = el.xml.match(/<w:numPr[\s>][\s\S]*?<\/w:numPr>/);
+        if (numPrMatch) {
+          const numIdMatch = numPrMatch[0].match(/<w:numId\s+w:val="(\d+)"/);
+          const numId = numIdMatch ? numIdMatch[1] : '0';
+          const listKind = numberingFormatMap.get(numId) || 'bullet';
+          if (listKind === 'ordered') {
+            const nextNum = (listCounters.get(numId) || 0) + 1;
+            listCounters.set(numId, nextNum);
+            mdLines.push(`${nextNum}. ${text}`);
+          } else {
+            mdLines.push(`- ${text}`);
+          }
+        } else {
+          mdLines.push(text, '');
+        }
       }
-      mdLines.push('');
     } else if (el.tag === 'tbl') {
       const rowMatches = el.xml.match(/<w:tr[\s>][\s\S]*?<\/w:tr>/g) || [];
       const tableRows: string[][] = [];
+      const prevRowValues: string[] = [];
+
       for (const rXml of rowMatches) {
         const cellMatches = rXml.match(/<w:tc[\s>][\s\S]*?<\/w:tc>/g) || [];
-        const cells = cellMatches.map((cXml) => {
+        const expandedRow: string[] = [];
+        let colIdx = 0;
+
+        for (const cXml of cellMatches) {
+          const tcPrMatch = cXml.match(/<w:tcPr[\s>][\s\S]*?<\/w:tcPr>/);
+          const tcPr = tcPrMatch ? tcPrMatch[0] : '';
+          const gridSpanMatch = tcPr.match(/<w:gridSpan\s+w:val="(\d+)"/);
+          const span = Math.max(1, Math.min(12, gridSpanMatch ? Number(gridSpanMatch[1]) : 1));
+          const isVMergeContinue =
+            /<w:vMerge\s*\/>/i.test(tcPr) || /<w:vMerge\s+w:val="continue"\s*\/>/i.test(tcPr);
+
           const pMatches = cXml.match(/<w:p[\s>][\s\S]*?<\/w:p>/g) || [];
-          const pTexts = pMatches.map(extractTextFromWXml).filter(Boolean);
-          return pTexts.join('  ').replace(/\|/g, '\\|');
-        });
-        if (cells.length > 0) tableRows.push(cells);
+          const pTexts = pMatches.map((p) => extractTextFromWXml(p, false)).filter(Boolean);
+          let cellText = pTexts.join('  ').replace(/\|/g, '\\|');
+
+          // Propagate vertically merged cell value down so pinout / map tables keep complete row context
+          if (!cellText && isVMergeContinue && prevRowValues[colIdx]) {
+            cellText = prevRowValues[colIdx];
+          }
+
+          for (let s = 0; s < span; s++) {
+            const val = s === 0 ? cellText : '';
+            expandedRow.push(val);
+            if (cellText && s === 0) {
+              prevRowValues[colIdx] = cellText;
+            }
+            colIdx++;
+          }
+        }
+        if (expandedRow.length > 0) tableRows.push(expandedRow);
       }
       if (tableRows.length === 0) continue;
 
@@ -876,7 +1193,7 @@ export async function parseDocxDocument(buffer: ArrayBuffer | Uint8Array, fileNa
 
   const parsed = parseMarkdownDocument(mdLines.join('\n'), fileName);
 
-  // Hydrate [DOCX_IMAGE_TOKEN:...] paragraphs into real EmbeddedImageBlock nodes
+  // Hydrate [DOCX_IMAGE_TOKEN:...] and [DOCX_CHART_TOKEN:...] paragraphs into structured nodes
   const hydrateBlocks = (blocks: ContentBlock[]): ContentBlock[] =>
     blocks.map((block) => {
       if (block.type === 'paragraph') {
@@ -889,6 +1206,23 @@ export async function parseDocxDocument(buffer: ArrayBuffer | Uint8Array, fileNa
             dataUrl: asset.dataUrl,
             mimeType: asset.mimeType,
             caption: asset.caption,
+            sourceFileNames: [fileName],
+          };
+        }
+        const chartMatch = block.text.match(/^\[DOCX_CHART_TOKEN:([^\]]+)\]$/);
+        if (chartMatch && extractedChartsByMarker.has(chartMatch[1])) {
+          const chart = extractedChartsByMarker.get(chartMatch[1])!;
+          return {
+            type: 'diagram',
+            id: `cht_${chartMatch[1]}`,
+            kind: 'comparison_bars',
+            title: chart.title,
+            caption: chart.title,
+            items: chart.items,
+            svgMarkup: '',
+            widthPx: 960,
+            heightPx: 420,
+            generatedBy: 'local',
             sourceFileNames: [fileName],
           };
         }

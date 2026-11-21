@@ -1,21 +1,42 @@
-import React, { useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ArrowDown,
   ArrowUp,
-  Brain,
   CheckCircle2,
+  Cloud,
+  CloudOff,
   Globe,
   GripVertical,
+  History,
   Loader2,
   Merge,
   Plus,
+  RotateCcw,
   Sparkles,
+  Trash2,
 } from 'lucide-react';
 import { OutlineNodeDto } from '../lib/bookTypes';
 import { toPersianDigits } from '../lib/formatParsers';
+import {
+  clearOutlineDraft,
+  formatTimeFa,
+  hasMeaningfulDraftDiff,
+  loadOutlineDraft,
+  OutlineDraftPayload,
+  OutlineReassignment,
+  saveOutlineDraft,
+} from '../lib/outlineAutoSave';
 import { DeepReviewProgressBanner, DeepReviewProgressState } from './DeepReviewPanel';
 
+type AutoSaveStatus =
+  | 'idle'
+  | 'saved_local_pending'
+  | 'syncing_cloud'
+  | 'saved_cloud'
+  | 'offline_local';
+
 interface OutlineEditorViewProps {
+  projectId: string;
   nodes: OutlineNodeDto[];
   unitCountsByNode: Record<string, number>;
   saving: boolean;
@@ -26,8 +47,9 @@ interface OutlineEditorViewProps {
   deepReviewProgress?: DeepReviewProgressState | null;
   onSaveOutline: (
     nextNodes: OutlineNodeDto[],
-    reassignments?: Array<{ fromNodeId: string; toNodeId: string }>
-  ) => Promise<void>;
+    reassignments?: OutlineReassignment[],
+    options?: { silent?: boolean }
+  ) => Promise<boolean>;
   onApproveAndFinalize: (nextNodes: OutlineNodeDto[]) => Promise<void>;
   onEnrichNodeWithGoogle: (nodeId: string) => Promise<void>;
   onEnrichAllWithGoogle: () => Promise<void>;
@@ -35,35 +57,206 @@ interface OutlineEditorViewProps {
 }
 
 export const OutlineEditorView: React.FC<OutlineEditorViewProps> = ({
+  projectId,
   nodes,
   unitCountsByNode,
   saving,
   finalizing,
   groundingNodeId,
-  enrichingAllGoogle,
+  enrichingAllGoogle: _enrichingAllGoogle,
   runningDeepReview,
   deepReviewProgress,
   onSaveOutline,
   onApproveAndFinalize,
   onEnrichNodeWithGoogle,
-  onEnrichAllWithGoogle,
-  onRunDeepReview,
+  onEnrichAllWithGoogle: _onEnrichAllWithGoogle,
+  onRunDeepReview: _onRunDeepReview,
 }) => {
   const [draft, setDraft] = useState<OutlineNodeDto[]>(() =>
     [...nodes].sort((a, b) => a.nodeOrder - b.nodeOrder)
   );
   const [dragIdx, setDragIdx] = useState<number | null>(null);
-  const [pendingReassignments, setPendingReassignments] = useState<
-    Array<{ fromNodeId: string; toNodeId: string }>
-  >([]);
+  const [pendingReassignments, setPendingReassignments] = useState<OutlineReassignment[]>([]);
   const [dirty, setDirty] = useState(false);
 
-  // Sync draft when server nodes change externally (e.g. from AI chatbot/voice proposals)
-  React.useEffect(() => {
-    setDraft([...nodes].sort((a, b) => a.nodeOrder - b.nodeOrder));
-    setDirty(false);
-    setPendingReassignments([]);
-  }, [nodes]);
+  // Auto-Save & Crash/Offline Recovery state
+  const [autoSaveStatus, setAutoSaveStatus] = useState<AutoSaveStatus>('idle');
+  const [lastSavedAt, setLastSavedAt] = useState<string | null>(null);
+  const [recoverableDraft, setRecoverableDraft] = useState<OutlineDraftPayload | null>(null);
+  const [isOnline, setIsOnline] = useState<boolean>(() =>
+    typeof navigator !== 'undefined' ? navigator.onLine : true
+  );
+
+  const dirtyRef = useRef(dirty);
+  dirtyRef.current = dirty;
+  const draftRef = useRef(draft);
+  draftRef.current = draft;
+  const reassignmentsRef = useRef(pendingReassignments);
+  reassignmentsRef.current = pendingReassignments;
+  const serverNodesRef = useRef(nodes);
+  serverNodesRef.current = nodes;
+  const syncInFlightRef = useRef(false);
+  const lastProjectIdRef = useRef(projectId);
+
+  // Sync draft when server nodes change externally (or when switching projects),
+  // and check for any unsynced local recovery draft from a prior crash/disconnect.
+  useEffect(() => {
+    const projectSwitched = lastProjectIdRef.current !== projectId;
+    lastProjectIdRef.current = projectId;
+
+    // If user is not actively holding unsaved local edits (or switched project), sync from server
+    if (projectSwitched || !dirtyRef.current) {
+      const sorted = [...nodes].sort((a, b) => a.nodeOrder - b.nodeOrder);
+      setDraft(sorted);
+      setDirty(false);
+      setPendingReassignments([]);
+      if (projectSwitched) {
+        setAutoSaveStatus('idle');
+        setLastSavedAt(null);
+      }
+
+      const stored = loadOutlineDraft(projectId);
+      if (hasMeaningfulDraftDiff(stored, sorted)) {
+        setRecoverableDraft(stored);
+      } else {
+        setRecoverableDraft(null);
+      }
+    }
+  }, [projectId, nodes]);
+
+  // Perform cloud sync of the current draft
+  const flushCloudAutoSave = useCallback(
+    async (silent = true): Promise<boolean> => {
+      if (!dirtyRef.current || syncInFlightRef.current || finalizing) return true;
+      const currentDraft = draftRef.current;
+      const currentReassignments = reassignmentsRef.current;
+
+      // Always persist a local backup before attempting network sync
+      const localRes = saveOutlineDraft({
+        projectId,
+        serverNodes: serverNodesRef.current,
+        draftNodes: currentDraft,
+        reassignments: currentReassignments,
+      });
+
+      if (typeof navigator !== 'undefined' && !navigator.onLine) {
+        setAutoSaveStatus('offline_local');
+        setLastSavedAt(localRes.savedAt);
+        return false;
+      }
+
+      syncInFlightRef.current = true;
+      setAutoSaveStatus('syncing_cloud');
+      try {
+        const ok = await onSaveOutline(currentDraft, currentReassignments, { silent });
+        if (ok) {
+          clearOutlineDraft(projectId);
+          setDirty(false);
+          setPendingReassignments([]);
+          setRecoverableDraft(null);
+          setAutoSaveStatus('saved_cloud');
+          setLastSavedAt(new Date().toISOString());
+          return true;
+        }
+        setAutoSaveStatus('offline_local');
+        setLastSavedAt(localRes.savedAt);
+        return false;
+      } catch {
+        setAutoSaveStatus('offline_local');
+        setLastSavedAt(localRes.savedAt);
+        return false;
+      } finally {
+        syncInFlightRef.current = false;
+      }
+    },
+    [projectId, finalizing, onSaveOutline]
+  );
+
+  // Layer 1: Instant debounced localStorage auto-save (350ms) so sudden browser close never loses edits
+  useEffect(() => {
+    if (!dirty || !projectId) return;
+    const timer = window.setTimeout(() => {
+      const res = saveOutlineDraft({
+        projectId,
+        serverNodes: serverNodesRef.current,
+        draftNodes: draft,
+        reassignments: pendingReassignments,
+      });
+      if (res.ok) {
+        setLastSavedAt(res.savedAt);
+        setAutoSaveStatus(isOnline ? 'saved_local_pending' : 'offline_local');
+      }
+    }, 350);
+    return () => window.clearTimeout(timer);
+  }, [dirty, projectId, draft, pendingReassignments, isOnline]);
+
+  // Layer 2: Automatic debounced cloud sync (1800ms) when online
+  useEffect(() => {
+    if (!dirty || !projectId || !isOnline || finalizing) return;
+    const timer = window.setTimeout(() => {
+      void flushCloudAutoSave(true);
+    }, 1800);
+    return () => window.clearTimeout(timer);
+  }, [dirty, projectId, draft, pendingReassignments, isOnline, finalizing, flushCloudAutoSave]);
+
+  // Browser online/offline listeners + immediate localStorage flush on tab close/unload
+  useEffect(() => {
+    const handleOnline = () => {
+      setIsOnline(true);
+      if (dirtyRef.current) {
+        void flushCloudAutoSave(true);
+      }
+    };
+    const handleOffline = () => {
+      setIsOnline(false);
+      if (dirtyRef.current) {
+        const res = saveOutlineDraft({
+          projectId,
+          serverNodes: serverNodesRef.current,
+          draftNodes: draftRef.current,
+          reassignments: reassignmentsRef.current,
+        });
+        setLastSavedAt(res.savedAt);
+        setAutoSaveStatus('offline_local');
+      }
+    };
+    const handleBeforeUnload = () => {
+      if (dirtyRef.current && projectId) {
+        saveOutlineDraft({
+          projectId,
+          serverNodes: serverNodesRef.current,
+          draftNodes: draftRef.current,
+          reassignments: reassignmentsRef.current,
+        });
+      }
+    };
+
+    window.addEventListener('online', handleOnline);
+    window.addEventListener('offline', handleOffline);
+    window.addEventListener('beforeunload', handleBeforeUnload);
+    window.addEventListener('pagehide', handleBeforeUnload);
+    return () => {
+      window.removeEventListener('online', handleOnline);
+      window.removeEventListener('offline', handleOffline);
+      window.removeEventListener('beforeunload', handleBeforeUnload);
+      window.removeEventListener('pagehide', handleBeforeUnload);
+    };
+  }, [projectId, flushCloudAutoSave]);
+
+  const handleRestoreDraft = () => {
+    if (!recoverableDraft) return;
+    setDraft(recoverableDraft.nodes);
+    setPendingReassignments(recoverableDraft.reassignments);
+    setDirty(true);
+    setLastSavedAt(recoverableDraft.savedAt);
+    setAutoSaveStatus(isOnline ? 'saved_local_pending' : 'offline_local');
+    setRecoverableDraft(null);
+  };
+
+  const handleDiscardDraft = () => {
+    clearOutlineDraft(projectId);
+    setRecoverableDraft(null);
+  };
 
   const reorder = (from: number, to: number) => {
     if (from === to || to < 0 || to >= draft.length) return;
@@ -82,7 +275,7 @@ export const OutlineEditorView: React.FC<OutlineEditorViewProps> = ({
   const handleAddChapter = () => {
     const newNode: OutlineNodeDto = {
       id: `node_manual_${Date.now()}`,
-      projectId: draft[0]?.projectId || '',
+      projectId: draft[0]?.projectId || projectId,
       parentId: null,
       level: 1,
       nodeOrder: draft.length + 1,
@@ -110,72 +303,81 @@ export const OutlineEditorView: React.FC<OutlineEditorViewProps> = ({
     setDirty(true);
   };
 
-  const handleSave = async () => {
-    await onSaveOutline(draft, pendingReassignments);
-    setDirty(false);
-    setPendingReassignments([]);
+  const handleManualSave = async () => {
+    await flushCloudAutoSave(false);
   };
 
   const handleApprove = async () => {
+    const approved = draft.map((n) => ({ ...n, isApproved: true }));
     if (dirty || pendingReassignments.length > 0) {
-      await onSaveOutline(
-        draft.map((n) => ({ ...n, isApproved: true })),
-        pendingReassignments
-      );
+      const ok = await onSaveOutline(approved, pendingReassignments, { silent: true });
+      if (ok) {
+        clearOutlineDraft(projectId);
+        setDirty(false);
+        setPendingReassignments([]);
+      }
     }
-    await onApproveAndFinalize(draft.map((n) => ({ ...n, isApproved: true })));
+    clearOutlineDraft(projectId);
+    await onApproveAndFinalize(approved);
   };
+
+  const formattedTime = lastSavedAt ? formatTimeFa(lastSavedAt) : '';
 
   return (
     <div className="mx-auto max-w-4xl px-4 py-6 sm:px-8 space-y-6">
       <div className="flex flex-wrap items-start justify-between gap-4 border-b border-[#E2DDD3] pb-4">
         <div className="space-y-1">
-          <p className="text-xs font-semibold text-[#1E3A5F]">
-            مرحله ۳ · تأیید و ویرایش ساختار فصل‌بندی (Human-in-the-Loop)
+          <p className="text-xs font-bold text-[#1E3A5F]">
+            مرحله ۳ از ۵ · تأیید و ویرایش ساختار فصل‌بندی
           </p>
           <h2 className="text-lg sm:text-xl font-extrabold text-[#1A1816]">
-            چیدمان فصل‌ها پیش از صفحه‌آرایی نهایی ورد
+            چیدمان فصل‌ها پیش از صفحه‌آرایی و کادربندی کتاب
           </h2>
           <p className="text-xs sm:text-sm text-[#57534E] leading-6">
-            فصل‌ها را با کشیدن و رها کردن (Drag &amp; Drop) مرتب کنید، نام‌شان را تغییر دهید یا فصل‌های هم‌موضوع را ادغام کنید. هیچ محتوایی هنگام ادغام فصل‌ها حذف نمی‌شود.
+            در این مرحله فقط روی نظم، نام‌گذاری و ادغام فصل‌ها تمرکز کنید. تغییرات شما به‌طور خودکار در حافظه مرورگر و سرور ذخیره موقت می‌شوند.
           </p>
+
+          {/* Subtle Auto-Save Status Line (Unboxed Text, Zero-Pill Discipline) */}
+          <div className="pt-1 flex flex-wrap items-center gap-2 text-[11.5px]" aria-live="polite">
+            {autoSaveStatus === 'syncing_cloud' || saving ? (
+              <span className="inline-flex items-center gap-1.5 font-semibold text-[#1E3A5F]">
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                <span>در حال همگام‌سازی خودکار تغییرات با سرور...</span>
+              </span>
+            ) : autoSaveStatus === 'offline_local' ? (
+              <span className="inline-flex items-center gap-1.5 font-bold text-[#9A3412]">
+                <CloudOff className="h-3.5 w-3.5" />
+                <span>
+                  حالت آفلاین / قطعی ارتباط — تغییرات در مرورگر ذخیره موقت شد
+                  {formattedTime ? ` (${toPersianDigits(formattedTime)})` : ''} و با وصل شدن اینترنت ارسال می‌شود.
+                </span>
+              </span>
+            ) : autoSaveStatus === 'saved_local_pending' ? (
+              <span className="inline-flex items-center gap-1.5 font-semibold text-[#7C4706]">
+                <History className="h-3.5 w-3.5" />
+                <span>
+                  ذخیره موقت در مرورگر ثبت شد
+                  {formattedTime ? ` (${toPersianDigits(formattedTime)})` : ''} · آماده همگام‌سازی با سرور...
+                </span>
+              </span>
+            ) : autoSaveStatus === 'saved_cloud' ? (
+              <span className="inline-flex items-center gap-1.5 font-semibold text-[#14532D]">
+                <Cloud className="h-3.5 w-3.5" />
+                <span>
+                  ذخیره خودکار در سرور انجام شد
+                  {formattedTime ? ` · ساعت ${toPersianDigits(formattedTime)}` : ''}
+                </span>
+              </span>
+            ) : (
+              <span className="inline-flex items-center gap-1.5 text-[#78716C]">
+                <Cloud className="h-3.5 w-3.5" />
+                <span>ذخیره خودکار (Auto-Save) برای این مرحله فعال است</span>
+              </span>
+            )}
+          </div>
         </div>
 
         <div className="flex flex-wrap items-center gap-2">
-          <button
-            type="button"
-            onClick={onEnrichAllWithGoogle}
-            disabled={enrichingAllGoogle || finalizing || draft.length === 0}
-            className="inline-flex min-h-[40px] items-center gap-1.5 rounded-lg border border-[#D7CBE6] bg-[#F7F4FA] px-3.5 py-2 text-xs font-bold text-[#5B21B6] hover:bg-[#ECE5F5] disabled:opacity-50 cursor-pointer"
-          >
-            {enrichingAllGoogle ? (
-              <Loader2 className="h-4 w-4 animate-spin" />
-            ) : (
-              <Globe className="h-4 w-4" />
-            )}
-            <span>
-              {enrichingAllGoogle ? 'در حال تکمیل کل فصل‌ها با گوگل...' : 'تکمیل کل فصل‌ها با گوگل'}
-            </span>
-          </button>
-
-          <button
-            type="button"
-            onClick={onRunDeepReview}
-            disabled={runningDeepReview || finalizing || draft.length === 0}
-            className="inline-flex min-h-[40px] items-center gap-1.5 rounded-lg border border-[#1E3A5F] bg-[#EEF3F8] px-3.5 py-2 text-xs font-bold text-[#1E3A5F] hover:bg-[#DFE9F4] disabled:opacity-50 cursor-pointer tabular-nums"
-          >
-            {runningDeepReview ? (
-              <Loader2 className="h-4 w-4 animate-spin" />
-            ) : (
-              <Brain className="h-4 w-4" />
-            )}
-            <span>
-              {runningDeepReview
-                ? `در حال بازبینی عمیق (${toPersianDigits(deepReviewProgress?.percent ?? 5)}٪)...`
-                : 'بازبینی با قدرت بیشتر هوش مصنوعی'}
-            </span>
-          </button>
-
           <button
             type="button"
             onClick={handleAddChapter}
@@ -188,16 +390,58 @@ export const OutlineEditorView: React.FC<OutlineEditorViewProps> = ({
           {dirty && (
             <button
               type="button"
-              onClick={handleSave}
-              disabled={saving}
-              className="inline-flex min-h-[40px] items-center gap-1.5 rounded-lg border border-[#1E3A5F] bg-[#EEF3F8] px-3.5 py-2 text-xs font-semibold text-[#1E3A5F] hover:bg-[#E1EBF5] cursor-pointer"
+              onClick={handleManualSave}
+              disabled={saving || autoSaveStatus === 'syncing_cloud'}
+              className="inline-flex min-h-[40px] items-center gap-1.5 rounded-lg border border-[#1E3A5F] bg-[#EEF3F8] px-3.5 py-2 text-xs font-semibold text-[#1E3A5F] hover:bg-[#E1EBF5] disabled:opacity-60 cursor-pointer"
             >
-              {saving ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
-              ذخیره موقت چیدمان
+              {saving || autoSaveStatus === 'syncing_cloud' ? (
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              ) : null}
+              ذخیره فوری در سرور
             </button>
           )}
         </div>
       </div>
+
+      {/* Unsynced Crash / Disconnect Recovery Banner */}
+      {recoverableDraft && (
+        <div className="rounded-xl border border-[#DFC690] bg-[#FFFDF6] p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+          <div className="flex items-start gap-2.5 text-xs text-[#744005]">
+            <History className="h-4 w-4 shrink-0 mt-0.5 text-[#92580E]" />
+            <div className="space-y-0.5 leading-5">
+              <div className="font-extrabold">
+                پیش‌نویس ذخیره موقت‌شده از نشست قبلی پیدا شد
+              </div>
+              <p className="text-[#7C4706]">
+                آخرین تغییرات شما روی {toPersianDigits(recoverableDraft.nodes.length)} فصل در ساعت{' '}
+                <strong className="tabular-nums">
+                  {toPersianDigits(formatTimeFa(recoverableDraft.savedAt))}
+                </strong>{' '}
+                پیش از قطع ارتباط یا بستن مرورگر در حافظه محلی ذخیره شده است.
+              </p>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-2 shrink-0">
+            <button
+              type="button"
+              onClick={handleRestoreDraft}
+              className="inline-flex min-h-[38px] items-center gap-1.5 rounded-lg bg-[#744005] px-3.5 py-1.5 text-xs font-bold text-white hover:bg-[#5E3204] cursor-pointer"
+            >
+              <RotateCcw className="h-3.5 w-3.5" />
+              <span>بازیابی تغییرات</span>
+            </button>
+            <button
+              type="button"
+              onClick={handleDiscardDraft}
+              className="inline-flex min-h-[38px] items-center gap-1.5 rounded-lg border border-[#DFC690] bg-white px-3 py-1.5 text-xs font-semibold text-[#744005] hover:bg-[#FAF0D4] cursor-pointer"
+            >
+              <Trash2 className="h-3.5 w-3.5" />
+              <span>حذف پیش‌نویس</span>
+            </button>
+          </div>
+        </div>
+      )}
 
       {runningDeepReview && deepReviewProgress && (
         <DeepReviewProgressBanner progress={deepReviewProgress} variant="card" />
@@ -329,9 +573,9 @@ export const OutlineEditorView: React.FC<OutlineEditorViewProps> = ({
         <div className="flex items-start gap-2.5 text-xs sm:text-sm text-[#1E3A5F]">
           <Sparkles className="h-5 w-5 shrink-0 mt-0.5" />
           <div>
-            <div className="font-bold">آماده صفحه‌آرایی نهایی، رسم نمودار و ممیزی ۱۰۰٪</div>
+            <div className="font-bold">گام بعدی: مرحله ۴ — صفحه‌آرایی، کادربندی رنگی و پیش‌نمایش</div>
             <div className="text-xs text-[#3B5578] mt-0.5">
-              پس از تأیید، سند یکپارچه با فونت وزیر مدیوم، سرفصل‌های Heading استاندارد، فهرست خودکار و گزارش پوشش کامل تولید می‌شود.
+              پس از تأیید چیدمان فصل‌ها، پیش‌نویس کامل کتاب با کادرهای موضوعی رنگی و سرفصل‌های استاندارد ساخته می‌شود تا پیش از خروجی نهایی آن را بررسی و در صورت نیاز غنی‌سازی کنید.
             </div>
           </div>
         </div>
@@ -345,12 +589,12 @@ export const OutlineEditorView: React.FC<OutlineEditorViewProps> = ({
           {finalizing ? (
             <>
               <Loader2 className="h-4 w-4 animate-spin" />
-              در حال صفحه‌آرایی و ممیزی نهایی...
+              در حال ساخت پیش‌نمایش و کادربندی...
             </>
           ) : (
             <>
               <CheckCircle2 className="h-4 w-4" />
-              تأیید فصل‌بندی و ساخت سند نهایی
+              تأیید فصل‌بندی و رفتن به مرحله ۴
             </>
           )}
         </button>

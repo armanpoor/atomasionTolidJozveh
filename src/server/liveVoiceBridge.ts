@@ -5,6 +5,7 @@ import crypto from 'node:crypto';
 import { adminAuth } from '../lib/firebase-admin.ts';
 import { getProjectBundle } from '../db/repository.ts';
 import { createGeminiClient } from './projectRoutes.ts';
+import { isGuestBearerToken, verifyGuestToken } from './guestSession.ts';
 
 const LIVE_VOICE_TOOLS: FunctionDeclaration[] = [
   {
@@ -80,13 +81,23 @@ export function attachLiveVoiceWebSocket(server: HttpServer) {
           }
 
           let uid: string;
-          try {
-            const decoded = await adminAuth.verifyIdToken(msg.token);
-            uid = decoded.uid;
-          } catch {
-            sendJson({ type: 'error', message: 'احراز هویت جلسه صوتی نامعتبر یا منقضی است.' });
-            ws.close();
-            return;
+          if (isGuestBearerToken(msg.token)) {
+            const guest = verifyGuestToken(msg.token);
+            if (!guest) {
+              sendJson({ type: 'error', message: 'نشست مهمان برای اتصال صوتی منقضی یا نامعتبر است.' });
+              ws.close();
+              return;
+            }
+            uid = guest.uid;
+          } else {
+            try {
+              const decoded = await adminAuth.verifyIdToken(msg.token);
+              uid = decoded.uid;
+            } catch {
+              sendJson({ type: 'error', message: 'احراز هویت جلسه صوتی نامعتبر یا منقضی است.' });
+              ws.close();
+              return;
+            }
           }
 
           const ai = createGeminiClient();

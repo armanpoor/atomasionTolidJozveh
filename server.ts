@@ -3,39 +3,23 @@ import express from 'express';
 import http from 'node:http';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { GoogleGenAI, ThinkingLevel, Type } from '@google/genai';
+import { Type } from '@google/genai';
 import { createProjectRouter } from './src/server/projectRoutes.ts';
 import { attachLiveVoiceWebSocket } from './src/server/liveVoiceBridge.ts';
+import {
+  generateUnifiedTextOrJson,
+  resolveAiProviderFromRequest,
+  resolveThinkingLevelForGoogleModel,
+} from './src/server/aiProvider.ts';
+import {
+  GOOGLE_MODEL_OPTIONS,
+  normalizeGoogleModelId,
+} from './src/lib/aiProviderConfig.ts';
+import { issueGuestSession } from './src/server/guestSession.ts';
+import { getOrCreateUser } from './src/db/repository.ts';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-
-const ALLOWED_MODELS = new Set(['gemini-4-hydrogen', 'gemini-3.1-flash-lite']);
-
-const THINKING_LEVEL_MAP: Record<string, ThinkingLevel> = {
-  LOW: ThinkingLevel.LOW,
-  MEDIUM: ThinkingLevel.MEDIUM,
-  HIGH: ThinkingLevel.HIGH,
-  XHIGH: ThinkingLevel.XHIGH,
-  MINIMAL: ThinkingLevel.MINIMAL,
-};
-
-function createGeminiClient(): GoogleGenAI {
-  const apiKey = process.env.GEMINI_API_KEY;
-  if (!apiKey || apiKey === 'MY_GEMINI_API_KEY') {
-    throw new Error(
-      'کلید API هوش مصنوعی (GEMINI_API_KEY) در تنظیمات محیط سرور (Settings > Secrets) تنظیم نشده است.'
-    );
-  }
-  return new GoogleGenAI({
-    apiKey,
-    httpOptions: {
-      headers: {
-        'User-Agent': 'aistudio-build',
-      },
-    },
-  });
-}
 
 async function runWithRetry<T>(fn: () => Promise<T>, maxRetries = 2): Promise<T> {
   let lastErr: unknown;
@@ -163,6 +147,18 @@ const ANALYSIS_RESPONSE_SCHEMA = {
 async function startServer() {
   const app = express();
   app.use(express.json({ limit: '30mb' }));
+
+  app.post('/api/auth/guest', async (_req, res) => {
+    try {
+      const session = issueGuestSession();
+      await getOrCreateUser(session.uid, session.email, session.displayName, null);
+      res.status(201).json(session);
+    } catch (err) {
+      console.error('Failed to issue guest session:', err);
+      res.status(500).json({ error: 'خطا در ایجاد نشست مهمان. لطفاً دوباره تلاش کنید.' });
+    }
+  });
+
   app.use('/api/projects', createProjectRouter());
 
   app.get('/api/ai/status', (_req, res) => {
@@ -173,22 +169,15 @@ async function startServer() {
       configured,
       defaultModel: 'gemini-4-hydrogen',
       defaultThinkingLevel: 'HIGH',
-      models: [
-        {
-          id: 'gemini-4-hydrogen',
-          name: 'Gemini 4 Hydrogen (هیدروژن)',
-          description: 'مدل پیش‌فرض قدرتمند برای تحلیل عمیق، فصل‌بندی موضوعی، ادغام تکرارها و تولید جداول و نمودارها',
-          supportsThinkingLevels: ['LOW', 'MEDIUM', 'HIGH', 'XHIGH'],
-          recommended: true,
-        },
-        {
-          id: 'gemini-3.1-flash-lite',
-          name: 'Gemini 3.1 Flash Lite (سریع)',
-          description: 'پردازش بسیار سریع و سبک برای فایل‌های کوتاه و ساختارهای ساده',
-          supportsThinkingLevels: ['MINIMAL', 'LOW', 'MEDIUM', 'HIGH'],
-          recommended: false,
-        },
-      ],
+      models: GOOGLE_MODEL_OPTIONS.map((m, idx) => ({
+        id: m.id,
+        name: m.labelFa,
+        description: m.descriptionFa,
+        supportsThinkingLevels: m.supportsXHigh
+          ? ['LOW', 'MEDIUM', 'HIGH', 'XHIGH']
+          : ['LOW', 'MEDIUM', 'HIGH'],
+        recommended: idx === 0,
+      })),
     });
   });
 
@@ -211,18 +200,9 @@ async function startServer() {
         generateTablesAndDiagrams?: boolean;
       };
 
-      const requestedModel = body.model && ALLOWED_MODELS.has(body.model)
-        ? body.model
-        : 'gemini-4-hydrogen';
-
+      const requestedModel = normalizeGoogleModelId(body.model);
       const rawLevel = (body.thinkingLevel || 'HIGH').toUpperCase();
-      let resolvedLevel = THINKING_LEVEL_MAP[rawLevel] ?? ThinkingLevel.HIGH;
-      if (requestedModel === 'gemini-4-hydrogen' && resolvedLevel === ThinkingLevel.MINIMAL) {
-        resolvedLevel = ThinkingLevel.LOW;
-      }
-      if (requestedModel === 'gemini-3.1-flash-lite' && resolvedLevel === ThinkingLevel.XHIGH) {
-        resolvedLevel = ThinkingLevel.HIGH;
-      }
+      const resolvedLevel = resolveThinkingLevelForGoogleModel(requestedModel, rawLevel);
 
       const catalog = Array.isArray(body.sectionCatalog) ? body.sectionCatalog.slice(0, 120) : [];
       if (catalog.length === 0) {
@@ -230,7 +210,7 @@ async function startServer() {
         return;
       }
 
-      const ai = createGeminiClient();
+      const provider = resolveAiProviderFromRequest(req);
 
       const promptPayload = {
         bookTitle: body.bookTitle || 'سند یکپارچه',
@@ -251,27 +231,24 @@ async function startServer() {
         '۵. در generatedDiagrams برای هر نمودار بین ۳ تا ۶ آیتم (label کوتاه فارسی، detail توضیح مختصر، و value عددی در صورت مقایسه) تولید کنید.',
       ].join('\n');
 
-      const response = await runWithRetry(() =>
-        ai.models.generateContent({
-          model: requestedModel,
-          contents: `این ساختار و چکیده بخش‌های فایل‌های ورودی است. لطفاً تحلیل کامل یکپارچه‌سازی، فصل‌بندی موضوعی، تشخیص تکرارها و تولید جداول و نمودارهای آموزشی را در قالب JSON برگردان:\n\n${JSON.stringify(promptPayload)}`,
-          config: {
-            systemInstruction,
-            responseMimeType: 'application/json',
-            responseSchema: ANALYSIS_RESPONSE_SCHEMA,
-            thinkingConfig: {
-              thinkingLevel: resolvedLevel,
-            },
-          },
+      const result = await runWithRetry(() =>
+        generateUnifiedTextOrJson({
+          provider,
+          googleModel: requestedModel,
+          thinkingLevel: resolvedLevel,
+          systemInstruction,
+          prompt: `این ساختار و چکیده بخش‌های فایل‌های ورودی است. لطفاً تحلیل کامل یکپارچه‌سازی، فصل‌بندی موضوعی، تشخیص تکرارها و تولید جداول و نمودارهای آموزشی را در قالب JSON برگردان:\n\n${JSON.stringify(promptPayload)}`,
+          expectJson: true,
+          googleResponseSchema: ANALYSIS_RESPONSE_SCHEMA,
         })
       );
 
-      const rawJson = (response.text ?? '{}').trim();
+      const rawJson = (result.text || '{}').trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '');
       const parsed = JSON.parse(rawJson);
 
       res.json({
         ok: true,
-        model: requestedModel,
+        model: result.modelUsed,
         thinkingLevel: rawLevel,
         analyzedAt: new Date().toISOString(),
         analysis: parsed,

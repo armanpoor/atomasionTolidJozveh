@@ -14,7 +14,7 @@ export type GoogleSearchMode =
 
 export type FileRole = 'standard' | 'master' | 'supplement';
 
-export type AiModelId = 'gemini-4-hydrogen' | 'gemini-3.1-flash-lite';
+export type AiModelId = 'gemini-4-hydrogen' | 'gemini-3.8-flash';
 export type AiThinkingLevel = 'MINIMAL' | 'LOW' | 'MEDIUM' | 'HIGH' | 'XHIGH';
 export type ProcessingEngineMode = 'ai' | 'local';
 
@@ -404,14 +404,30 @@ export interface OptimizationOptions {
   clusterThematicallyAcrossFiles: boolean;
 }
 
+export type AiRewriteLevel =
+  | 'strict_zero_touch'
+  | 'light_polish'
+  | 'cohesive_synthesis';
+
+export type OutputTonePreset =
+  | 'workshop_practical'
+  | 'academic_engineering'
+  | 'beginner_step_by_step'
+  | 'concise_cheatsheet';
+
 export interface DocxExportConfig {
   fontFamily: 'Vazir Medium' | 'Vazirmatn Medium' | 'Vazir' | 'B Nazanin';
   paperSize: 'A4' | 'B5';
   baseFontSizePt: 10.5 | 11 | 12;
+  bodyAlignment?: 'both' | 'right';
   aiModel: AiModelId;
   aiThinkingLevel: AiThinkingLevel;
   useAiBackend: boolean;
   googleSearchMode: GoogleSearchMode;
+  aiRewriteLevel: AiRewriteLevel;
+  outputTone: OutputTonePreset;
+  customStylePrompt: string;
+  includeWinolsActionTables: boolean;
   includeCoverPage: boolean;
   includeAutoToc: boolean;
   includeVolumeDividers: boolean;
@@ -468,10 +484,15 @@ export const DEFAULT_DOCX_CONFIG: DocxExportConfig = {
   fontFamily: 'Vazir Medium',
   paperSize: 'A4',
   baseFontSizePt: 11,
+  bodyAlignment: 'both',
   aiModel: 'gemini-4-hydrogen',
   aiThinkingLevel: 'HIGH',
   useAiBackend: true,
   googleSearchMode: 'conflicts_only',
+  aiRewriteLevel: 'light_polish',
+  outputTone: 'workshop_practical',
+  customStylePrompt: '',
+  includeWinolsActionTables: true,
   includeCoverPage: true,
   includeAutoToc: true,
   includeVolumeDividers: true,
@@ -507,6 +528,8 @@ export interface ProjectSummaryDto {
   status: ProjectStatus;
   settingsJson: Record<string, unknown>;
   checkpointJson: Record<string, unknown>;
+  sourceFileCount?: number;
+  totalWordCount?: number;
   createdAt: string;
   updatedAt: string;
 }

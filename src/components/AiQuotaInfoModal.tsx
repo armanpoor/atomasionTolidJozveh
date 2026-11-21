@@ -1,7 +1,22 @@
 import React, { useEffect, useId, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { Calculator, Gauge, ShieldCheck, X } from 'lucide-react';
+import {
+  AlertCircle,
+  Calculator,
+  CheckCircle2,
+  Gauge,
+  KeyRound,
+  Loader2,
+  RefreshCw,
+  ShieldCheck,
+  X,
+} from 'lucide-react';
 import { AiModelId, GoogleSearchMode, ProjectAiUsageLedger } from '../lib/bookTypes';
+import {
+  AiProviderConfig,
+  AiQuotaProbeResponse,
+  getProviderDisplaySummary,
+} from '../lib/aiProviderConfig';
 import {
   buildProjectQuotaTechnicalSpec,
   formatCompactTokensFa,
@@ -23,6 +38,11 @@ interface AiQuotaInfoModalProps {
   aiModel: AiModelId;
   googleSearchMode: GoogleSearchMode;
   useAiBackend: boolean;
+  providerConfig: AiProviderConfig;
+  probeData: AiQuotaProbeResponse | null;
+  probing: boolean;
+  onRunLiveProbe: () => Promise<void>;
+  onOpenProviderSettings: () => void;
 }
 
 type ModalTab = 'limits' | 'calculation' | 'quota_model';
@@ -52,6 +72,11 @@ export const AiQuotaInfoModal: React.FC<AiQuotaInfoModalProps> = ({
   aiModel,
   googleSearchMode,
   useAiBackend,
+  providerConfig,
+  probeData,
+  probing,
+  onRunLiveProbe,
+  onOpenProviderSettings,
 }) => {
   const [activeTab, setActiveTab] = useState<ModalTab>('limits');
   const titleId = useId();
@@ -79,7 +104,6 @@ export const AiQuotaInfoModal: React.FC<AiQuotaInfoModalProps> = ({
     ]
   );
 
-  // Lock background scroll, close on Escape, move initial focus into dialog, and restore focus on close
   useEffect(() => {
     if (!open) return;
     const previouslyFocused = document.activeElement as HTMLElement | null;
@@ -109,14 +133,20 @@ export const AiQuotaInfoModal: React.FC<AiQuotaInfoModalProps> = ({
   if (!open || typeof document === 'undefined') return null;
 
   const totalFilesCount = ingestedFilesCount + queuedFilesCount;
-  const formattedLastUpdated = usage.lastUpdatedAt
-    ? new Date(usage.lastUpdatedAt).toLocaleString('fa-IR', {
+  const activeProbe = probeData?.activeProbe ?? null;
+  const creatorProbe = probeData?.creatorKeyProbe ?? null;
+  const accountUsage = probeData?.accountUsage ?? null;
+
+  const providerSummary = getProviderDisplaySummary(providerConfig, aiModel);
+  const activeProviderSummary = `${providerSummary.providerLabel} — ${providerSummary.keySourceLabel} (${providerSummary.modelLabel})`;
+
+  const formattedProbeTime = activeProbe?.checkedAt
+    ? new Date(activeProbe.checkedAt).toLocaleTimeString('fa-IR', {
         hour: '2-digit',
         minute: '2-digit',
-        month: 'short',
-        day: 'numeric',
+        second: '2-digit',
       })
-    : 'هنوز فراخوانی ثبت نشده';
+    : 'هنوز استعلام نشده';
 
   return createPortal(
     <div
@@ -132,17 +162,17 @@ export const AiQuotaInfoModal: React.FC<AiQuotaInfoModalProps> = ({
         aria-labelledby={titleId}
         className="flex max-h-[90vh] w-full max-w-3xl flex-col overflow-hidden rounded-2xl border border-[#DDD7CB] bg-[#FCFBF8] text-[#1A1816] shadow-2xl"
       >
-        {/* Modal Header */}
+        {/* Header */}
         <header className="flex items-start justify-between gap-4 border-b border-[#E7E2D8] bg-white px-5 py-4 sm:px-6">
           <div className="min-w-0 space-y-1">
             <h2
               id={titleId}
               className="text-base sm:text-lg font-extrabold tracking-tight text-[#1A1816]"
             >
-              راهنمای فنی محاسبه مصرف، لیمیت‌ها و سهمیه هوش مصنوعی
+              استعلام زنده سهمیه، محاسبه ساده توکن و مدیریت کلید هوش مصنوعی
             </h2>
             <p className="text-xs text-[#57534E] leading-5">
-              شفاف‌سازی نحوه ثبت واقعی توکن‌ها، محدودیت‌های فنی پروژه جاری و تفاوت سهمیه پروژه با سهمیه شخصی کاربر
+              وضعیت لحظه‌ای سهمیه باقی‌مانده، فرمول خیلی ساده تخمین توکن برای همه و تفاوت کلید سازنده با کلید شخصی
             </p>
           </div>
           <button
@@ -150,13 +180,13 @@ export const AiQuotaInfoModal: React.FC<AiQuotaInfoModalProps> = ({
             type="button"
             onClick={onClose}
             aria-label="بستن پنجره اطلاعات سهمیه هوش مصنوعی"
-            className="inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-lg border border-[#E2DDD3] bg-[#FAF8F5] text-[#44403C] hover:bg-[#EFECE4] hover:text-[#1A1816] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#1E3A5F] transition-colors cursor-pointer"
+            className="inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-lg border border-[#E2DDD3] bg-[#FAF8F5] text-[#44403C] hover:bg-[#EFECE4] hover:text-[#1A1816] cursor-pointer"
           >
             <X className="h-4.5 w-4.5" />
           </button>
         </header>
 
-        {/* Segmented Tab Switcher */}
+        {/* Tab Switcher */}
         <div
           role="tablist"
           aria-label="بخش‌های راهنمای سهمیه هوش مصنوعی"
@@ -174,7 +204,7 @@ export const AiQuotaInfoModal: React.FC<AiQuotaInfoModalProps> = ({
             }`}
           >
             <Gauge className="h-3.5 w-3.5 shrink-0" />
-            <span>وضعیت و لیمیت‌های پروژه</span>
+            <span>استعلام زنده و باقی‌مانده سهمیه</span>
           </button>
 
           <button
@@ -189,7 +219,7 @@ export const AiQuotaInfoModal: React.FC<AiQuotaInfoModalProps> = ({
             }`}
           >
             <Calculator className="h-3.5 w-3.5 shrink-0" />
-            <span>نحوه محاسبه توکن و هزینه</span>
+            <span>محاسبه ساده توکن (قابل فهم)</span>
           </button>
 
           <button
@@ -204,413 +234,405 @@ export const AiQuotaInfoModal: React.FC<AiQuotaInfoModalProps> = ({
             }`}
           >
             <ShieldCheck className="h-3.5 w-3.5 shrink-0" />
-            <span>سهمیه پروژه در برابر شخصی</span>
+            <span>کلید سازنده در برابر کلید شخصی</span>
           </button>
         </div>
 
-        {/* Scrollable Content Body */}
+        {/* Body */}
         <div className="flex-1 overflow-y-auto px-5 py-5 sm:px-6 space-y-6">
-          {/* TAB 1: LIVE PROJECT LIMITS & TELEMETRY */}
+          {/* TAB 1: LIVE PROBE & REMAINING QUOTA */}
           {activeTab === 'limits' && (
-            <div role="tabpanel" className="space-y-6">
-              {/* Top Live Summary Grid (single flat bordered strip with hairline dividers) */}
-              <section aria-label="خلاصه وضعیت لحظه‌ای پروژه جاری" className="space-y-3">
-                <div className="flex flex-wrap items-baseline justify-between gap-2">
-                  <h3 className="text-sm font-extrabold text-[#1A1816]">
-                    وضعیت لحظه‌ای سهمیه پروژه جاری
-                  </h3>
-                  <span className="text-[11px] text-[#78716C] tabular-nums">
-                    آخرین ثبت سرور: {formattedLastUpdated}
-                  </span>
+            <div role="tabpanel" className="space-y-5">
+              {/* Real-Time Live Quota Probe Banner */}
+              <section
+                aria-label="نتیجه استعلام زنده سهمیه"
+                className={`rounded-xl border p-4 space-y-3 ${
+                  activeProbe?.hasQuota
+                    ? 'border-[#C7DDD0] bg-[#F2F7F4]'
+                    : activeProbe
+                      ? 'border-[#E6BFB7] bg-[#FDF2F0]'
+                      : 'border-[#D4DFEC] bg-[#F3F7FB]'
+                }`}
+              >
+                <div className="flex flex-wrap items-start justify-between gap-3">
+                  <div className="space-y-1 min-w-0 flex-1">
+                    <div className="flex items-center gap-1.5 text-sm font-extrabold">
+                      {probing ? (
+                        <Loader2 className="h-4 w-4 animate-spin text-[#1E3A5F]" />
+                      ) : activeProbe?.hasQuota ? (
+                        <CheckCircle2 className="h-4 w-4 text-[#14532D]" />
+                      ) : activeProbe ? (
+                        <AlertCircle className="h-4 w-4 text-[#9A3412]" />
+                      ) : (
+                        <Gauge className="h-4 w-4 text-[#1E3A5F]" />
+                      )}
+                      <span
+                        className={
+                          activeProbe?.hasQuota
+                            ? 'text-[#14532D]'
+                            : activeProbe
+                              ? 'text-[#9A3412]'
+                              : 'text-[#1E3A5F]'
+                        }
+                      >
+                        {probing
+                          ? 'در حال استعلام زنده از سرویس هوش مصنوعی...'
+                          : activeProbe
+                            ? `استعلام زنده: ${activeProbe.statusLabelFa}`
+                            : 'برای مشاهده وضعیت لحظه‌ای روی «استعلام زنده» بزنید'}
+                      </span>
+                    </div>
+                    <p className="text-xs text-[#292524] leading-5">
+                      {activeProbe?.detailFa ||
+                        'این استعلام یک بررسی واقعی از سرویس متصل انجام می‌دهد تا از داشتن سهمیه و فعال بودن کلید مطمئن شوید.'}
+                    </p>
+                    <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[11px] text-[#57534E] tabular-nums">
+                      <span>مسیر فعال: <strong>{activeProviderSummary}</strong></span>
+                      <span aria-hidden="true">·</span>
+                      <span>آخرین استعلام: {formattedProbeTime}</span>
+                      {activeProbe && (
+                        <>
+                          <span aria-hidden="true">·</span>
+                          <span>زمان پاسخ: {toPersianDigits(activeProbe.latencyMs)} میلی‌ثانیه</span>
+                        </>
+                      )}
+                    </div>
+                  </div>
+
+                  <div className="flex flex-wrap items-center gap-2 shrink-0">
+                    <button
+                      type="button"
+                      onClick={() => void onRunLiveProbe()}
+                      disabled={probing}
+                      className="inline-flex min-h-[36px] items-center gap-1.5 rounded-lg border border-[#1E3A5F] bg-white px-3 py-1.5 text-xs font-bold text-[#1E3A5F] hover:bg-[#EEF3F8] disabled:opacity-50 cursor-pointer"
+                    >
+                      <RefreshCw className={`h-3.5 w-3.5 ${probing ? 'animate-spin' : ''}`} />
+                      <span>استعلام زنده</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        onClose();
+                        onOpenProviderSettings();
+                      }}
+                      className="inline-flex min-h-[36px] items-center gap-1.5 rounded-lg bg-[#1E3A5F] px-3 py-1.5 text-xs font-bold text-white hover:bg-[#162C49] cursor-pointer"
+                    >
+                      <KeyRound className="h-3.5 w-3.5" />
+                      <span>تغییر ارائه‌دهنده / کلید</span>
+                    </button>
+                  </div>
                 </div>
 
-                <div className="grid grid-cols-2 sm:grid-cols-4 gap-px overflow-hidden rounded-xl border border-[#E2DDD3] bg-[#ECE7DD] tabular-nums">
-                  <div className="bg-white p-3.5 space-y-1">
-                    <div className="text-[11px] text-[#78716C]">مصرف ثبت‌شده توکن</div>
-                    <div className="text-base font-extrabold text-[#1A1816]">
-                      {formatCompactTokensFa(snapshot.consumedTokens)}
+                {/* Live provider rate-limit headers (when returned by custom providers) */}
+                {activeProbe &&
+                  (activeProbe.rateLimitRemainingRequests != null ||
+                    activeProbe.rateLimitRemainingTokens != null) && (
+                    <div className="border-t border-black/10 pt-2 text-xs font-semibold tabular-nums text-[#14532D]">
+                      {activeProbe.rateLimitRemainingRequests != null && (
+                        <span className="ml-4">
+                          درخواست باقی‌مانده واقعی (اعلام سرویس):{' '}
+                          {toPersianDigits(activeProbe.rateLimitRemainingRequests)}
+                        </span>
+                      )}
+                      {activeProbe.rateLimitRemainingTokens != null && (
+                        <span>
+                          توکن باقی‌مانده واقعی (اعلام سرویس):{' '}
+                          {toPersianDigits(activeProbe.rateLimitRemainingTokens)}
+                        </span>
+                      )}
                     </div>
-                    <div className={`text-[11px] font-semibold ${STATUS_TEXT_COLOR[snapshot.statusLevel]}`}>
-                      {snapshot.statusLabel} · {toPersianDigits(snapshot.consumedPercent)}٪
-                    </div>
-                  </div>
+                  )}
 
-                  <div className="bg-white p-3.5 space-y-1">
-                    <div className="text-[11px] text-[#78716C]">مانده تا سقف مرجع</div>
-                    <div className="text-base font-extrabold text-[#1A1816]">
-                      {formatCompactTokensFa(spec.remainingBudgetTokens)}
-                    </div>
-                    <div className="text-[11px] text-[#57534E]">
-                      سقف مدل: {formatCompactTokensFa(spec.softBudgetTokens)}
-                    </div>
+                {creatorProbe && activeProbe?.keySource !== 'creator' && (
+                  <div className="border-t border-black/10 pt-2 text-[11px] text-[#44403C]">
+                    وضعیت کلید سازنده اپلیکیشن:{' '}
+                    <strong className={creatorProbe.hasQuota ? 'text-[#14532D]' : 'text-[#9A3412]'}>
+                      {creatorProbe.statusLabelFa}
+                    </strong>
                   </div>
-
-                  <div className="bg-white p-3.5 space-y-1">
-                    <div className="text-[11px] text-[#78716C]">درخواست‌های AI ثبت‌شده</div>
-                    <div className="text-base font-extrabold text-[#1A1816]">
-                      {toPersianDigits(snapshot.requestCount)} از {toPersianDigits(spec.softRequestCap)}
-                    </div>
-                    <div className="text-[11px] text-[#57534E]">
-                      گوگل {toPersianDigits(usage.groundingCallCount)} · بازبینی{' '}
-                      {toPersianDigits(usage.deepReviewCount)} · چت{' '}
-                      {toPersianDigits(usage.chatCallCount)}
-                    </div>
-                  </div>
-
-                  <div className="bg-white p-3.5 space-y-1">
-                    <div className="text-[11px] text-[#78716C]">معادل هزینه پلن پولی</div>
-                    <div className="text-base font-extrabold text-[#1A1816] font-mono" dir="ltr">
-                      <span className="block text-right">{snapshot.formattedCostUsd}</span>
-                    </div>
-                    <div className="text-[11px] text-[#57534E]">
-                      تخمین فایل‌ها: ~{formatCompactTokensFa(snapshot.estimatedDocumentTokens)}
-                    </div>
-                  </div>
-                </div>
-
-                {/* Progress Bars for Token Budget & Request Cap */}
-                <div className="rounded-xl border border-[#E2DDD3] bg-white p-4 space-y-3.5 tabular-nums">
-                  <div className="space-y-1.5">
-                    <div className="flex items-center justify-between text-xs">
-                      <span className="font-semibold text-[#44403C]">
-                        سهمیه مرجع توکن پروژه ({spec.modelDisplayName})
-                      </span>
-                      <span className="font-bold text-[#1A1816]">
-                        {formatCompactTokensFa(snapshot.consumedTokens)} /{' '}
-                        {formatCompactTokensFa(spec.softBudgetTokens)} ({toPersianDigits(snapshot.consumedPercent)}٪)
-                      </span>
-                    </div>
-                    <div className="h-2 w-full overflow-hidden rounded-full bg-[#ECE7DD]">
-                      <div
-                        className={`h-full rounded-full ${STATUS_BAR_COLOR[snapshot.statusLevel]}`}
-                        style={{ width: `${snapshot.consumedPercent}%` }}
-                      />
-                    </div>
-                  </div>
-
-                  <div className="space-y-1.5">
-                    <div className="flex items-center justify-between text-xs">
-                      <span className="font-semibold text-[#44403C]">
-                        سهمیه نرم تعداد درخواست‌ها (جلوگیری از خطای نرخ درخواست 429)
-                      </span>
-                      <span className="font-bold text-[#1A1816]">
-                        {toPersianDigits(snapshot.requestCount)} / {toPersianDigits(spec.softRequestCap)} درخواست (
-                        {toPersianDigits(spec.requestPercent)}٪)
-                      </span>
-                    </div>
-                    <div className="h-2 w-full overflow-hidden rounded-full bg-[#ECE7DD]">
-                      <div
-                        className="h-full rounded-full bg-[#1E3A5F]"
-                        style={{ width: `${spec.requestPercent}%` }}
-                      />
-                    </div>
-                  </div>
-                </div>
+                )}
               </section>
 
-              {/* Technical Limits Matrix */}
-              <section aria-label="جدول محدودیت‌های فنی پروژه" className="space-y-2.5">
-                <h3 className="text-sm font-extrabold text-[#1A1816]">
-                  محدودیت‌های فنی و ظرفیت پردازش پروژه
-                </h3>
-
-                <div className="overflow-x-auto rounded-xl border border-[#E2DDD3] bg-white">
-                  <table className="w-full text-right text-xs border-collapse">
-                    <thead>
-                      <tr className="border-b border-[#E7E2D8] bg-[#F7F4EE] text-[#57534E]">
-                        <th className="px-4 py-2.5 font-bold">پارامتر فنی</th>
-                        <th className="px-4 py-2.5 font-bold">مقدار / وضعیت فعلی</th>
-                        <th className="px-4 py-2.5 font-bold">اثر عملی بر پروژه</th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-[#EFECE4] text-[#292524] tabular-nums">
-                      <tr>
-                        <td className="px-4 py-2.5 font-semibold whitespace-nowrap">مدل و مسیر جایگزین</td>
-                        <td className="px-4 py-2.5 font-mono text-[11px]" dir="ltr">
-                          <span className="block text-right">{spec.modelId}</span>
-                        </td>
-                        <td className="px-4 py-2.5 text-[#57534E]">
-                          در صورت خطای سهمیه (429) به‌طور خودکار به <span className="font-mono" dir="ltr">gemini-3.1-flash-lite</span> سوییچ می‌شود.
-                        </td>
-                      </tr>
-                      <tr>
-                        <td className="px-4 py-2.5 font-semibold whitespace-nowrap">حالت جستجوی گوگل</td>
-                        <td className="px-4 py-2.5 font-medium">{spec.groundingModeLabel}</td>
-                        <td className="px-4 py-2.5 text-[#57534E]">
-                          هر فصل در تکمیل گوگل یک درخواست جداگانه (~۱.۸ هزار توکن) مصرف می‌کند.
-                        </td>
-                      </tr>
-                      <tr>
-                        <td className="px-4 py-2.5 font-semibold whitespace-nowrap">تعداد فایل‌های پروژه</td>
-                        <td className="px-4 py-2.5 font-medium">
-                          {toPersianDigits(totalFilesCount)} فایل ({toPersianDigits(ingestedFilesCount)} پردازش‌شده · {toPersianDigits(queuedFilesCount)} در صف)
-                        </td>
-                        <td className="px-4 py-2.5 text-[#57534E]">
-                          استخراج، حذف تکراری‌های بدون افت و ساخت ورد تماماً محلی است؛ ادغام ۵۰ تا ۱۰۰+ فایل به سقف توکن هوش مصنوعی نمی‌خورد.
-                        </td>
-                      </tr>
-                      <tr>
-                        <td className="px-4 py-2.5 font-semibold whitespace-nowrap">سقف هر بسته ارسال به سرور</td>
-                        <td className="px-4 py-2.5 font-medium">
-                          {toPersianDigits(spec.httpPayloadLimitMb)} مگابایت در هر درخواست
-                        </td>
-                        <td className="px-4 py-2.5 text-[#57534E]">
-                          برای فایل‌های بسیار حجیم، بارگذاری در چند نوبت متوالی بدون از دست رفتن فایل‌های قبلی انجام می‌شود.
-                        </td>
-                      </tr>
-                      <tr>
-                        <td className="px-4 py-2.5 font-semibold whitespace-nowrap">عملیات رایگان بدون توکن</td>
-                        <td className="px-4 py-2.5 font-medium text-[#14532D]">نامحدود (سمت سرور / مرورگر)</td>
-                        <td className="px-4 py-2.5 text-[#57534E]">
-                          تجزیه Word/PDF/Markdown، ادغام ۱۰۰٪ بدون افت، ویرایش دستی فصل‌ها، نمودارهای SVG داخلی و خروجی نهایی <span className="font-mono">.docx</span> هیچ توکنی مصرف نمی‌کنند.
-                        </td>
-                      </tr>
-                    </tbody>
-                  </table>
+              {/* 4-Metric Remaining & Consumed Summary Strip */}
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-px overflow-hidden rounded-xl border border-[#E2DDD3] bg-[#ECE7DD] tabular-nums">
+                <div className="bg-white p-3.5 space-y-1">
+                  <div className="text-[11px] text-[#78716C]">سهمیه باقی‌مانده این پروژه</div>
+                  <div className="text-base font-extrabold text-[#14532D]">
+                    {formatCompactTokensFa(snapshot.remainingTokens)}
+                  </div>
+                  <div className="text-[11px] text-[#57534E]">
+                    {toPersianDigits(snapshot.remainingPercent)}٪ باقی‌مانده (≈{' '}
+                    {toPersianDigits(snapshot.remainingPagesEquivalent)} صفحه)
+                  </div>
                 </div>
-              </section>
+
+                <div className="bg-white p-3.5 space-y-1">
+                  <div className="text-[11px] text-[#78716C]">مصرف واقعی ثبت‌شده</div>
+                  <div className="text-base font-extrabold text-[#1A1816]">
+                    {formatCompactTokensFa(snapshot.consumedTokens)}
+                  </div>
+                  <div className={`text-[11px] font-semibold ${STATUS_TEXT_COLOR[snapshot.statusLevel]}`}>
+                    {toPersianDigits(snapshot.consumedPercent)}٪ از{' '}
+                    {formatCompactTokensFa(spec.softBudgetTokens)}
+                  </div>
+                </div>
+
+                <div className="bg-white p-3.5 space-y-1">
+                  <div className="text-[11px] text-[#78716C]">مصرف کل حساب (همه پروژه‌ها)</div>
+                  <div className="text-base font-extrabold text-[#1A1816]">
+                    {formatCompactTokensFa(accountUsage?.allProjectsTokens ?? snapshot.consumedTokens)}
+                  </div>
+                  <div className="text-[11px] text-[#57534E]">
+                    در {toPersianDigits(accountUsage?.projectCount ?? 1)} پروژه (
+                    {toPersianDigits(accountUsage?.allProjectsRequests ?? snapshot.requestCount)} درخواست)
+                  </div>
+                </div>
+
+                <div className="bg-white p-3.5 space-y-1">
+                  <div className="text-[11px] text-[#78716C]">معادل هزینه پلن پولی</div>
+                  <div className="text-base font-extrabold text-[#1A1816] font-mono" dir="ltr">
+                    <span className="block text-right">{snapshot.formattedCostUsd}</span>
+                  </div>
+                  <div className="text-[11px] text-[#57534E]">
+                    {toPersianDigits(totalFilesCount)} فایل ({toPersianDigits(snapshot.estimatedDocumentPages)} صفحه)
+                  </div>
+                </div>
+              </div>
+
+              {/* Progress Bars */}
+              <div className="rounded-xl border border-[#E2DDD3] bg-white p-4 space-y-3.5 tabular-nums">
+                <div className="space-y-1.5">
+                  <div className="flex items-center justify-between text-xs">
+                    <span className="font-semibold text-[#44403C]">
+                      سهمیه باقی‌مانده توکن پروژه ({spec.modelDisplayName})
+                    </span>
+                    <span className="font-bold text-[#14532D]">
+                      {toPersianDigits(snapshot.remainingPercent)}٪ باقی‌مانده ·{' '}
+                      {formatCompactTokensFa(snapshot.remainingTokens)} از{' '}
+                      {formatCompactTokensFa(spec.softBudgetTokens)}
+                    </span>
+                  </div>
+                  <div className="h-2 w-full overflow-hidden rounded-full bg-[#ECE7DD]">
+                    <div
+                      className={`h-full rounded-full ${STATUS_BAR_COLOR[snapshot.statusLevel]}`}
+                      style={{ width: `${snapshot.consumedPercent}%` }}
+                    />
+                  </div>
+                </div>
+
+                <div className="space-y-1.5">
+                  <div className="flex items-center justify-between text-xs">
+                    <span className="font-semibold text-[#44403C]">
+                      تعداد درخواست‌های باقی‌مانده در سقف نرم
+                    </span>
+                    <span className="font-bold text-[#1A1816]">
+                      {toPersianDigits(spec.remainingSoftRequests)} درخواست باقی‌مانده (مصرف:{' '}
+                      {toPersianDigits(snapshot.requestCount)} از {toPersianDigits(spec.softRequestCap)})
+                    </span>
+                  </div>
+                  <div className="h-2 w-full overflow-hidden rounded-full bg-[#ECE7DD]">
+                    <div
+                      className="h-full rounded-full bg-[#1E3A5F]"
+                      style={{ width: `${spec.requestPercent}%` }}
+                    />
+                  </div>
+                </div>
+
+                <p className="text-[11px] leading-5 text-[#57534E] border-t border-[#EFECE4] pt-2.5">
+                  <strong>شفافیت فنی استعلام:</strong> سرویس Google AI Studio به‌صورت عمومی عدد دقیق «مانده اعتبار کل اکانت» را از طریق API برنمی‌گرداند؛ بنابراین این برنامه هم‌زمان <strong>یک تست زنده واقعی</strong> برای اطمینان از فعال بودن و پر نبودن سهمیه (عدم خطای 429) می‌گیرد و هم میزان مصرف و باقی‌مانده بودجه شما را از روی <strong>توکن‌های واقعی ثبت‌شده در دیتابیس</strong> محاسبه می‌کند.
+                </p>
+              </div>
             </div>
           )}
 
-          {/* TAB 2: EXACT CALCULATION METHODOLOGY */}
+          {/* TAB 2: SUPER SIMPLE TOKEN CALCULATION */}
           {activeTab === 'calculation' && (
-            <div role="tabpanel" className="space-y-6">
-              {/* 1. Real server-side metering */}
+            <div role="tabpanel" className="space-y-5">
+              {/* Plain Everyday Formula Card */}
+              <section className="rounded-xl border border-[#C6D5E6] bg-[#F3F7FB] p-4 space-y-3">
+                <h3 className="text-sm font-extrabold text-[#1E3A5F]">
+                  {spec.simpleExplanation.ruleTitle}
+                </h3>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
+                  <div className="rounded-lg border border-[#D8E2EE] bg-white p-3 space-y-1">
+                    <div className="font-extrabold text-[#1E3A5F]">قانون ۱: بر اساس تعداد کلمات</div>
+                    <p className="text-[#292524] leading-5">
+                      {spec.simpleExplanation.wordRuleText}
+                    </p>
+                    <div className="pt-1 font-bold text-[#14532D] tabular-nums">
+                      تعداد کلمات × ۲ = توکن تقریبی
+                    </div>
+                  </div>
+
+                  <div className="rounded-lg border border-[#D8E2EE] bg-white p-3 space-y-1">
+                    <div className="font-extrabold text-[#1E3A5F]">قانون ۲: بر اساس تعداد صفحه ورد</div>
+                    <p className="text-[#292524] leading-5">
+                      {spec.simpleExplanation.pageRuleText}
+                    </p>
+                    <div className="pt-1 font-bold text-[#14532D] tabular-nums">
+                      تعداد صفحه × ۸۰۰ = توکن تقریبی
+                    </div>
+                  </div>
+                </div>
+
+                {/* Live Worked Example on Current Project */}
+                <div className="rounded-lg border border-[#C7DDD0] bg-white p-3.5 space-y-1.5 text-xs leading-6 text-[#1A1816] tabular-nums">
+                  <div className="font-extrabold text-[#14532D]">محاسبه ساده روی سند فعلی شما:</div>
+                  <p>{spec.simpleExplanation.projectWorkedExample}</p>
+                  <p className="text-[#44403C]">{spec.simpleExplanation.remainingSimpleText}</p>
+                </div>
+              </section>
+
+              {/* Simple Breakdown Table of What Uses Tokens vs What Is Free */}
               <section className="space-y-2.5">
                 <h3 className="text-sm font-extrabold text-[#1A1816]">
-                  ۱. ثبت واقعی مصرف پس از هر فراخوانی (Server-Side Metering)
+                  چه کارهایی توکن مصرف می‌کنند و چه کارهایی کاملاً رایگانند؟
                 </h3>
-                <p className="text-xs leading-6 text-[#44403C]">
-                  پس از پایان هر فراخوانی به Gemini (پالایش فهرست فصل‌ها، پالایش هوشمند تناقض‌ها، بررسی و تکمیل با جستجوی گوگل، بازبینی عمیق و پیام‌های چتبات)، سرور چهار شمارنده رسمی برگشتی در آبجکت{' '}
-                  <code className="rounded bg-[#EFECE4] px-1.5 py-0.5 font-mono text-[11px] text-[#1E3A5F]" dir="ltr">
-                    usageMetadata
-                  </code>{' '}
-                  را می‌خواند و به‌صورت تجمعی در فیلد{' '}
-                  <code className="rounded bg-[#EFECE4] px-1.5 py-0.5 font-mono text-[11px] text-[#1E3A5F]" dir="ltr">
-                    checkpointJson.aiUsage
-                  </code>{' '}
-                  در دیتابیس PostgreSQL همین پروژه ذخیره می‌کند:
-                </p>
-
                 <div className="overflow-x-auto rounded-xl border border-[#E2DDD3] bg-white">
                   <table className="w-full text-right text-xs border-collapse tabular-nums">
                     <thead>
                       <tr className="border-b border-[#E7E2D8] bg-[#F7F4EE] text-[#57534E]">
-                        <th className="px-4 py-2.5 font-bold">بخش توکن</th>
-                        <th className="px-4 py-2.5 font-bold">کلید API</th>
-                        <th className="px-4 py-2.5 font-bold">ثبت‌شده در این پروژه</th>
-                        <th className="px-4 py-2.5 font-bold">شامل چه مواردی است؟</th>
+                        <th className="px-4 py-2.5 font-bold">عملیات در برنامه</th>
+                        <th className="px-4 py-2.5 font-bold">مصرف تقریبی</th>
+                        <th className="px-4 py-2.5 font-bold">توضیح ساده</th>
                       </tr>
                     </thead>
-                    <tbody className="divide-y divide-[#EFECE4]">
+                    <tbody className="divide-y divide-[#EFECE4] text-[#292524]">
                       <tr>
-                        <td className="px-4 py-2.5 font-semibold whitespace-nowrap">توکن ورودی</td>
-                        <td className="px-4 py-2.5 font-mono text-[11px] text-[#1E3A5F]" dir="ltr">
-                          <span className="block text-right">promptTokenCount</span>
-                        </td>
-                        <td className="px-4 py-2.5 font-bold">
-                          {formatCompactTokensFa(usage.promptTokens)} ({toPersianDigits(spec.promptSharePercent)}٪)
-                        </td>
+                        <td className="px-4 py-2.5 font-semibold">آپلود، ادغام بدون افت و دانلود ورد (.docx)</td>
+                        <td className="px-4 py-2.5 font-bold text-[#14532D]">صفر توکن (رایگان)</td>
                         <td className="px-4 py-2.5 text-[#57534E]">
-                          دستور سیستمی، چکیده فشرده فصل‌ها (نه متن خام همه فایل‌ها) و سوال یا درخواست شما.
+                          حتی ادغام ۵۰ تا ۱۰۰ فایل ورد و ساخت فایل خروجی هیچ توکنی مصرف نمی‌کند.
                         </td>
                       </tr>
                       <tr>
-                        <td className="px-4 py-2.5 font-semibold whitespace-nowrap">توکن خروجی</td>
-                        <td className="px-4 py-2.5 font-mono text-[11px] text-[#1E3A5F]" dir="ltr">
-                          <span className="block text-right">candidatesTokenCount</span>
-                        </td>
-                        <td className="px-4 py-2.5 font-bold">
-                          {formatCompactTokensFa(usage.outputTokens)} ({toPersianDigits(spec.outputSharePercent)}٪)
-                        </td>
+                        <td className="px-4 py-2.5 font-semibold">یک پیام به چت‌بات سردبیر</td>
+                        <td className="px-4 py-2.5 font-bold">حدود ۱ تا ۳ هزار توکن</td>
                         <td className="px-4 py-2.5 text-[#57534E]">
-                          متن فارسی تولیدشده، جداول، گزارش بازبینی عمیق یا ساختار JSON خروجی مدل.
+                          معادل حدود ۲ تا ۴ صفحه متن.
                         </td>
                       </tr>
                       <tr>
-                        <td className="px-4 py-2.5 font-semibold whitespace-nowrap">توکن استدلال</td>
-                        <td className="px-4 py-2.5 font-mono text-[11px] text-[#1E3A5F]" dir="ltr">
-                          <span className="block text-right">thoughtsTokenCount</span>
-                        </td>
-                        <td className="px-4 py-2.5 font-bold">
-                          {formatCompactTokensFa(usage.thinkingTokens)} ({toPersianDigits(spec.thinkingSharePercent)}٪)
-                        </td>
+                        <td className="px-4 py-2.5 font-semibold">تکمیل یک فصل با جستجوی گوگل</td>
+                        <td className="px-4 py-2.5 font-bold">حدود ۲ هزار توکن</td>
                         <td className="px-4 py-2.5 text-[#57534E]">
-                          استدلال داخلی مدل در سطوح <span className="font-mono">MEDIUM / HIGH / XHIGH</span> (مثلاً در بازبینی با قدرت بیشتر). در محاسبه سهمیه هم‌ردیف خروجی است.
+                          هر فصل یک جستجوی مجزا و مستقل انجام می‌دهد.
+                        </td>
+                      </tr>
+                      <tr>
+                        <td className="px-4 py-2.5 font-semibold">بازبینی عمیق کل سند با هوش مصنوعی</td>
+                        <td className="px-4 py-2.5 font-bold">حدود ۱۰ تا ۲۵ هزار توکن</td>
+                        <td className="px-4 py-2.5 text-[#57534E]">
+                          فقط خلاصه فصل‌ها فرستاده می‌شود (نه کل متن خام) تا مصرف پایین بماند.
                         </td>
                       </tr>
                     </tbody>
                   </table>
                 </div>
-
-                <p className="text-[11.5px] leading-5 text-[#57534E]">
-                  در موارد نادری که پاسخ API فاقد <code className="font-mono" dir="ltr">usageMetadata</code> باشد، سیستم از فرمول پشتیبان{' '}
-                  <code className="rounded bg-[#EFECE4] px-1.5 py-0.5 font-mono text-[11px]" dir="ltr">
-                    ceil(characters / {spec.fallbackCharsPerToken})
-                  </code>{' '}
-                  استفاده می‌کند تا هیچ فراخوانی بدون ثبت باقی نماند.
-                </p>
               </section>
 
-              {/* 2. Pre-run estimation & cost formula */}
-              <section className="space-y-3 border-t border-[#E7E2D8] pt-5">
-                <h3 className="text-sm font-extrabold text-[#1A1816]">
-                  ۲. فرمول تخمین پیش از اجرا، آستانه‌های هشدار و معادل هزینه
+              {/* Real Recorded Token Split */}
+              <section className="space-y-2">
+                <h3 className="text-xs font-extrabold text-[#1A1816]">
+                  آمار دقیق توکن‌های ثبت‌شده توسط سرور در این پروژه
                 </h3>
-
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                  <div className="rounded-xl border border-[#E2DDD3] bg-white p-4 space-y-2">
-                    <div className="text-xs font-bold text-[#1E3A5F]">تخمین حجم پیکره فارسی</div>
-                    <ul className="space-y-1.5 text-xs leading-5.5 text-[#44403C] tabular-nums">
-                      <li>
-                        • فایل‌های پردازش‌شده:{' '}
-                        <span className="font-mono text-[11px] text-[#1A1816]" dir="ltr">
-                          words × {spec.persianWordTokenMultiplier}
-                        </span>{' '}
-                        (هر کلمه فارسی/فنی به‌طور میانگین ۲٫۱ تا ۲٫۴ توکن UTF-8 است).
-                      </li>
-                      <li>
-                        • فایل‌های در صف پیش از پردازش:{' '}
-                        <span className="font-mono text-[11px] text-[#1A1816]" dir="ltr">
-                          bytes × {spec.queuedByteTokenMultiplier}
-                        </span>{' '}
-                        (با احتساب فشرده‌سازی <span className="font-mono">.docx</span> و <span className="font-mono">.pdf</span>).
-                      </li>
-                      <li>
-                        • برآورد نوبت بعدی این پروژه:{' '}
-                        <strong className="text-[#1A1816]">
-                          ~{formatCompactTokensFa(spec.estimatedNextPassTokens)} توکن
-                        </strong>{' '}
-                        (چکیده حداکثر ۲۸ هزار توکن + سهم تکمیل گوگل).
-                      </li>
-                    </ul>
-                  </div>
-
-                  <div className="rounded-xl border border-[#E2DDD3] bg-white p-4 space-y-2">
-                    <div className="text-xs font-bold text-[#1E3A5F]">
-                      آستانه‌های نشانگر و معادل هزینه پلن پولی
+                <div className="grid grid-cols-3 gap-2 text-xs tabular-nums">
+                  <div className="rounded-lg border border-[#E2DDD3] bg-white p-3">
+                    <div className="text-[11px] text-[#78716C]">ورودی (متن ارسالی)</div>
+                    <div className="mt-1 font-extrabold text-[#1A1816]">
+                      {formatCompactTokensFa(usage.promptTokens)} ({toPersianDigits(spec.promptSharePercent)}٪)
                     </div>
-                    <ul className="space-y-1.5 text-xs leading-5.5 text-[#44403C] tabular-nums">
-                      <li>
-                        • <strong className="text-[#14532D]">مصرف بهینه:</strong> کمتر از {toPersianDigits(spec.warningThresholdPercent)}٪ سقف مرجع توکن و تعداد درخواست.
-                      </li>
-                      <li>
-                        • <strong className="text-[#B45309]">متوسط رو به بالا:</strong> بین {toPersianDigits(spec.warningThresholdPercent)}٪ تا {toPersianDigits(spec.criticalThresholdPercent - 1)}٪ (بیشینه نسبت توکن یا درخواست).
-                      </li>
-                      <li>
-                        • <strong className="text-[#9A3412]">نزدیک سقف سهمیه:</strong> از {toPersianDigits(spec.criticalThresholdPercent)}٪ به بالا (توصیه به سوییچ به Flash Lite).
-                      </li>
-                      <li>
-                        • نرخ مرجع مدل فعال (<span className="font-mono text-[11px]">{spec.modelId}</span>):{' '}
-                        <span className="font-mono text-[11px] text-[#1A1816]" dir="ltr">
-                          ${spec.inputRatePerMillionUsd.toFixed(2)}/1M in · ${spec.outputRatePerMillionUsd.toFixed(2)}/1M out
-                        </span>
-                      </li>
-                    </ul>
+                  </div>
+                  <div className="rounded-lg border border-[#E2DDD3] bg-white p-3">
+                    <div className="text-[11px] text-[#78716C]">خروجی (پاسخ تولیدشده)</div>
+                    <div className="mt-1 font-extrabold text-[#1A1816]">
+                      {formatCompactTokensFa(usage.outputTokens)} ({toPersianDigits(spec.outputSharePercent)}٪)
+                    </div>
+                  </div>
+                  <div className="rounded-lg border border-[#E2DDD3] bg-white p-3">
+                    <div className="text-[11px] text-[#78716C]">تفکر و استدلال مدل</div>
+                    <div className="mt-1 font-extrabold text-[#1A1816]">
+                      {formatCompactTokensFa(usage.thinkingTokens)} ({toPersianDigits(spec.thinkingSharePercent)}٪)
+                    </div>
                   </div>
                 </div>
               </section>
             </div>
           )}
 
-          {/* TAB 3: PROJECT QUOTA VS PERSONAL USER QUOTA */}
+          {/* TAB 3: CREATOR KEY VS PERSONAL KEY & CUSTOM PROVIDER */}
           {activeTab === 'quota_model' && (
-            <div role="tabpanel" className="space-y-6">
-              {/* Direct Executive Answer */}
+            <div role="tabpanel" className="space-y-5">
               <section className="rounded-xl border border-[#D4DFEC] bg-[#F3F7FB] p-4 space-y-2">
                 <h3 className="text-sm font-extrabold text-[#1E3A5F]">
-                  معماری فعلی این اپلیکیشن: استفاده از سهمیه متمرکز پروژه (سرور)
+                  ۳ روش استفاده از هوش مصنوعی در این اپلیکیشن
                 </h3>
                 <p className="text-xs leading-6 text-[#292524]">
-                  در این پلتفرم، <strong>ورود با حساب گوگل (Google Sign-In)</strong> صرفاً برای احراز هویت، جدا کردن فضای کاری هر کاربر در دیتابیس و حفظ امنیت اسناد شماست. تمامی درخواست‌های هوش مصنوعی از سمت سرور و با کلید API متصل به پروژه (<code className="font-mono text-[11px]" dir="ltr">GEMINI_API_KEY</code>) اجرا می‌شوند؛ بنابراین <strong>هیچ سهمیه‌ای از اکانت شخصی یا پلن گوگل کاربران کسر نمی‌شود</strong> و کاربران نیازی به ساخت پروژه Cloud یا دریافت کلید API شخصی ندارند.
+                  شما آزادید هر زمان که خواستید منبع کلید خود را تغییر دهید: در حالت پیش‌فرض <strong>Google AI Studio</strong>، برنامه در لحظه کلید سازنده اپلیکیشن را استعلام می‌گیرد؛ اگر شارژ و سهمیه داشت می‌توانید رایگان از آن استفاده کنید، و اگر تمام شده بود (یا حتی زمانی که هنوز شارژ دارد) می‌توانید <strong>کلید شخصی خودتان</strong> یا هر <strong>ارائه‌دهنده سفارشی (Base URL + API Key)</strong> را ثبت کنید.
                 </p>
               </section>
 
-              {/* Detailed Side-by-Side Comparison Table */}
-              <section aria-label="جدول مقایسه سهمیه پروژه و سهمیه شخصی" className="space-y-2.5">
-                <h3 className="text-sm font-extrabold text-[#1A1816]">
-                  مقایسه دقیق: سهمیه پروژه (مدل فعلی) در برابر سهمیه شخصی کاربر (BYOK / OAuth)
-                </h3>
+              <div className="overflow-x-auto rounded-xl border border-[#E2DDD3] bg-white">
+                <table className="w-full text-right text-xs border-collapse">
+                  <thead>
+                    <tr className="border-b border-[#E7E2D8] bg-[#F7F4EE] text-[#57534E]">
+                      <th className="px-4 py-2.5 font-bold">حالت استفاده</th>
+                      <th className="px-4 py-2.5 font-bold">سهمیه از کجا کم می‌شود؟</th>
+                      <th className="px-4 py-2.5 font-bold">ویژگی‌ها و مدل‌ها</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-[#EFECE4] text-[#292524]">
+                    <tr>
+                      <td className="px-4 py-2.5 font-bold text-[#1E3A5F] whitespace-nowrap">
+                        ۱. کلید سازنده اپلیکیشن (Google AI Studio)
+                      </td>
+                      <td className="px-4 py-2.5">
+                        از سهمیه پروژه سازنده (رایگان برای شما تا زمان موجود بودن سهمیه).
+                      </td>
+                      <td className="px-4 py-2.5 text-[#57534E]">
+                        استعلام زنده در لحظه · مدل‌های Gemini 4 Hydrogen و Gemini 3.8 Flash + جستجوی گوگل.
+                      </td>
+                    </tr>
+                    <tr>
+                      <td className="px-4 py-2.5 font-bold text-[#14532D] whitespace-nowrap">
+                        ۲. کلید شخصی شما (Google AI Studio)
+                      </td>
+                      <td className="px-4 py-2.5">
+                        مستقیماً از اکانت Google AI Studio خودتان (کاملاً مستقل از سایر کاربران).
+                      </td>
+                      <td className="px-4 py-2.5 text-[#57534E]">
+                        قابل انتخاب در هر زمان (حتی وقتی کلید سازنده شارژ دارد) · هر دو مدل Hydrogen 4 و Flash 3.8 + جستجوی گوگل.
+                      </td>
+                    </tr>
+                    <tr>
+                      <td className="px-4 py-2.5 font-bold text-[#5B21B6] whitespace-nowrap">
+                        ۳. ارائه‌دهنده سفارشی (Base URL + API Key)
+                      </td>
+                      <td className="px-4 py-2.5">
+                        از اعتبار سرویس دلخواه شما (OpenRouter، OpenAI، DeepSeek، Groq و...).
+                      </td>
+                      <td className="px-4 py-2.5 text-[#57534E]">
+                        انتخاب آزاد هر مدل دلخواه · فقط از مسیر امن HTTPS سرور ارسال می‌شود.
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
 
-                <div className="overflow-x-auto rounded-xl border border-[#E2DDD3] bg-white">
-                  <table className="w-full text-right text-xs border-collapse">
-                    <thead>
-                      <tr className="border-b border-[#E7E2D8] bg-[#F7F4EE] text-[#57534E]">
-                        <th className="px-4 py-2.5 font-bold">معیار مقایسه</th>
-                        <th className="px-4 py-2.5 font-bold text-[#1E3A5F]">
-                          سهمیه پروژه / سرور (فعال در این اپ)
-                        </th>
-                        <th className="px-4 py-2.5 font-bold">سهمیه شخصی هر کاربر (اکانت خود کاربر)</th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-[#EFECE4] text-[#292524]">
-                      <tr>
-                        <td className="px-4 py-2.5 font-semibold whitespace-nowrap">منبع کسر توکن و هزینه</td>
-                        <td className="px-4 py-2.5">
-                          از کلید API و سهمیه پروژه مالک اپلیکیشن (سرور) کسر می‌شود.
-                        </td>
-                        <td className="px-4 py-2.5 text-[#57534E]">
-                          از کلید API شخصی یا پروژه Google Cloud خود کاربر کسر می‌شود.
-                        </td>
-                      </tr>
-                      <tr>
-                        <td className="px-4 py-2.5 font-semibold whitespace-nowrap">نیاز کاربر به پلن پولی یا Cloud</td>
-                        <td className="px-4 py-2.5 font-medium text-[#14532D]">
-                          ندارد — هر کاربر بلافاصله پس از ورود با جیمیل می‌تواند کار کند.
-                        </td>
-                        <td className="px-4 py-2.5 text-[#57534E]">
-                          نیاز دارد کاربر کلید AI Studio بسازد یا صورت‌حساب ابری فعال کند.
-                        </td>
-                      </tr>
-                      <tr>
-                        <td className="px-4 py-2.5 font-semibold whitespace-nowrap">رفتار در استفاده چندکاربره هم‌زمان</td>
-                        <td className="px-4 py-2.5">
-                          سقف درخواست در دقیقه (RPM) و روز (RPD) بین همه کاربران مشترک است؛ بنابراین در ترافیک بالا ممکن است خطای <span className="font-mono">429</span> رخ دهد.
-                        </td>
-                        <td className="px-4 py-2.5 text-[#57534E]">
-                          سقف هر کاربر مستقل است و مصرف یک کاربر روی سهمیه کاربر دیگر اثر نمی‌گذارد.
-                        </td>
-                      </tr>
-                      <tr>
-                        <td className="px-4 py-2.5 font-semibold whitespace-nowrap">امنیت کلید و کنترل دسترسی</td>
-                        <td className="px-4 py-2.5">
-                          کلید API هرگز به مرورگر ارسال نمی‌شود و فقط در محیط ایزوله سرور نگهداری می‌شود.
-                        </td>
-                        <td className="px-4 py-2.5 text-[#57534E]">
-                          نیازمند مدیریت امن ذخیره/رمزنگاری کلید کاربر یا نشست‌های مجاز اختصاصی است.
-                        </td>
-                      </tr>
-                      <tr>
-                        <td className="px-4 py-2.5 font-semibold whitespace-nowrap">تأثیر روی پردازش فایل‌ها</td>
-                        <td className="px-4 py-2.5">
-                          کاربر حتی در صورت پر شدن سهمیه AI پروژه، همچنان می‌تواند فایل‌ها را به‌صورت محلی ادغام و خروجی <span className="font-mono">.docx</span> دریافت کند.
-                        </td>
-                        <td className="px-4 py-2.5 text-[#57534E]">
-                          در صورت اتمام سهمیه شخصی، همان کاربر باید پلن خود را ارتقا دهد یا صبر کند.
-                        </td>
-                      </tr>
-                    </tbody>
-                  </table>
-                </div>
-              </section>
-
-              {/* Practical Optimization Checklist */}
-              <section className="space-y-2 border-t border-[#E7E2D8] pt-4">
-                <h3 className="text-xs font-extrabold text-[#1A1816]">
-                  راهکارهای عملی مدیریت سهمیه در پروژه‌های حجیم
-                </h3>
-                <ul className="space-y-1.5 text-xs leading-6 text-[#44403C]">
-                  <li>
-                    ۱. برای ادغام ۵۰ تا ۱۰۰+ فایل ورد بدون نیاز به هوش مصنوعی، تیک <strong>«تحلیل با هوش مصنوعی»</strong> را خاموش بگذارید تا موتور محلی با پوشش ۱۰۰٪ و بدون مصرف حتی یک توکن سند را بسازد.
-                  </li>
-                  <li>
-                    ۲. در پروژه‌های پرفصل، مدل را از <strong>Hydrogen</strong> به <strong>Flash Lite</strong> تغییر دهید تا سقف مرجع پروژه از ۲۵۰ هزار به ۴۰۰ هزار توکن افزایش یابد و معادل هزینه تا ۷۰٪ کاهش پیدا کند.
-                  </li>
-                  <li>
-                    ۳. گزینه <strong>«تکمیل کل سند با گوگل»</strong> را تنها پس از تأیید نهایی فهرست فصل‌ها اجرا کنید تا از تکرار درخواست جستجو جلوگیری شود.
-                  </li>
-                </ul>
-              </section>
+              <div className="flex items-center justify-end">
+                <button
+                  type="button"
+                  onClick={() => {
+                    onClose();
+                    onOpenProviderSettings();
+                  }}
+                  className="inline-flex min-h-[38px] items-center gap-1.5 rounded-lg border border-[#1E3A5F] bg-[#EEF3F8] px-4 py-2 text-xs font-bold text-[#1E3A5F] hover:bg-[#DFE9F4] cursor-pointer"
+                >
+                  <KeyRound className="h-3.5 w-3.5" />
+                  <span>باز کردن تنظیمات ارائه‌دهنده و کلید API</span>
+                </button>
+              </div>
             </div>
           )}
         </div>
@@ -618,13 +640,19 @@ export const AiQuotaInfoModal: React.FC<AiQuotaInfoModalProps> = ({
         {/* Footer */}
         <footer className="flex items-center justify-between gap-3 border-t border-[#E7E2D8] bg-white px-5 py-3 sm:px-6">
           <div className="text-[11px] text-[#78716C] tabular-nums truncate">
-            مدل فعال: <strong className="text-[#44403C]">{spec.modelDisplayName}</strong> · وضعیت:{' '}
-            <strong className={STATUS_TEXT_COLOR[snapshot.statusLevel]}>{snapshot.statusLabel}</strong>
+            مدل فعال:{' '}
+            <strong className="text-[#44403C]">
+              {providerSummary.modelLabel}
+            </strong>{' '}
+            · باقی‌مانده:{' '}
+            <strong className="text-[#14532D]">
+              {toPersianDigits(snapshot.remainingPercent)}٪
+            </strong>
           </div>
           <button
             type="button"
             onClick={onClose}
-            className="inline-flex min-h-[38px] shrink-0 items-center justify-center rounded-lg bg-[#1E3A5F] px-5 py-2 text-xs font-bold text-white hover:bg-[#162C49] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#1E3A5F] transition-colors cursor-pointer"
+            className="inline-flex min-h-[38px] shrink-0 items-center justify-center rounded-lg bg-[#1E3A5F] px-5 py-2 text-xs font-bold text-white hover:bg-[#162C49] cursor-pointer"
           >
             متوجه شدم
           </button>

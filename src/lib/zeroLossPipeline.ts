@@ -15,7 +15,14 @@ import {
   WorkflowMode,
 } from './bookTypes.ts';
 import { buildDiagramSvg } from './diagramRenderer.ts';
+import {
+  hasDisjointEcuPlatforms,
+  mergeCompatibleTablesLossless,
+  runTechnicalEntityIntegrityAudit,
+} from './ecuTechnicalIntegrity.ts';
 import { toAsciiDigits, toPersianDigits } from './formatParsers.ts';
+import { analyzeNumericDiscrepancies } from './numericDiscrepancyAnalyzer.ts';
+import { extractWinolsMapGuides } from './winolsMapGuide.ts';
 
 // ============================================================================
 // DETERMINISTIC NORMALIZATION, HASHING & TOKEN SIMILARITY
@@ -382,6 +389,23 @@ const OPPOSING_CONDITION_PAIRS: Array<[string, string]> = [
   ['بیت', 'بایت'],
   ['مثبت', 'منفی'],
   ['افزایش', 'کاهش'],
+  // ECU Calibration & Remapping distinct operating regimes (complementary, not contradictory!)
+  ['استوک', 'ریمپ'],
+  ['فابریک', 'ریمپ'],
+  ['فابریک', 'تیون'],
+  ['فابریک', 'استیج'],
+  ['استوک', 'استیج'],
+  ['استاندارد', 'استیج'],
+  ['بنزین', 'گاز'],
+  ['بنزینی', 'دوگانه'],
+  ['معمولی', 'متانول'],
+  ['سرد', 'کاری'],
+  ['جزئی', 'کامل'],
+  ['جزئی', 'تخته'],
+  ['آرام', 'تخته'],
+  ['آیدل', 'wot'],
+  ['stock', 'stage'],
+  ['oem', 'tuned'],
 ];
 
 const MEASUREMENT_UNIT_ALIASES: Record<string, string> = {
@@ -389,12 +413,32 @@ const MEASUREMENT_UNIT_ALIASES: Record<string, string> = {
   'درصد': 'percent',
   'بار': 'bar',
   bar: 'bar',
+  mbar: 'mbar',
+  'میلیبار': 'mbar',
+  'میلی‌بار': 'mbar',
+  kpa: 'kpa',
+  'کیلوپاسکال': 'kpa',
+  hpa: 'hpa',
   psi: 'psi',
   rpm: 'rpm',
   'دور': 'rpm',
+  afr: 'afr',
+  lambda: 'lambda',
+  'λ': 'lambda',
+  'لامبدا': 'lambda',
+  btdc: 'deg_ca',
+  atdc: 'deg_ca',
+  ca: 'deg_ca',
   'درجه': 'deg',
   'سانتیگراد': 'deg',
   'سلسیوس': 'deg',
+  '°c': 'deg',
+  'mg/str': 'mg_str',
+  'mg/stroke': 'mg_str',
+  'mg/stk': 'mg_str',
+  'mg/hub': 'mg_str',
+  'g/s': 'g_s',
+  'kg/h': 'kg_h',
   'کیلومتر': 'km',
   km: 'km',
   'متر': 'm',
@@ -447,6 +491,8 @@ const MEASUREMENT_UNIT_ALIASES: Record<string, string> = {
   khz: 'khz',
   'مگاهرتز': 'mhz',
   mhz: 'mhz',
+  kbps: 'kbps',
+  baud: 'baud',
   'اکتان': 'octane',
   'نیوتن': 'nm',
   nm: 'nm',
@@ -455,7 +501,7 @@ const MEASUREMENT_UNIT_ALIASES: Record<string, string> = {
 };
 
 const MEASUREMENT_UNIT_PATTERN =
-  /(%|درصد|کیلوگرم|کیلومتر|سانتی[‌\s]?متر|میلی[‌\s]?متر|میلی[‌\s]?لیتر|میلی[‌\s]?ثانیه|میلی[‌\s]?ولت|میلی[‌\s]?آمپر|متر|بار|psi|rpm|درجه|سانتیگراد|سلسیوس|ساعت|دقیقه|ثانیه|روز|ماه|سال|تومان|ریال|دلار|مگابایت|گیگابایت|کیلوبایت|ولت|آمپر|وات|اسب|کیلووات|اهم|کیلوهرتز|مگاهرتز|هرتز|اکتان|نیوتن|لیتر|گرم|bar|km|mm|cm|kg|ml|ms|mb|gb|kb|kw|hp|hz|khz|mhz|nm|به\s+1|:1)/i;
+  /(%|درصد|کیلوگرم|کیلومتر|کیلوپاسکال|میلی[‌\s]?بار|سانتی[‌\s]?متر|میلی[‌\s]?متر|میلی[‌\s]?لیتر|میلی[‌\s]?ثانیه|میلی[‌\s]?ولت|میلی[‌\s]?آمپر|متر|بار|psi|rpm|afr|lambda|λ|لامبدا|btdc|atdc|mg\/str(?:oke)?|mg\/stk|mg\/hub|g\/s|kg\/h|kpa|mbar|hpa|درجه|سانتیگراد|سلسیوس|°c|ساعت|دقیقه|ثانیه|روز|ماه|سال|تومان|ریال|دلار|مگابایت|گیگابایت|کیلوبایت|ولت|آمپر|وات|اسب|کیلووات|اهم|کیلوهرتز|مگاهرتز|هرتز|kbps|baud|اکتان|نیوتن|لیتر|گرم|bar|km|mm|cm|kg|ml|ms|mb|gb|kb|kw|hp|hz|khz|mhz|nm|به\s+1|:1)/i;
 
 function normalizeUnitKey(rawUnit: string): string {
   const cleaned = toAsciiDigits(rawUnit)
@@ -706,7 +752,12 @@ function isSentencePairGenuineConflict(sentA: string, sentB: string): boolean {
     }
   }
 
-  // 4. Opposing / distinct operating conditions (e.g., cold vs hot, idle vs full-throttle, normal vs fan)
+  // 3B. Disjoint ECU / engine platforms (e.g., Bosch ME7.4.4 vs Siemens SIM2K-241 -> never contradictory!)
+  if (hasDisjointEcuPlatforms(sentA, sentB)) {
+    return false;
+  }
+
+  // 4. Opposing / distinct operating conditions (e.g., cold vs hot, idle vs full-throttle, stock vs stage 1)
   const skelA = getNonNumericSkeletonTokens(sentA);
   const skelB = getNonNumericSkeletonTokens(sentB);
   const skelSetA = new Set(skelA);
@@ -822,6 +873,11 @@ export function hasDistinctParallelIdentifiers(textA: string, textB: string): bo
     if (onlyA.length > 0 && onlyB.length > 0) return true;
   }
 
+  // Disjoint ECU / engine platforms (e.g. Bosch ME7.4.4 vs Siemens SIM2K)
+  if (hasDisjointEcuPlatforms(textA, textB)) {
+    return true;
+  }
+
   return false;
 }
 
@@ -831,6 +887,7 @@ export interface DedupPipelineOutput {
     status: 'active' | 'merged' | 'conflict';
     canonicalUnitId: string | null;
     rawText: string;
+    payloadJson?: Record<string, unknown>;
   }>;
   clusters: Array<{
     id: string;
@@ -890,7 +947,12 @@ export function runDeterministicLosslessDedup(params: {
   const activeSlots: CanonicalSlot[] = [];
   const unitStatusMap = new Map<
     string,
-    { status: 'active' | 'merged' | 'conflict'; canonicalUnitId: string | null; rawText: string }
+    {
+      status: 'active' | 'merged' | 'conflict';
+      canonicalUnitId: string | null;
+      rawText: string;
+      payloadJson?: Record<string, unknown>;
+    }
   >();
   const detectedConflicts: DedupPipelineOutput['conflicts'] = [];
   const conflictPairKeys = new Set<string>();
@@ -917,6 +979,82 @@ export function runDeterministicLosslessDedup(params: {
 
     let matchedSlot: CanonicalSlot | null = null;
     let matchedScore = 0;
+
+    // Structured Row-by-Row Lossless Table Fusion for compatible tables (DTC / Pinout / Map Tables)
+    if (unit.unitType === 'table') {
+      const incomingBlock = unit.metadataJson?.block as TableBlock | undefined;
+      if (incomingBlock && incomingBlock.type === 'table') {
+        let mergedIntoTableSlot = false;
+        for (const slot of activeSlots) {
+          if (slot.unit.unitType !== 'table' || slot.unit.sourceFileId === unit.sourceFileId) continue;
+          const slotBlock = slot.unit.metadataJson?.block as TableBlock | undefined;
+          if (!slotBlock || slotBlock.type !== 'table') continue;
+
+          const tableMerge = mergeCompatibleTablesLossless(
+            slotBlock,
+            incomingBlock,
+            slot.fileName,
+            fileName
+          );
+          if (!tableMerge.compatible) continue;
+
+          // Update canonical table block in-place (preserving originalBlock for pristine statistical diffing!)
+          const pristineOriginalBlock =
+            (slot.unit.metadataJson?.originalBlock as TableBlock | undefined) || slotBlock;
+          slot.unit.metadataJson = {
+            ...(slot.unit.metadataJson || {}),
+            originalBlock: pristineOriginalBlock,
+            block: tableMerge.mergedTable,
+          };
+          slot.text = blockToPlainText(tableMerge.mergedTable);
+          slot.tokens = tokenizeContent(slot.text);
+          slot.nums = extractNumericFacts(slot.text);
+          slot.mergedIds.push(unit.id);
+          slot.matchType = 'lossless_union';
+          slot.bestScore = 0.95;
+          slot.addedDetails.push(
+            `ادغام ردیف‌به‌ردیف جدول: ${toPersianDigits(tableMerge.addedRowCount)} ردیف جدید افزوده و ${toPersianDigits(tableMerge.dedupedRowCount)} ردیف تکراری حذف شد.`
+          );
+
+          for (const rc of tableMerge.rowConflicts) {
+            const pairKey = [slot.unit.id, unit.id, rc.rowKey, rc.columnHeader].join('::');
+            if (!conflictPairKeys.has(pairKey)) {
+              conflictPairKeys.add(pairKey);
+              detectedConflicts.push({
+                id: `conf_${deterministicHash(`${params.projectId}:${pairKey}`)}`,
+                projectId: params.projectId,
+                topic: `تناقض سلول جدول (${rc.rowKey} · ${rc.columnHeader})`,
+                unitAId: slot.unit.id,
+                unitBId: unit.id,
+                fileAName: slot.fileName,
+                fileBName: fileName,
+                excerptA: `${rc.rowKey} ← ${rc.columnHeader}: ${rc.valueA}`,
+                excerptB: `${rc.rowKey} ← ${rc.columnHeader}: ${rc.valueB}`,
+                status: 'open',
+              });
+            }
+          }
+
+          unitStatusMap.set(slot.unit.id, {
+            status: tableMerge.rowConflicts.length > 0 ? 'conflict' : 'active',
+            canonicalUnitId: null,
+            rawText: slot.text,
+            payloadJson: {
+              ...(slot.unit.metadataJson || {}),
+              headingPath: slot.unit.headingPath,
+            },
+          });
+          unitStatusMap.set(unit.id, {
+            status: 'merged',
+            canonicalUnitId: slot.unit.id,
+            rawText: unit.rawText,
+          });
+          mergedIntoTableSlot = true;
+          break;
+        }
+        if (mergedIntoTableSlot) continue;
+      }
+    }
 
     // Compare against existing canonical slots of compatible types
     if (unit.unitType === 'paragraph' || unit.unitType === 'callout' || unit.unitType === 'list') {
@@ -1053,9 +1191,11 @@ export function runDeterministicLosslessDedup(params: {
       matchType: s.matchType,
       similarityScore: Number(s.bestScore.toFixed(2)),
       losslessSummary:
-        s.addedDetails.length > 0
-          ? `ادغام بدون افت (Lossless Union): ${toPersianDigits(s.mergedIds.length)} مورد هم‌پوشان ادغام شد و ${toPersianDigits(s.addedDetails.length)} جزئیات یکتا به متن اصلی افزوده شد.`
-          : `حذف تکرار کامل: ${toPersianDigits(s.mergedIds.length)} نسخه تکراری در واحد مرجع تجمیع شد.`,
+        s.unit.unitType === 'table' && s.addedDetails.length > 0
+          ? s.addedDetails.join(' ')
+          : s.addedDetails.length > 0
+            ? `ادغام بدون افت (Lossless Union): ${toPersianDigits(s.mergedIds.length)} مورد هم‌پوشان ادغام شد و ${toPersianDigits(s.addedDetails.length)} جزئیات یکتا به متن اصلی افزوده شد.`
+            : `حذف تکرار کامل: ${toPersianDigits(s.mergedIds.length)} نسخه تکراری در واحد مرجع تجمیع شد.`,
       preservedDetailsJson: {
         addedSentences: s.addedDetails,
         sourceFileName: s.fileName,
@@ -1073,6 +1213,7 @@ export function runDeterministicLosslessDedup(params: {
       status: st.status,
       canonicalUnitId: st.canonicalUnitId,
       rawText: st.rawText,
+      ...(st.payloadJson ? { payloadJson: st.payloadJson } : {}),
     };
   });
 
@@ -1658,6 +1799,105 @@ export function assembleFinalBookAndAudit(params: {
     },
   };
 
+  // Deterministic Post-Merge ECU Technical Entity Integrity Audit (0% AI — verifies 100% hex/DTC/ECU/map retention)
+  const technicalIntegrity = runTechnicalEntityIntegrityAudit(
+    params.units.map((u) => u.rawText),
+    book
+  );
+
+  // Deterministic Statistical Discrepancy Analyzer across Data Tables & Charts between file versions
+  const numericDiscrepancyReport = analyzeNumericDiscrepancies({
+    sourceFiles: params.sourceFiles,
+    units: params.units,
+  });
+
+  // Deterministic WinOLS Map Modification Detector & Quick-Action Table Generator
+  const winolsGuideReport = extractWinolsMapGuides({
+    sourceFiles: params.sourceFiles,
+    units: params.units,
+  });
+
+  if (
+    params.config.includeWinolsActionTables !== false &&
+    winolsGuideReport.summaryTable &&
+    winolsGuideReport.mapsDetected > 0
+  ) {
+    const appendixChapterNum = chapters.length + 1;
+    const winolsTableNum = `${toPersianDigits(appendixChapterNum)}-۱`;
+    const summaryTable: TableBlock = {
+      ...winolsGuideReport.summaryTable,
+      caption: `جدول ${winolsTableNum}: راهنمای سریع تغییرات نقشه‌های WinOLS (استخراج خودکار از جزوه‌های پروژه)`,
+    };
+    tableSeq += 1;
+    tableIndex.push({
+      tableNumber: winolsTableNum,
+      caption: summaryTable.caption!,
+      chapterNumber: appendixChapterNum,
+      chapterTitle: 'پیوست کارگاهی: راهنمای سریع تغییرات نقشه‌های WinOLS',
+      sectionTitle: 'جدول جامع مپ‌ها، آدرس‌های هگز و نواحی هدف تغییر',
+      generatedBy: 'local',
+    });
+
+    const stepItems = winolsGuideReport.entries.map((entry) => {
+      const hexPart = entry.hexAddresses.length > 0 ? ` (آدرس ${entry.hexAddresses[0]})` : '';
+      return `${entry.mapCode}${hexPart}: ${entry.targetZoneLabelFa} ← مقدار پیشنهادی: ${entry.recommendedDeltaLabel}`;
+    });
+
+    chapters.push({
+      id: 'ch_winols_quick_guide',
+      chapterNumber: appendixChapterNum,
+      title: `فصل ${toPersianDigits(appendixChapterNum)}: پیوست کارگاهی — راهنمای سریع تغییرات نقشه‌های WinOLS`,
+      volumeIndex: 1,
+      volumeTitle: params.projectTitle || 'مجموعه جامع مستندات',
+      meta: [
+        { label: 'نقشه‌های شناسایی‌شده', value: `${toPersianDigits(winolsGuideReport.mapsDetected)} نقشه WinOLS` },
+        { label: 'روش تولید جدول', value: 'استخراج قطعی از متن و جداول پروژه (۰٪ خطای توهم)' },
+        { label: 'کاربرد عملی', value: 'مراجعه سریع روی میز کار WinOLS و بررسی چک‌لیست ایمنی' },
+      ],
+      introBlocks: [
+        {
+          type: 'callout',
+          id: 'callout_winols_guide_intro',
+          variant: 'engineering',
+          title: 'راهنمای استفاده سریع از این جدول در نرم‌افزار WinOLS',
+          paragraphs: [
+            `این پیوست به‌صورت خودکار از میان ${toPersianDigits(params.sourceFiles.length)} فایل جزوه پروژه استخراج شده است تا هنگام باز کردن دامپ در WinOLS دقیقاً بدانید کدام نقشه‌ها، در چه محدوده دور موتور (RPM) و بار (Load) و به چه میزان باید اصلاح شوند.`,
+            'همواره پیش از اعمال تغییرات، از فایل اصلی (Ori) بکاپ بگیرید، سطح نقشه را در نمای 3D از نظر نبود پله‌های تیز بررسی کنید و Checksum فایل خروجی را تصحیح نمایید.',
+          ],
+        },
+      ],
+      sections: [
+        {
+          id: 'sec_winols_master_table',
+          numberLabel: `${toPersianDigits(appendixChapterNum)}-۱`,
+          title: 'جدول جامع مپ‌ها، آدرس‌های هگز و نواحی هدف تغییر',
+          originalTitle: 'جدول جامع مپ‌ها، آدرس‌های هگز و نواحی هدف تغییر',
+          blocks: [
+            summaryTable,
+            {
+              type: 'subheading',
+              id: 'sub_winols_steps',
+              level: 3,
+              text: 'خلاصه گام‌های انتخاب ناحیه هدف در WinOLS',
+            },
+            {
+              type: 'list',
+              id: 'list_winols_steps',
+              ordered: true,
+              items: stepItems,
+            },
+          ],
+        },
+      ],
+      sourceFileName: 'تولید خودکار از فایل‌های پروژه',
+    });
+
+    if (book.audit) {
+      book.audit.tablesRenumbered = tableSeq;
+      book.audit.generatedTablesInserted = (book.audit.generatedTablesInserted || 0) + 1;
+    }
+  }
+
   return {
     book,
     audit: {
@@ -1674,6 +1914,9 @@ export function assembleFinalBookAndAudit(params: {
         workflowMode: params.workflowMode,
         chapterCount: chapters.length,
         tableCount: tableSeq,
+        technicalIntegrity,
+        numericDiscrepancyReport,
+        winolsGuideReport,
         perFileCoverage: params.sourceFiles.map((f) => {
           const fUnits = params.units.filter((u) => u.sourceFileId === f.id);
           const fCovered = fUnits.filter(

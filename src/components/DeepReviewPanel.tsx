@@ -5,10 +5,12 @@ import {
   ChevronDown,
   ChevronUp,
   Loader2,
+  Play,
   RefreshCw,
   Sparkles,
 } from 'lucide-react';
 import { DeepReviewReportDto } from '../lib/bookTypes';
+import { computeDeepReviewPanelState } from '../lib/aiProviderConfig';
 import { toPersianDigits } from '../lib/formatParsers';
 
 export interface DeepReviewProgressState {
@@ -22,21 +24,30 @@ export interface DeepReviewProgressState {
 }
 
 export const DeepReviewProgressBanner: React.FC<{
-  progress: DeepReviewProgressState;
+  progress?: DeepReviewProgressState | null;
   variant?: 'bar' | 'card';
 }> = ({ progress, variant = 'bar' }) => {
   const [elapsedSec, setElapsedSec] = useState(0);
 
+  const startedAt = progress?.startedAt ?? Date.now();
+
   useEffect(() => {
+    if (!progress) {
+      setElapsedSec(0);
+      return;
+    }
     const update = () => {
-      setElapsedSec(Math.max(0, Math.floor((Date.now() - progress.startedAt) / 1000)));
+      setElapsedSec(Math.max(0, Math.floor((Date.now() - startedAt) / 1000)));
     };
     update();
     const timer = window.setInterval(update, 1000);
     return () => window.clearInterval(timer);
-  }, [progress.startedAt]);
+  }, [progress, startedAt]);
 
-  const clampedPercent = Math.max(0, Math.min(100, Math.round(progress.percent)));
+  const rawPercent = typeof progress?.percent === 'number' && Number.isFinite(progress.percent)
+    ? progress.percent
+    : 0;
+  const clampedPercent = Math.max(0, Math.min(100, Math.round(rawPercent)));
 
   return (
     <div
@@ -53,7 +64,7 @@ export const DeepReviewProgressBanner: React.FC<{
           <div className="flex items-center gap-2 min-w-0">
             <Loader2 className="h-4 w-4 animate-spin text-[#1E3A5F] shrink-0" />
             <span className="text-xs font-extrabold text-[#1E3A5F] truncate">
-              {progress.stage}
+              {progress?.stage || 'آماده شروع بازبینی عمیق...'}
             </span>
           </div>
           <span className="shrink-0 text-sm font-extrabold text-[#1E3A5F] tabular-nums">
@@ -64,13 +75,13 @@ export const DeepReviewProgressBanner: React.FC<{
         <div className="h-2 w-full overflow-hidden rounded-full bg-[#DAE4F0]">
           <div
             className="h-full rounded-full bg-[#1E3A5F] transition-[width] duration-300 ease-out"
-            style={{ width: `${Math.max(4, clampedPercent)}%` }}
+            style={{ width: `${clampedPercent}%` }}
           />
         </div>
 
         <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[11px] text-[#475569] tabular-nums">
           <span>زمان سپری‌شده: {toPersianDigits(elapsedSec)} ثانیه</span>
-          {progress.model && (
+          {progress?.model && (
             <>
               <span aria-hidden="true" className="text-[#B6C5D8]">·</span>
               <span className="font-mono text-[10.5px]" dir="ltr">
@@ -78,13 +89,13 @@ export const DeepReviewProgressBanner: React.FC<{
               </span>
             </>
           )}
-          {progress.thinkingLevel && (
+          {progress?.thinkingLevel && (
             <>
               <span aria-hidden="true" className="text-[#B6C5D8]">·</span>
               <span>سطح استدلال {progress.thinkingLevel}</span>
             </>
           )}
-          {progress.attempt && progress.totalAttempts && progress.attempt > 1 && (
+          {progress?.attempt && progress?.totalAttempts && progress.attempt > 1 && (
             <>
               <span aria-hidden="true" className="text-[#B6C5D8]">·</span>
               <span>
@@ -99,8 +110,9 @@ export const DeepReviewProgressBanner: React.FC<{
 };
 
 interface DeepReviewPanelProps {
-  report: DeepReviewReportDto;
+  report?: DeepReviewReportDto | null;
   running: boolean;
+  progress?: DeepReviewProgressState | null;
   onRerun: () => Promise<void>;
 }
 
@@ -125,44 +137,63 @@ const SEVERITY_META: Record<
 export const DeepReviewPanel: React.FC<DeepReviewPanelProps> = ({
   report,
   running,
+  progress,
   onRerun,
 }) => {
-  const [expanded, setExpanded] = useState(true);
-  const appliedCounts = report?.appliedCounts ?? {
-    titlesRefined: 0,
-    calloutsAdded: 0,
-    tablesAdded: 0,
-    paragraphsAdded: 0,
-  };
-  const findings = Array.isArray(report?.findings) ? report.findings : [];
-  const totalApplied =
-    appliedCounts.titlesRefined +
-    appliedCounts.calloutsAdded +
-    appliedCounts.tablesAdded +
-    appliedCounts.paragraphsAdded;
+  const [expanded, setExpanded] = useState(Boolean(report?.appliedCounts));
+
+  // Safely derive progress percentage & appliedCounts without ever throwing on undefined report/appliedCounts
+  const safeState = computeDeepReviewPanelState({
+    report,
+    running,
+    progressPercent: progress?.percent ?? 0,
+  });
+
+  const {
+    hasStarted,
+    progressPercent,
+    appliedCounts,
+    totalApplied,
+    findings,
+    overallScore,
+    thinkingLevel,
+    overallAssessment,
+  } = safeState;
+
+  const hasValidReport = Boolean(report && report.appliedCounts);
 
   return (
-    <section className="border-b border-[#D8E2EE] bg-[#F5F8FC] px-4 py-3 text-xs">
+    <section
+      aria-label="پنل وضعیت و گزارش بازبینی عمیق هوش مصنوعی"
+      className="border-b border-[#D8E2EE] bg-[#F5F8FC] px-4 py-3 text-xs"
+    >
       <div className="mx-auto max-w-5xl space-y-3">
         <div className="flex flex-wrap items-center justify-between gap-2">
-          <div className="flex items-center gap-2.5">
+          <div className="flex items-center gap-2.5 min-w-0 flex-1">
             <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-[#1E3A5F] text-white">
               <Brain className="h-4 w-4" />
             </div>
-            <div>
+            <div className="min-w-0 flex-1">
               <div className="flex flex-wrap items-center gap-2">
                 <span className="font-extrabold text-[#1E3A5F] text-xs sm:text-sm">
-                  گزارش بازبینی عمیق هوش مصنوعی ({report.thinkingLevel})
+                  {hasValidReport
+                    ? `گزارش بازبینی عمیق هوش مصنوعی (${thinkingLevel})`
+                    : 'وضعیت بازبینی عمیق هوش مصنوعی'}
                 </span>
-                <span className="rounded-md border border-[#C7DDD0] bg-[#F2F7F4] px-2 py-0.5 text-[11px] font-bold text-[#14532D] tabular-nums">
-                  امتیاز کیفیت سند: {toPersianDigits(report.overallScore)} از ۱۰۰
+                <span className="rounded-md border border-[#C6D5E6] bg-white px-2 py-0.5 text-[11px] font-bold text-[#1E3A5F] tabular-nums">
+                  پیشرفت: {toPersianDigits(progressPercent)}٪
                 </span>
-                <span className="rounded-md border border-[#C6D5E6] bg-white px-2 py-0.5 text-[11px] font-semibold text-[#1E3A5F]">
-                  {toPersianDigits(totalApplied)} بهبود بدون افت اعمال شد
+                {hasValidReport && (
+                  <span className="rounded-md border border-[#C7DDD0] bg-[#F2F7F4] px-2 py-0.5 text-[11px] font-bold text-[#14532D] tabular-nums">
+                    امتیاز کیفیت: {toPersianDigits(overallScore)} از ۱۰۰
+                  </span>
+                )}
+                <span className="rounded-md border border-[#DDE6F0] bg-white px-2 py-0.5 text-[11px] font-semibold text-[#3B5578] tabular-nums">
+                  {toPersianDigits(totalApplied)} بهبود اعمال‌شده
                 </span>
               </div>
               <p className="mt-0.5 text-[11.5px] text-[#3B5578] leading-5">
-                {report.overallAssessment}
+                {running && progress?.stage ? progress.stage : overallAssessment}
               </p>
             </div>
           </div>
@@ -176,10 +207,18 @@ export const DeepReviewPanel: React.FC<DeepReviewPanelProps> = ({
             >
               {running ? (
                 <Loader2 className="h-3.5 w-3.5 animate-spin" />
-              ) : (
+              ) : hasStarted ? (
                 <RefreshCw className="h-3.5 w-3.5" />
+              ) : (
+                <Play className="h-3.5 w-3.5" />
               )}
-              <span>بازبینی مجدد</span>
+              <span>
+                {running
+                  ? `در حال بازبینی (${toPersianDigits(progressPercent)}٪)`
+                  : hasValidReport
+                    ? 'بازبینی مجدد'
+                    : 'شروع بازبینی عمیق'}
+              </span>
             </button>
 
             <button
@@ -197,9 +236,17 @@ export const DeepReviewPanel: React.FC<DeepReviewPanelProps> = ({
           </div>
         </div>
 
+        {/* Always-safe Progress Bar (defaults to 0% when not started) */}
+        <div className="h-1.5 w-full overflow-hidden rounded-full bg-[#DAE4F0]">
+          <div
+            className="h-full rounded-full bg-[#1E3A5F] transition-[width] duration-300 ease-out"
+            style={{ width: `${progressPercent}%` }}
+          />
+        </div>
+
         {expanded && (
           <div className="space-y-3 pt-1">
-            {/* Applied Counters */}
+            {/* Applied Counters (guarded; default to 0 if not started or missing) */}
             <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
               <div className="rounded-lg border border-[#DDE6F0] bg-white px-3 py-2">
                 <div className="text-[10.5px] text-[#64748B]">اصلاح عنوان فصل‌ها</div>

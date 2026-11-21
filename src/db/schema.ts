@@ -130,6 +130,22 @@ export const auditReports = pgTable('audit_reports', {
   generatedAt: timestamp('generated_at').defaultNow().notNull(),
 });
 
+export const projectRevisions = pgTable('project_revisions', {
+  id: text('id').primaryKey(),
+  projectId: text('project_id')
+    .notNull()
+    .references(() => projects.id, { onDelete: 'cascade' }),
+  versionNumber: integer('version_number').notNull(),
+  actorType: text('actor_type').notNull(),
+  actorName: text('actor_name').notNull(),
+  actionType: text('action_type').notNull(),
+  title: text('title').notNull(),
+  summary: text('summary').notNull(),
+  detailsJson: jsonb('details_json').$type<Record<string, unknown>>(),
+  snapshotJson: jsonb('snapshot_json').$type<Record<string, unknown>>(),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+});
+
 export const usersRelations = relations(users, ({ many }) => ({
   projects: many(projects),
 }));
@@ -145,6 +161,7 @@ export const projectsRelations = relations(projects, ({ one, many }) => ({
   conflicts: many(conflicts),
   outlineNodes: many(outlineNodes),
   auditReports: many(auditReports),
+  revisions: many(projectRevisions),
 }));
 
 export const sourceFilesRelations = relations(sourceFiles, ({ one, many }) => ({
@@ -190,6 +207,13 @@ export const outlineNodesRelations = relations(outlineNodes, ({ one }) => ({
 export const auditReportsRelations = relations(auditReports, ({ one }) => ({
   project: one(projects, {
     fields: [auditReports.projectId],
+    references: [projects.id],
+  }),
+}));
+
+export const projectRevisionsRelations = relations(projectRevisions, ({ one }) => ({
+  project: one(projects, {
+    fields: [projectRevisions.projectId],
     references: [projects.id],
   }),
 }));

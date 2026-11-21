@@ -1,4 +1,4 @@
-import { and, asc, desc, eq } from 'drizzle-orm';
+import { and, asc, desc, eq, sql } from 'drizzle-orm';
 import { db } from './index.ts';
 import {
   auditReports,
@@ -6,10 +6,12 @@ import {
   contentUnits,
   dedupClusters,
   outlineNodes,
+  projectRevisions,
   projects,
   sourceFiles,
   users,
 } from './schema.ts';
+import type { ProjectRevisionSnapshotPayload } from '../lib/changeLogUtils.ts';
 
 export async function getOrCreateUser(
   uid: string,
@@ -45,7 +47,7 @@ export async function getOrCreateUser(
 
 export async function listUserProjects(ownerUid: string) {
   try {
-    return await db
+    const rows = await db
       .select({
         id: projects.id,
         title: projects.title,
@@ -54,12 +56,22 @@ export async function listUserProjects(ownerUid: string) {
         status: projects.status,
         settingsJson: projects.settingsJson,
         checkpointJson: projects.checkpointJson,
+        sourceFileCount: sql<number>`CAST(COUNT(${sourceFiles.id}) AS INTEGER)`,
+        totalWordCount: sql<number>`CAST(COALESCE(SUM(${sourceFiles.wordCount}), 0) AS INTEGER)`,
         createdAt: projects.createdAt,
         updatedAt: projects.updatedAt,
       })
       .from(projects)
+      .leftJoin(sourceFiles, eq(sourceFiles.projectId, projects.id))
       .where(eq(projects.ownerUid, ownerUid))
+      .groupBy(projects.id)
       .orderBy(desc(projects.updatedAt));
+
+    return rows.map((row) => ({
+      ...row,
+      sourceFileCount: Number(row.sourceFileCount) || 0,
+      totalWordCount: Number(row.totalWordCount) || 0,
+    }));
   } catch (error) {
     console.error('Database query failed (listUserProjects):', error);
     throw new Error('خطا در دریافت فهرست پروژه‌ها از پایگاه داده.', { cause: error });
@@ -248,6 +260,7 @@ export async function saveDedupResults(params: {
     status: string;
     canonicalUnitId: string | null;
     rawText?: string;
+    payloadJson?: Record<string, unknown>;
   }>;
   clusters: Array<typeof dedupClusters.$inferInsert>;
   conflictRows: Array<typeof conflicts.$inferInsert>;
@@ -263,6 +276,7 @@ export async function saveDedupResults(params: {
           status: u.status,
           canonicalUnitId: u.canonicalUnitId,
           ...(u.rawText !== undefined ? { rawText: u.rawText } : {}),
+          ...(u.payloadJson !== undefined ? { payloadJson: u.payloadJson } : {}),
         })
         .where(and(eq(contentUnits.id, u.id), eq(contentUnits.projectId, params.projectId)));
     }
@@ -418,5 +432,178 @@ export async function saveAuditReportRecord(report: typeof auditReports.$inferIn
   } catch (error) {
     console.error('Database query failed (saveAuditReportRecord):', error);
     throw new Error('خطا در ذخیره گزارش ممیزی پوشش در پایگاه داده.', { cause: error });
+  }
+}
+
+export async function createProjectRevisionRecord(params: {
+  id: string;
+  projectId: string;
+  actorType: 'user' | 'ai' | 'system';
+  actorName: string;
+  actionType: string;
+  title: string;
+  summary: string;
+  detailsJson?: Record<string, unknown> | null;
+  snapshotJson?: Record<string, unknown> | null;
+}) {
+  try {
+    const maxRow = await db
+      .select({
+        maxVersion: sql<number>`CAST(COALESCE(MAX(${projectRevisions.versionNumber}), 0) AS INTEGER)`,
+      })
+      .from(projectRevisions)
+      .where(eq(projectRevisions.projectId, params.projectId));
+
+    const nextVersion = (Number(maxRow[0]?.maxVersion) || 0) + 1;
+
+    const rows = await db
+      .insert(projectRevisions)
+      .values({
+        id: params.id,
+        projectId: params.projectId,
+        versionNumber: nextVersion,
+        actorType: params.actorType,
+        actorName: params.actorName,
+        actionType: params.actionType,
+        title: params.title,
+        summary: params.summary,
+        detailsJson: params.detailsJson ?? null,
+        snapshotJson: params.snapshotJson ?? null,
+      })
+      .returning();
+
+    return rows[0];
+  } catch (error) {
+    console.error('Database query failed (createProjectRevisionRecord):', error);
+    throw new Error('خطا در ثبت رکورد تاریخچه تغییرات در پایگاه داده.', { cause: error });
+  }
+}
+
+export async function listProjectRevisions(projectId: string, ownerUid: string, limit = 80) {
+  try {
+    const owned = await getOwnedProject(projectId, ownerUid);
+    if (!owned) return null;
+
+    const rows = await db
+      .select({
+        id: projectRevisions.id,
+        projectId: projectRevisions.projectId,
+        versionNumber: projectRevisions.versionNumber,
+        actorType: projectRevisions.actorType,
+        actorName: projectRevisions.actorName,
+        actionType: projectRevisions.actionType,
+        title: projectRevisions.title,
+        summary: projectRevisions.summary,
+        detailsJson: projectRevisions.detailsJson,
+        hasSnapshot: sql<boolean>`${projectRevisions.snapshotJson} IS NOT NULL`,
+        createdAt: projectRevisions.createdAt,
+      })
+      .from(projectRevisions)
+      .where(eq(projectRevisions.projectId, projectId))
+      .orderBy(desc(projectRevisions.versionNumber))
+      .limit(limit);
+
+    return rows;
+  } catch (error) {
+    console.error('Database query failed (listProjectRevisions):', error);
+    throw new Error('خطا در دریافت تاریخچه تغییرات پروژه از پایگاه داده.', { cause: error });
+  }
+}
+
+export async function getProjectRevisionWithSnapshot(
+  projectId: string,
+  revisionId: string,
+  ownerUid: string
+) {
+  try {
+    const owned = await getOwnedProject(projectId, ownerUid);
+    if (!owned) return null;
+
+    const rows = await db
+      .select()
+      .from(projectRevisions)
+      .where(
+        and(eq(projectRevisions.id, revisionId), eq(projectRevisions.projectId, projectId))
+      )
+      .limit(1);
+
+    return rows[0] ?? null;
+  } catch (error) {
+    console.error('Database query failed (getProjectRevisionWithSnapshot):', error);
+    throw new Error('خطا در بازیابی نسخه انتخاب‌شده از تاریخچه تغییرات.', { cause: error });
+  }
+}
+
+export async function restoreProjectFromRevisionSnapshot(
+  projectId: string,
+  ownerUid: string,
+  snapshot: ProjectRevisionSnapshotPayload
+) {
+  try {
+    const owned = await getOwnedProject(projectId, ownerUid);
+    if (!owned) return null;
+
+    // 1. Restore project-level metadata and compiled book snapshot
+    await db
+      .update(projects)
+      .set({
+        title: snapshot.title,
+        workflowMode: snapshot.workflowMode,
+        pipelineStage: snapshot.pipelineStage,
+        status: snapshot.status,
+        settingsJson: snapshot.settingsJson ?? owned.settingsJson ?? {},
+        bookSnapshotJson: (snapshot.bookSnapshotJson as Record<string, unknown> | null) ?? null,
+        updatedAt: new Date(),
+      })
+      .where(and(eq(projects.id, projectId), eq(projects.ownerUid, ownerUid)));
+
+    // 2. Restore outline nodes
+    await db.delete(outlineNodes).where(eq(outlineNodes.projectId, projectId));
+    if (snapshot.outlineNodes.length > 0) {
+      await db.insert(outlineNodes).values(
+        snapshot.outlineNodes.map((n) => ({
+          id: n.id,
+          projectId,
+          parentId: n.parentId ?? null,
+          level: n.level,
+          nodeOrder: n.nodeOrder,
+          title: n.title,
+          summary: n.summary ?? null,
+          isApproved: Boolean(n.isApproved),
+          webEnrichmentJson: n.webEnrichmentJson ?? null,
+        }))
+      );
+    }
+
+    // 3. Restore content unit statuses, assignments, and text
+    for (const u of snapshot.contentUnits) {
+      await db
+        .update(contentUnits)
+        .set({
+          status: u.status,
+          canonicalUnitId: u.canonicalUnitId ?? null,
+          outlineNodeId: u.outlineNodeId ?? null,
+          rawText: u.rawText,
+        })
+        .where(and(eq(contentUnits.id, u.id), eq(contentUnits.projectId, projectId)));
+    }
+
+    // 4. Restore conflict resolutions & web grounding
+    for (const c of snapshot.conflicts) {
+      await db
+        .update(conflicts)
+        .set({
+          status: c.status,
+          resolutionNote: c.resolutionNote ?? null,
+          webGroundingJson: c.webGroundingJson ?? null,
+          updatedAt: new Date(),
+        })
+        .where(and(eq(conflicts.id, c.id), eq(conflicts.projectId, projectId)));
+    }
+
+    return await getProjectBundle(projectId, ownerUid);
+  } catch (error) {
+    console.error('Database query failed (restoreProjectFromRevisionSnapshot):', error);
+    throw new Error('خطا در بازگردانی وضعیت پروژه به نسخه انتخاب‌شده.', { cause: error });
   }
 }

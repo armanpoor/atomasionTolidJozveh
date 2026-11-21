@@ -5,11 +5,15 @@ import { requireAuth, AuthRequest } from '../middleware/auth.ts';
 import {
   clearProjectPipelineArtifacts,
   createProjectRecord,
+  createProjectRevisionRecord,
   deleteProjectRecord,
   getProjectBundle,
+  getProjectRevisionWithSnapshot,
   insertSourceFileWithUnits,
+  listProjectRevisions,
   listUserProjects,
   replaceProjectConflicts,
+  restoreProjectFromRevisionSnapshot,
   saveAuditReportRecord,
   saveDedupResults,
   saveOutlineNodesForProject,
@@ -20,6 +24,12 @@ import {
 import { db } from '../db/index.ts';
 import { contentUnits, outlineNodes } from '../db/schema.ts';
 import { and, eq } from 'drizzle-orm';
+import {
+  buildRevisionSnapshotPayload,
+  isValidRevisionSnapshot,
+  RevisionActionType,
+  RevisionActorType,
+} from '../lib/changeLogUtils.ts';
 import {
   ChatProposal,
   DEFAULT_DOCX_CONFIG,
@@ -45,45 +55,41 @@ import {
   runDeterministicLosslessDedup,
   tokenizeContent,
 } from '../lib/zeroLossPipeline.ts';
+import { buildEditorialSystemDirective } from '../lib/winolsMapGuide.ts';
 import {
   AiUsageDelta,
   extractAiUsageFromCheckpoint,
   mergeAiUsageDelta,
 } from '../lib/aiUsageMetrics.ts';
-
-const ALLOWED_MODELS = new Set(['gemini-4-hydrogen', 'gemini-3.1-flash-lite']);
-
-const THINKING_LEVEL_MAP: Record<string, ThinkingLevel> = {
-  LOW: ThinkingLevel.LOW,
-  MEDIUM: ThinkingLevel.MEDIUM,
-  HIGH: ThinkingLevel.HIGH,
-  XHIGH: ThinkingLevel.XHIGH,
-  MINIMAL: ThinkingLevel.MINIMAL,
-};
+import {
+  getGoogleModelMeta,
+  normalizeGoogleModelId,
+} from '../lib/aiProviderConfig.ts';
+import {
+  callNonGoogleChatWithFallback,
+  createGoogleGenAiClient,
+  executeUnifiedWebSearch,
+  executeWithGoogleClientFallback,
+  generateGoogleContentResilient,
+  generateUnifiedTextOrJson,
+  isNonGoogleProvider,
+  probeProviderWithCreatorFallback,
+  ResolvedServerAiProvider,
+  resolveAiProviderFromRequest,
+  resolveAudioRouteFromRequest,
+  resolveThinkingLevelForGoogleModel,
+  resolveWebSearchRouteFromRequest,
+  transcribeAudioUnified,
+} from './aiProvider.ts';
 
 export function createGeminiClient(): GoogleGenAI | null {
   const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey || apiKey === 'MY_GEMINI_API_KEY') return null;
-  return new GoogleGenAI({
-    apiKey,
-    httpOptions: {
-      headers: {
-        'User-Agent': 'aistudio-build',
-      },
-    },
-  });
+  return createGoogleGenAiClient(apiKey);
 }
 
 function resolveThinkingLevel(model: string, levelRaw?: string): ThinkingLevel {
-  const upper = (levelRaw || 'HIGH').toUpperCase();
-  let resolved = THINKING_LEVEL_MAP[upper] ?? ThinkingLevel.HIGH;
-  if (model === 'gemini-4-hydrogen' && resolved === ThinkingLevel.MINIMAL) {
-    resolved = ThinkingLevel.LOW;
-  }
-  if (model === 'gemini-3.1-flash-lite' && resolved === ThinkingLevel.XHIGH) {
-    resolved = ThinkingLevel.HIGH;
-  }
-  return resolved;
+  return resolveThinkingLevelForGoogleModel(model, levelRaw);
 }
 
 function extractGroundingSources(response: unknown): WebGroundingSource[] {
@@ -184,6 +190,117 @@ async function recordProjectAiUsage(
     console.warn('[AI Usage ledger persist warning]:', err);
     return null;
   }
+}
+
+async function recordProjectRevision(params: {
+  projectId: string;
+  ownerUid: string;
+  actorType: RevisionActorType;
+  actorName: string;
+  actionType: RevisionActionType;
+  title: string;
+  summary: string;
+  extraDetails?: Record<string, unknown>;
+  captureSnapshot?: boolean;
+}) {
+  try {
+    const fresh = await getProjectBundle(params.projectId, params.ownerUid);
+    if (!fresh) return null;
+
+    const openConflictsCount = fresh.conflicts.filter((c) => c.status === 'open').length;
+    const snapshot =
+      params.captureSnapshot === false
+        ? null
+        : (buildRevisionSnapshotPayload({
+            project: {
+              title: fresh.project.title,
+              workflowMode: fresh.project.workflowMode,
+              pipelineStage: fresh.project.pipelineStage,
+              status: fresh.project.status,
+              settingsJson: (fresh.project.settingsJson as Record<string, unknown> | null) ?? null,
+              bookSnapshotJson:
+                (fresh.project.bookSnapshotJson as Record<string, unknown> | null) ?? null,
+            },
+            outlineNodes: fresh.outlineNodes.map((n) => ({
+              id: n.id,
+              parentId: n.parentId,
+              level: n.level,
+              nodeOrder: n.nodeOrder,
+              title: n.title,
+              summary: n.summary,
+              isApproved: n.isApproved,
+              webEnrichmentJson: (n.webEnrichmentJson as Record<string, unknown> | null) ?? null,
+            })),
+            contentUnits: fresh.contentUnits.map((u) => ({
+              id: u.id,
+              status: u.status,
+              canonicalUnitId: u.canonicalUnitId,
+              outlineNodeId: u.outlineNodeId,
+              rawText: u.rawText,
+            })),
+            conflicts: fresh.conflicts.map((c) => ({
+              id: c.id,
+              status: c.status,
+              resolutionNote: c.resolutionNote,
+              webGroundingJson: (c.webGroundingJson as Record<string, unknown> | null) ?? null,
+            })),
+          }) as unknown as Record<string, unknown>);
+
+    const detailsJson: Record<string, unknown> = {
+      chaptersCount: fresh.outlineNodes.length,
+      unitsCount: fresh.contentUnits.length,
+      conflictsCount: fresh.conflicts.length,
+      openConflictsCount,
+      pipelineStage: fresh.project.pipelineStage,
+      hasBookSnapshot: Boolean(fresh.project.bookSnapshotJson),
+      ...(params.extraDetails || {}),
+    };
+
+    return await createProjectRevisionRecord({
+      id: `rev_${crypto.randomBytes(6).toString('hex')}`,
+      projectId: params.projectId,
+      actorType: params.actorType,
+      actorName: params.actorName,
+      actionType: params.actionType,
+      title: params.title,
+      summary: params.summary,
+      detailsJson,
+      snapshotJson: snapshot,
+    });
+  } catch (err) {
+    console.warn('[Project revision log warning]:', err);
+    return null;
+  }
+}
+
+function formatRevisionRowForClient(row: {
+  id: string;
+  projectId: string;
+  versionNumber: number;
+  actorType: string;
+  actorName: string;
+  actionType: string;
+  title: string;
+  summary: string;
+  detailsJson: Record<string, unknown> | null;
+  hasSnapshot?: boolean;
+  snapshotJson?: Record<string, unknown> | null;
+  createdAt: Date;
+}) {
+  return {
+    id: row.id,
+    projectId: row.projectId,
+    versionNumber: row.versionNumber,
+    actorType: row.actorType,
+    actorName: row.actorName,
+    actionType: row.actionType,
+    title: row.title,
+    summary: row.summary,
+    details: row.detailsJson || {},
+    hasSnapshot:
+      typeof row.hasSnapshot === 'boolean' ? row.hasSnapshot : Boolean(row.snapshotJson),
+    createdAt: row.createdAt.toISOString(),
+  };
 }
 
 function safeParseGeminiJson<T>(rawText: string | undefined, fallback: T): T {
@@ -307,17 +424,22 @@ function formatGeminiError(err: unknown, fallbackMessage: string): { statusCode:
 async function generateWithGroundingFallback(
   ai: GoogleGenAI,
   prompt: string,
-  thinkingLevel: ThinkingLevel = ThinkingLevel.LOW
+  thinkingLevel: ThinkingLevel = ThinkingLevel.LOW,
+  preferredModel = 'gemini-4-hydrogen'
 ) {
+  const primary = normalizeGoogleModelId(preferredModel);
+  const secondary = primary === 'gemini-4-hydrogen' ? 'gemini-3.8-flash' : 'gemini-4-hydrogen';
   try {
-    return await ai.models.generateContent({
-      model: 'gemini-4-hydrogen',
+    const out = await generateGoogleContentResilient({
+      ai,
+      model: primary,
       contents: prompt,
       config: {
         tools: [{ googleSearch: {} }],
-        thinkingConfig: { thinkingLevel },
+        thinkingConfig: { thinkingLevel: resolveThinkingLevel(primary, thinkingLevel) },
       },
     });
+    return out.response;
   } catch (primaryErr) {
     const raw = primaryErr instanceof Error ? primaryErr.message : String(primaryErr || '');
     const isQuotaOrBusy =
@@ -328,34 +450,39 @@ async function generateWithGroundingFallback(
       raw.toUpperCase().includes('QUOTA');
     if (!isQuotaOrBusy) throw primaryErr;
 
-    // Wait briefly and fall back to gemini-3.1-flash-lite (separate free-tier quota bucket)
     await new Promise((r) => setTimeout(r, 1200));
-    return await ai.models.generateContent({
-      model: 'gemini-3.1-flash-lite',
+    const fallbackOut = await generateGoogleContentResilient({
+      ai,
+      model: secondary,
       contents: prompt,
       config: {
         tools: [{ googleSearch: {} }],
         thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
       },
     });
+    return fallbackOut.response;
   }
 }
 
 /**
  * Layer 2 Semantic Conflict Verification:
- * Runs a single batched Gemini call over Layer-1 candidate conflicts to eliminate any remaining
+ * Runs a single batched AI call over Layer-1 candidate conflicts to eliminate any remaining
  * complementary / parallel / elaboration / distinct-condition false positives.
- * Falls back cleanly to Layer-1 candidates if AI is unavailable or quota-limited.
+ * Supports both Google AI Studio (creator or personal key) and Custom OpenAI-compatible providers.
  */
 async function verifyConflictsWithAi(
-  ai: GoogleGenAI | null,
-  candidates: DedupPipelineOutput['conflicts']
+  provider: ResolvedServerAiProvider | null,
+  candidates: DedupPipelineOutput['conflicts'],
+  preferredGoogleModel = 'gemini-4-hydrogen'
 ): Promise<{
   verified: DedupPipelineOutput['conflicts'];
   aiVerified: boolean;
   usageDelta: AiUsageDelta | null;
 }> {
-  if (!ai || candidates.length === 0) {
+  if (!provider || candidates.length === 0) {
+    return { verified: candidates, aiVerified: false, usageDelta: null };
+  }
+  if (provider.validationError || !provider.apiKey) {
     return { verified: candidates, aiVerified: false, usageDelta: null };
   }
 
@@ -371,6 +498,7 @@ async function verifyConflictsWithAi(
     'برای هر مورد با سخت‌گیری کامل بررسی کن آیا دو متن واقعاً با یکدیگر **تضاد منطقی یا عددی ناسازگار درباره دقیقاً یک موضوع و یک شرط یکسان** دارند (isRealConflict: true) یا فقط **مکمل یکدیگر، ردیف‌های موازی، مثال‌های متفاوت، بسط/توضیح بیشتر، یا مربوط به دو حالت/شرط مختلف** هستند (isRealConflict: false).',
     'مثال عدم تناقض (false): «عدد ۱۴ در دسیمال = حرف E» در برابر «عدد ۱۱ در دسیمال = حرف B» (مکمل هم هستند)، یا «فشار در دور آرام ۱.۵ بار» در برابر «فشار در تمام‌گاز ۴ بار» (دو شرط مختلف).',
     'مثال تناقض واقعی (true): «حداکثر فشار ریل سوخت در حالت تمام‌گاز ۴ بار است» در برابر «حداکثر فشار ریل سوخت در حالت تمام‌گاز ۶ بار است» (دقیقاً یک موضوع و یک شرط با دو مقدار ناسازگار).',
+    'خروجی حتماً JSON با کلید results (آرایه‌ای از اشیاء {id, isRealConflict, shortReason}) باشد.',
     `نامزدها:\n${JSON.stringify(batch)}`,
   ].join('\n\n');
 
@@ -393,26 +521,29 @@ async function verifyConflictsWithAi(
     required: ['results'],
   };
 
-  const modelsToTry: Array<{ model: string; level: ThinkingLevel }> = [
-    { model: 'gemini-4-hydrogen', level: ThinkingLevel.MEDIUM },
-    { model: 'gemini-3.1-flash-lite', level: ThinkingLevel.LOW },
-  ];
+  const attempts: Array<{ model: string; level: ThinkingLevel }> =
+    isNonGoogleProvider(provider)
+      ? [{ model: provider.customModelId, level: ThinkingLevel.MEDIUM }]
+      : [
+          { model: normalizeGoogleModelId(preferredGoogleModel), level: ThinkingLevel.MEDIUM },
+          {
+            model:
+              normalizeGoogleModelId(preferredGoogleModel) === 'gemini-4-hydrogen'
+                ? 'gemini-3.8-flash'
+                : 'gemini-4-hydrogen',
+            level: ThinkingLevel.LOW,
+          },
+        ];
 
-  for (const attempt of modelsToTry) {
+  for (const attempt of attempts) {
     try {
-      const res = await ai.models.generateContent({
-        model: attempt.model,
-        contents: prompt,
-        config: {
-          responseMimeType: 'application/json',
-          responseSchema: schema,
-          thinkingConfig: { thinkingLevel: attempt.level },
-        },
-      });
-      const usageDelta = extractUsageDeltaFromResponse(res, {
-        modelUsed: attempt.model,
-        fallbackPromptChars: prompt.length,
-        fallbackOutputChars: (res.text || '').length,
+      const res = await generateUnifiedTextOrJson({
+        provider,
+        googleModel: attempt.model,
+        thinkingLevel: attempt.level,
+        prompt,
+        expectJson: true,
+        googleResponseSchema: schema,
       });
       const parsed = safeParseGeminiJson<{
         results?: Array<{ id?: string; isRealConflict?: boolean; shortReason?: string }>;
@@ -422,10 +553,9 @@ async function verifyConflictsWithAi(
         const verdictById = new Map(parsed.results.map((r) => [String(r.id || ''), r]));
         const verified = candidates.filter((c) => {
           const v = verdictById.get(c.id);
-          // Keep ONLY genuine contradictions; drop anything marked false
           return v ? v.isRealConflict === true : true;
         });
-        return { verified, aiVerified: true, usageDelta };
+        return { verified, aiVerified: true, usageDelta: res.usageDelta };
       }
     } catch (err) {
       console.warn(`AI conflict verification attempt (${attempt.model}) skipped:`, err);
@@ -668,6 +798,70 @@ export function createProjectRouter(): Router {
   const router = Router();
   router.use(requireAuth);
 
+  // 0. REAL-TIME LIVE AI QUOTA & PROVIDER AVAILABILITY PROBE
+  router.post('/ai-quota-probe', async (req, res) => {
+    try {
+      const user = (req as AuthRequest).user!;
+      const body = (req.body || {}) as {
+        projectId?: string;
+        model?: string;
+      };
+      const googleModel = normalizeGoogleModelId(body.model);
+      const activeProvider = resolveAiProviderFromRequest(req);
+
+      // Run Creator-First live probe with automatic fallback to user's personal key if exhausted/selected
+      const [probeOutcome, userProjects] = await Promise.all([
+        probeProviderWithCreatorFallback({ provider: activeProvider, googleModel }),
+        listUserProjects(user.uid),
+      ]);
+
+      let allProjectsTokens = 0;
+      let allProjectsRequests = 0;
+      let currentProjectTokens = 0;
+      let currentProjectRequests = 0;
+
+      for (const proj of userProjects) {
+        const usage = extractAiUsageFromCheckpoint(
+          (proj.checkpointJson || {}) as Record<string, unknown>
+        );
+        allProjectsTokens += usage.totalTokens;
+        allProjectsRequests += usage.requestCount;
+        if (body.projectId && proj.id === body.projectId) {
+          currentProjectTokens = usage.totalTokens;
+          currentProjectRequests = usage.requestCount;
+        }
+      }
+
+      const modelMeta = getGoogleModelMeta(googleModel);
+      const softBudgetTokens = modelMeta.softBudgetTokens;
+      const estimatedRemainingTokens = Math.max(0, softBudgetTokens - currentProjectTokens);
+      const estimatedRemainingPercent = Math.max(
+        0,
+        Math.min(100, Math.round((estimatedRemainingTokens / softBudgetTokens) * 100))
+      );
+
+      res.json({
+        activeProbe: probeOutcome.activeProbe,
+        creatorKeyProbe: probeOutcome.creatorKeyProbe,
+        authDecision: probeOutcome.authDecision,
+        accountUsage: {
+          projectCount: userProjects.length,
+          currentProjectTokens,
+          currentProjectRequests,
+          allProjectsTokens,
+          allProjectsRequests,
+          estimatedRemainingTokens,
+          estimatedRemainingPercent,
+          softBudgetTokens,
+        },
+      });
+    } catch (err) {
+      res.status(500).json({
+        error: err instanceof Error ? err.message : 'خطا در استعلام زنده وضعیت سهمیه هوش مصنوعی.',
+      });
+    }
+  });
+
   // 1. LIST PROJECTS
   router.get('/', async (req, res) => {
     try {
@@ -716,10 +910,245 @@ export function createProjectRouter(): Router {
         },
       });
 
+      await recordProjectRevision({
+        projectId: created.id,
+        ownerUid: user.uid,
+        actorType: 'user',
+        actorName: user.name || (user.isGuest ? 'کاربر مهمان' : 'کاربر استودیو'),
+        actionType: 'project_created',
+        title: 'ایجاد پروژه جدید',
+        summary: `پروژه «${title}» با حالت پردازش ${workflowMode} ایجاد شد.`,
+      });
+
       const bundle = await getProjectBundle(created.id, user.uid);
       res.status(201).json(bundle ? formatBundleForClient(bundle) : { project: created });
     } catch (err) {
       res.status(500).json({ error: err instanceof Error ? err.message : 'خطا در ایجاد پروژه.' });
+    }
+  });
+
+  // 2B. SEED SAMPLE PROJECT FOR GUEST MODE (Provides immediate Change Log & A4 Print Preview experience)
+  router.post('/seed-guest-demo', async (req, res) => {
+    try {
+      const user = (req as AuthRequest).user!;
+      if (!user.isGuest) {
+        res.status(403).json({ error: 'این مسیر فقط برای آماده‌سازی میز کار مهمان است.' });
+        return;
+      }
+
+      const existing = await listUserProjects(user.uid);
+      if (existing.length > 0) {
+        const existingBundle = await getProjectBundle(existing[0].id, user.uid);
+        res.json(existingBundle ? formatBundleForClient(existingBundle) : null);
+        return;
+      }
+
+      const projectId = `proj_${crypto.randomBytes(6).toString('hex')}`;
+      const projectTitle = 'راهنمای جامع کالیبراسیون و عیب‌یابی سیستم سوخت‌رسانی';
+      await createProjectRecord({
+        id: projectId,
+        ownerUid: user.uid,
+        title: projectTitle,
+        workflowMode: 'multi_merge',
+        settingsJson: { ...DEFAULT_DOCX_CONFIG },
+      });
+
+      const demoFiles = [
+        {
+          name: 'فصل_۱_استانداردهای_کالیبراسیون_ME7.4.4.md',
+          text: [
+            '# فصل ۱: استانداردهای نگهداری سیستم سوخت و کالیبراسیون ME7.4.4',
+            '## ۱-۱. فشار ریل، نسبت استوکیومتری و مپ LAMFA',
+            'نسبت هوا به سوخت استوکیومتری در موتورهای بنزینی برابر ۱۴.۷ به ۱ (14.7:1) در مپ LAMFA تنظیم می‌شود و در بار کامل (WOT) در دور 3000 تا 6000 RPM برای حفاظت موتور روی 12.5:1 AFR کالیبره می‌گردد.',
+            'حداکثر فشار ایمن ریل سوخت در حالت بار کامل برابر ۴ بار اندازه‌گیری شده است.',
+            'در ایسیو ME7.4.4 آدرس شروع جدول آوانس جرقه KFZW (ابعاد 12x16) در دامپ استاندارد برابر 0x1A4F0 است و اصلاح ایمن در استیج ۱ در دور 3000 تا 5500 RPM و بار بالای 70% به میزان +2.5° مجاز است.',
+            ['|  |', '| --- |', '| **💡 نکته مفهومی و فنی** <br> فیلتر بنزین باید هر ۲۰۰۰۰ کیلومتر تعویض شود تا انژکتورها و پمپ سوخت آسیب نبینند. |'].join('\n'),
+            [
+              'جدول ۱-۱: پارامترهای مرجع سیستم سوخت‌رسانی و کالیبراسیون',
+              '| پارامتر | محدوده استاندارد | واحد |',
+              '| --- | --- | --- |',
+              '| نسبت استوکیومتری | 14.7:1 | AFR |',
+              '| فشار ریل در بار کامل | 4.0 | bar |',
+              '| محدوده کات‌آف ME7.4.4 (NMAX) | 6500 | RPM |',
+              '| آوانس پایه KFZW در ۳۵۰۰ دور | 18.5 | deg |',
+              '| دور آرام گرم | 750 تا 850 | RPM |',
+              '| آدرس پایه مپ KFZW | 0x1A4F0 | HEX |',
+            ].join('\n'),
+            'نمودار منحنی گشتاور موتور TU5 (نسخه مرجع): 2000 RPM = 122 Nm | 3000 RPM = 138 Nm | 4000 RPM = 147 Nm | 5000 RPM = 142 Nm | 6000 RPM = 126 Nm',
+            '# فصل ۲: عیب‌یابی سنسور اکسیژن و کدهای خطا',
+            'سنسور اکسیژن بالادست وظیفه تنظیم حلقه بسته پاشش سوخت را بر عهده دارد و خطای P0420 به راندمان کاتالیزور مرتبط است.',
+          ].join('\n\n'),
+        },
+        {
+          name: 'جزوه_کارگاهی_ریمپ_تکمیلی_۲.md',
+          text: [
+            '# فصل ۱: استانداردهای نگهداری سیستم سوخت و کالیبراسیون ME7.4.4',
+            '## ۱-۱. فشار ریل، نسبت استوکیومتری و مپ LAMFA',
+            'نسبت هوا به سوخت استوکیومتری در موتورهای بنزینی برابر ۱۴.۷ به ۱ (14.7:1) در مپ LAMFA تنظیم می‌شود.',
+            'حداکثر فشار ایمن ریل سوخت در حالت بار کامل برابر ۶ بار توصیه شده است.',
+            'در ایسیو SIM2K-241 آدرس مپ گشتاور هدف KFMIRL (ابعاد 16x16) روی 0x1A520 قرار دارد و برای افزایش کشش در دور 2500 تا 5500 RPM و بار 65 تا 100% به میزان +10% اصلاح می‌شود.',
+            'محدودکننده دور موتور NMAX در ایسیو ME7.4.4 برای استیج ۱ از 6500 RPM به 6950 RPM قابل افزایش است.',
+            'استفاده از سوخت با اکتان استاندارد عمر پمپ سوخت و سوزن انژکتور را دو برابر می‌کند.',
+            [
+              'جدول ۱-۱: پارامترهای مرجع سیستم سوخت‌رسانی و کالیبراسیون',
+              '| پارامتر | محدوده استاندارد | واحد |',
+              '| --- | --- | --- |',
+              '| نسبت استوکیومتری | 14.7:1 | AFR |',
+              '| فشار ریل در بار کامل | 5.2 | bar |',
+              '| محدوده کات‌آف ME7.4.4 (NMAX) | 6950 | RPM |',
+              '| آوانس پایه KFZW در ۳۵۰۰ دور | 22.0 | deg |',
+              '| دور آرام گرم | 800 تا 900 | RPM |',
+              '| مپ گشتاور هدف KFMIRL | 0x1A520 | HEX |',
+            ].join('\n'),
+            'نمودار منحنی گشتاور موتور TU5 (نسخه کارگاهی): 2000 RPM = 131 Nm | 3000 RPM = 152 Nm | 4000 RPM = 168 Nm | 5000 RPM = 161 Nm | 6000 RPM = 149 Nm',
+            '# فصل ۲: عیب‌یابی سنسور اکسیژن و کدهای خطا',
+            ['|  |', '| --- |', '| **⛔ هشدار بحرانی** <br> در صورت خرابی هیتر سنسور اکسیژن، خطای P0135 در حافظه ECU ثبت می‌شود و مصرف سوخت به‌شدت افزایش می‌یابد. |'].join('\n'),
+          ].join('\n\n'),
+        },
+      ];
+
+      let globalOrder = 0;
+      for (const f of demoFiles) {
+        const parsedBook = await parseAnySourceFile({ name: f.name, format: 'md', text: f.text });
+        const fileId = `sf_${crypto.randomBytes(6).toString('hex')}`;
+        const atomicUnits = extractAtomicUnitsFromBook({
+          projectId,
+          sourceFileId: fileId,
+          fileName: f.name,
+          fileRole: 'standard',
+          book: parsedBook,
+          startingOrder: globalOrder,
+        });
+        globalOrder += atomicUnits.length;
+        const wordCount = f.text.trim().split(/\s+/).filter(Boolean).length;
+
+        await insertSourceFileWithUnits({
+          file: {
+            id: fileId,
+            projectId,
+            fileName: f.name,
+            format: 'md',
+            role: 'standard',
+            wordCount,
+            sizeBytes: Buffer.byteLength(f.text, 'utf8'),
+            fileHash: deterministicHash(f.text),
+            metadataJson: { unitCount: atomicUnits.length },
+          },
+          units: atomicUnits.map((u) => ({
+            id: u.id,
+            projectId: u.projectId,
+            sourceFileId: u.sourceFileId,
+            unitType: u.unitType,
+            unitOrder: u.unitOrder,
+            rawText: u.rawText,
+            contentHash: u.normalizedHash,
+            status: u.status,
+            canonicalUnitId: null,
+            outlineNodeId: null,
+            payloadJson: {
+              ...(u.metadataJson || {}),
+              headingPath: u.headingPath,
+            },
+          })),
+        });
+      }
+
+      await updateProjectRecord(projectId, user.uid, {
+        pipelineStage: 1,
+        status: 'draft',
+      });
+      await recordProjectRevision({
+        projectId,
+        ownerUid: user.uid,
+        actorType: 'user',
+        actorName: 'کاربر مهمان',
+        actionType: 'files_ingested',
+        title: 'بارگذاری ۲ فایل نمونه مهندسی',
+        summary: 'دو فایل منبع (استاندارد سیستم سوخت و جزوه کارگاهی) استخراج و ثبت شدند.',
+      });
+
+      const afterIngest = await getProjectBundle(projectId, user.uid);
+      if (afterIngest) {
+        const formattedIngest = formatBundleForClient(afterIngest);
+        const dedup = runDeterministicLosslessDedup({
+          projectId,
+          workflowMode: 'multi_merge',
+          sourceFiles: formattedIngest.sourceFiles as unknown as Parameters<typeof runDeterministicLosslessDedup>[0]['sourceFiles'],
+          units: formattedIngest.contentUnits as unknown as Parameters<typeof runDeterministicLosslessDedup>[0]['units'],
+        });
+
+        await saveDedupResults({
+          projectId,
+          unitUpdates: dedup.unitUpdates,
+          clusters: dedup.clusters.map((c) => ({
+            id: c.id,
+            projectId: c.projectId,
+            canonicalUnitId: c.canonicalUnitId,
+            mergedUnitId: c.mergedUnitIds[0] || c.canonicalUnitId,
+            matchType: c.matchType,
+            similarityScore: c.similarityScore,
+            mergeRationale: c.losslessSummary,
+            preservedDetailsJson: {
+              mergedUnitIds: c.mergedUnitIds,
+            },
+          })),
+          conflictRows: dedup.conflicts,
+        });
+
+        const afterDedup = await getProjectBundle(projectId, user.uid);
+        if (afterDedup) {
+          const formattedAfter = formatBundleForClient(afterDedup);
+          const proposed = buildInitialOutline({
+            projectId,
+            workflowMode: 'multi_merge',
+            sourceFiles: formattedAfter.sourceFiles as unknown as Parameters<typeof buildInitialOutline>[0]['sourceFiles'],
+            units: formattedAfter.contentUnits as unknown as Parameters<typeof buildInitialOutline>[0]['units'],
+          });
+
+          await saveOutlineNodesForProject({
+            projectId,
+            nodes: proposed.nodes,
+            unitAssignments: proposed.unitAssignments,
+          });
+        }
+
+        await updateProjectRecord(projectId, user.uid, {
+          pipelineStage: 2,
+          status: 'awaiting_outline',
+        });
+
+        await recordProjectRevision({
+          projectId,
+          ownerUid: user.uid,
+          actorType: 'system',
+          actorName: 'موتور ادغام بدون افت',
+          actionType: 'dedup_completed',
+          title: 'ادغام بدون افت و شناسایی تناقض عددی',
+          summary: `${toPersianDigits(dedup.clusters.length)} خوشه هم‌پوشانی ادغام و ${toPersianDigits(dedup.conflicts.length)} تناقض واقعی (۴ بار در برابر ۶ بار) ثبت شد.`,
+        });
+
+        // Finalize compiled book snapshot for immediate Stage 4/5 & A4 Print Preview
+        await reassembleAndPersistProject(projectId, user.uid);
+
+        await recordProjectRevision({
+          projectId,
+          ownerUid: user.uid,
+          actorType: 'ai',
+          actorName: 'Gemini 4 Hydrogen (نمونه اولیه)',
+          actionType: 'document_finalized',
+          title: 'صفحه‌آرایی استاندارد و کادربندی نهایی کتاب',
+          summary: 'پیش‌نمایش کتاب با کادرهای موضوعی، جدول پارامترها و استاندارد چاپ A4 ساخته شد.',
+          extraDetails: { modelUsed: 'gemini-4-hydrogen' },
+        });
+      }
+
+      const finalBundle = await getProjectBundle(projectId, user.uid);
+      res.status(201).json(finalBundle ? formatBundleForClient(finalBundle) : null);
+    } catch (err) {
+      console.error('Failed to seed guest demo project:', err);
+      res.status(500).json({
+        error: err instanceof Error ? err.message : 'خطا در آماده‌سازی پروژه نمونه مهمان.',
+      });
     }
   });
 
@@ -906,6 +1335,19 @@ export function createProjectRouter(): Router {
         });
       }
 
+      await recordProjectRevision({
+        projectId,
+        ownerUid: user.uid,
+        actorType: 'user',
+        actorName: user.name || (user.isGuest ? 'کاربر مهمان' : 'کاربر استودیو'),
+        actionType: 'files_ingested',
+        title: `بارگذاری و استخراج ${toPersianDigits(ingestedSummaries.length)} فایل منبع`,
+        summary: ingestedSummaries
+          .slice(0, 3)
+          .map((s) => `${s.fileName} (${toPersianDigits(s.unitCount)} واحد)`)
+          .join(' · '),
+      });
+
       const finalBundle = await getProjectBundle(projectId, user.uid);
       res.json({
         ingested: ingestedSummaries,
@@ -951,15 +1393,20 @@ export function createProjectRouter(): Router {
 
       const settings = (bundle.project.settingsJson || {}) as Partial<DocxExportConfig>;
       const useAi = settings.useAiBackend !== false;
-      const ai = useAi ? createGeminiClient() : null;
+      const resolvedProvider = useAi ? resolveAiProviderFromRequest(req) : null;
+      const requestedGoogleModel = normalizeGoogleModelId(settings.aiModel);
 
       // Pass 1B: Optional Batched AI Semantic Conflict Verification (drops complementary false positives)
       let finalConflicts = dedup.conflicts;
       let dedupAiUsage = extractAiUsageFromCheckpoint(
         (bundle.project.checkpointJson || {}) as Record<string, unknown>
       );
-      if (ai && dedup.conflicts.length > 0) {
-        const verifiedResult = await verifyConflictsWithAi(ai, dedup.conflicts);
+      if (resolvedProvider && !resolvedProvider.validationError && resolvedProvider.apiKey && dedup.conflicts.length > 0) {
+        const verifiedResult = await verifyConflictsWithAi(
+          resolvedProvider,
+          dedup.conflicts,
+          requestedGoogleModel
+        );
         if (verifiedResult.usageDelta) {
           dedupAiUsage = mergeAiUsageDelta(dedupAiUsage, verifiedResult.usageDelta);
         }
@@ -1009,54 +1456,51 @@ export function createProjectRouter(): Router {
         units: formattedAfter.contentUnits as unknown as Parameters<typeof buildInitialOutline>[0]['units'],
       });
 
-      // Optional Pass 2: Gemini semantic refinement of outline chapter titles (never drops units!)
-      if (ai && proposed.nodes.length >= 2 && proposed.nodes.length <= 24) {
+      // Optional Pass 2: AI semantic refinement of outline chapter titles (never drops units!)
+      if (
+        resolvedProvider &&
+        !resolvedProvider.validationError &&
+        resolvedProvider.apiKey &&
+        proposed.nodes.length >= 2 &&
+        proposed.nodes.length <= 24
+      ) {
         try {
-          const requestedModel =
-            settings.aiModel && ALLOWED_MODELS.has(settings.aiModel)
-              ? settings.aiModel
-              : 'gemini-4-hydrogen';
-          const level = resolveThinkingLevel(requestedModel, settings.aiThinkingLevel);
+          const level = resolveThinkingLevel(requestedGoogleModel, settings.aiThinkingLevel);
           const outlinePreview = proposed.nodes.map((n) => ({
             id: n.id,
             title: n.title,
             summary: n.summary,
           }));
-          const outlinePrompt = `فهرست فصل‌های پیشنهادی زیر برای حالت «${workflowMode}» از فایل‌های کاربر استخراج شده است. لطفاً فقط عناوین فارسی فصل‌ها را حرفه‌ای، یکدست، دقیق و منسجم کن (بدون حذف یا تغییر id فصل‌ها). خروجی JSON باشد:\n${JSON.stringify(outlinePreview)}`;
+          const outlineEditorialDirective = buildEditorialSystemDirective(
+            bundle.project.settingsJson
+          );
+          const outlinePrompt = `${outlineEditorialDirective}\n\nفهرست فصل‌های پیشنهادی زیر برای حالت «${workflowMode}» از فایل‌های کاربر استخراج شده است. لطفاً فقط عناوین فارسی فصل‌ها را حرفه‌ای، یکدست، دقیق و منسجم مطابق لحن انتخاب‌شده کاربر کن (بدون حذف یا تغییر id فصل‌ها و بدون تغییر کدهای فنی). خروجی JSON با کلید refinedNodes باشد:\n${JSON.stringify(outlinePreview)}`;
 
-          const aiRes = await ai.models.generateContent({
-            model: requestedModel,
-            contents: outlinePrompt,
-            config: {
-              responseMimeType: 'application/json',
-              responseSchema: {
-                type: Type.OBJECT,
-                properties: {
-                  refinedNodes: {
-                    type: Type.ARRAY,
-                    items: {
-                      type: Type.OBJECT,
-                      properties: {
-                        id: { type: Type.STRING },
-                        title: { type: Type.STRING },
-                        summary: { type: Type.STRING },
-                      },
+          const aiRes = await generateUnifiedTextOrJson({
+            provider: resolvedProvider,
+            googleModel: requestedGoogleModel,
+            thinkingLevel: level,
+            prompt: outlinePrompt,
+            expectJson: true,
+            googleResponseSchema: {
+              type: Type.OBJECT,
+              properties: {
+                refinedNodes: {
+                  type: Type.ARRAY,
+                  items: {
+                    type: Type.OBJECT,
+                    properties: {
+                      id: { type: Type.STRING },
+                      title: { type: Type.STRING },
+                      summary: { type: Type.STRING },
                     },
                   },
                 },
               },
-              thinkingConfig: { thinkingLevel: level },
             },
           });
 
-          dedupAiUsage = mergeAiUsageDelta(
-            dedupAiUsage,
-            extractUsageDeltaFromResponse(aiRes, {
-              modelUsed: requestedModel,
-              fallbackPromptChars: outlinePrompt.length,
-              fallbackOutputChars: (aiRes.text || '').length,
-            })
-          );
+          dedupAiUsage = mergeAiUsageDelta(dedupAiUsage, aiRes.usageDelta);
 
           const parsedAi = safeParseGeminiJson<{
             refinedNodes?: Array<{ id?: string; title?: string; summary?: string }>;
@@ -1096,6 +1540,16 @@ export function createProjectRouter(): Router {
           aiUsage: dedupAiUsage,
           lastUpdatedAt: new Date().toISOString(),
         },
+      });
+
+      await recordProjectRevision({
+        projectId,
+        ownerUid: user.uid,
+        actorType: 'system',
+        actorName: 'موتور ادغام بدون افت',
+        actionType: 'dedup_completed',
+        title: 'اجرای مرحله ۲: ادغام بدون افت و کشف تناقض',
+        summary: `${toPersianDigits(dedup.clusters.length)} خوشه تکراری ادغام و ${toPersianDigits(finalConflicts.length)} تناقض واقعی شناسایی شد.`,
       });
 
       const finalBundle = await getProjectBundle(projectId, user.uid);
@@ -1162,6 +1616,16 @@ export function createProjectRouter(): Router {
         }
       }
 
+      await recordProjectRevision({
+        projectId,
+        ownerUid: user.uid,
+        actorType: 'user',
+        actorName: user.name || (user.isGuest ? 'کاربر مهمان' : 'کاربر استودیو'),
+        actionType: 'outline_updated',
+        title: 'ویرایش ساختار و ترتیب فصل‌ها',
+        summary: `فهرست فصل‌بندی با ${toPersianDigits(nodes.length)} فصل ذخیره شد${Array.isArray(body.reassignments) && body.reassignments.length > 0 ? ` (${toPersianDigits(body.reassignments.length)} ادغام فصل)` : ''}.`,
+      });
+
       const updated = await getProjectBundle(projectId, user.uid);
       res.json(updated ? formatBundleForClient(updated) : null);
     } catch (err) {
@@ -1205,11 +1669,16 @@ export function createProjectRouter(): Router {
       // Optional isolated Google Search Enrichment when user chose 'conflicts_and_enrichment' or 'full_document_enrichment'
       const settings = (bundle.project.settingsJson || {}) as Partial<DocxExportConfig>;
       const searchMode: GoogleSearchMode = settings.googleSearchMode ?? 'conflicts_only';
-      const ai = createGeminiClient();
+      const finalizeProvider = resolveAiProviderFromRequest(req);
+      const finalizeModel = normalizeGoogleModelId(settings.aiModel);
+      const canRunFinalizeGoogle =
+        finalizeProvider.provider === 'google_aistudio' &&
+        !finalizeProvider.validationError &&
+        Boolean(finalizeProvider.apiKey || finalizeProvider.personalApiKey);
 
       if (
         (searchMode === 'conflicts_and_enrichment' || searchMode === 'full_document_enrichment') &&
-        ai &&
+        canRunFinalizeGoogle &&
         bundle.outlineNodes.length > 0
       ) {
         const unenriched = bundle.outlineNodes.filter((n) => !n.webEnrichmentJson);
@@ -1226,13 +1695,17 @@ export function createProjectRouter(): Router {
               .filter(Boolean)
               .join('\n\n');
 
-            const gRes = await generateWithGroundingFallback(ai, prompt, ThinkingLevel.LOW);
+            const { result: gRes } = await executeWithGoogleClientFallback(
+              finalizeProvider,
+              (aiClient) =>
+                generateWithGroundingFallback(aiClient, prompt, ThinkingLevel.LOW, finalizeModel)
+            );
             const summary = (gRes.text || '').trim();
             await recordProjectAiUsage(
               projectId,
               user.uid,
               extractUsageDeltaFromResponse(gRes, {
-                modelUsed: 'gemini-3-flash-preview',
+                modelUsed: finalizeModel,
                 isGrounding: true,
                 fallbackPromptChars: prompt.length,
                 fallbackOutputChars: summary.length,
@@ -1263,6 +1736,15 @@ export function createProjectRouter(): Router {
       }
 
       const finalBundle = await reassembleAndPersistProject(projectId, user.uid);
+      await recordProjectRevision({
+        projectId,
+        ownerUid: user.uid,
+        actorType: 'user',
+        actorName: user.name || (user.isGuest ? 'کاربر مهمان' : 'کاربر استودیو'),
+        actionType: 'document_finalized',
+        title: 'تأیید فصل‌بندی و ساخت نسخه نهایی کتاب',
+        summary: `نسخه صفحه‌آرایی‌شده سند با ${toPersianDigits(bundle.outlineNodes.length)} فصل و گزارش پوشش ۱۰۰٪ تولید شد.`,
+      });
       res.json(finalBundle);
     } catch (err) {
       const formattedErr = formatGeminiError(err, 'خطا در تدوین نهایی و تولید گزارش ممیزی.');
@@ -1298,10 +1780,28 @@ export function createProjectRouter(): Router {
       const bundle = await getProjectBundle(projectId, user.uid);
       if (bundle?.project.bookSnapshotJson) {
         const refreshed = await reassembleAndPersistProject(projectId, user.uid);
+        await recordProjectRevision({
+          projectId,
+          ownerUid: user.uid,
+          actorType: 'user',
+          actorName: user.name || (user.isGuest ? 'کاربر مهمان' : 'کاربر استودیو'),
+          actionType: 'conflict_resolved',
+          title: `ثبت تصمیم روی تناقض «${updatedConflict.topic.slice(0, 60)}»`,
+          summary: `وضعیت تناقض به «${body.status}» تغییر یافت${body.resolutionNote ? ` — یادداشت: ${body.resolutionNote.slice(0, 80)}` : ''}.`,
+        });
         res.json({ conflict: updatedConflict, bundle: refreshed });
         return;
       }
 
+      await recordProjectRevision({
+        projectId,
+        ownerUid: user.uid,
+        actorType: 'user',
+        actorName: user.name || (user.isGuest ? 'کاربر مهمان' : 'کاربر استودیو'),
+        actionType: 'conflict_resolved',
+        title: `ثبت تصمیم روی تناقض «${updatedConflict.topic.slice(0, 60)}»`,
+        summary: `وضعیت تناقض به «${body.status}» تغییر یافت${body.resolutionNote ? ` — یادداشت: ${body.resolutionNote.slice(0, 80)}` : ''}.`,
+      });
       res.json({ conflict: updatedConflict, bundle: bundle ? formatBundleForClient(bundle) : null });
     } catch (err) {
       res.status(500).json({ error: err instanceof Error ? err.message : 'خطا در ذخیره تصمیم تناقض.' });
@@ -1377,8 +1877,12 @@ export function createProjectRouter(): Router {
       }
 
       const settings = (bundle.project.settingsJson || {}) as Partial<DocxExportConfig>;
-      const ai = settings.useAiBackend !== false ? createGeminiClient() : null;
-      const { verified, aiVerified, usageDelta } = await verifyConflictsWithAi(ai, candidates);
+      const rescanProvider = settings.useAiBackend !== false ? resolveAiProviderFromRequest(req) : null;
+      const { verified, aiVerified, usageDelta } = await verifyConflictsWithAi(
+        rescanProvider,
+        candidates,
+        normalizeGoogleModelId(settings.aiModel)
+      );
 
       const conflictRowsToSave = verified.map((c) => {
         const pairKey = [c.unitAId, c.unitBId].sort().join('::');
@@ -1415,6 +1919,16 @@ export function createProjectRouter(): Router {
         ? await reassembleAndPersistProject(projectId, user.uid)
         : await getProjectBundle(projectId, user.uid).then((b) => (b ? formatBundleForClient(b) : null));
 
+      await recordProjectRevision({
+        projectId,
+        ownerUid: user.uid,
+        actorType: aiVerified ? 'ai' : 'system',
+        actorName: aiVerified ? 'هوش مصنوعی (پالایش تناقض)' : 'موتور پالایش تناقض',
+        actionType: 'conflicts_rescanned',
+        title: 'پالایش دقیق تناقض‌ها و حذف موارد مکمل',
+        summary: `${toPersianDigits(Math.max(0, previousCount - conflictRowsToSave.length))} مورد غیرمتناقض حذف و ${toPersianDigits(conflictRowsToSave.length)} تناقض واقعی حفظ شد.`,
+      });
+
       res.json({
         previousCount,
         currentCount: conflictRowsToSave.length,
@@ -1429,7 +1943,7 @@ export function createProjectRouter(): Router {
     }
   });
 
-  // 11. EXPLICIT GOOGLE SEARCH GROUNDING (Conflict Verification OR Isolated Web Enrichment)
+  // 11. UNIFIED MULTI-PROVIDER WEB SEARCH GROUNDING (Google Search / Perplexity Sonar / Anthropic Web Search / OpenAI Online)
   router.post('/:id/grounding', async (req, res) => {
     try {
       const user = (req as AuthRequest).user!;
@@ -1440,13 +1954,10 @@ export function createProjectRouter(): Router {
         return;
       }
 
-      const ai = createGeminiClient();
-      if (!ai) {
-        res.status(503).json({
-          error: 'کلید API هوش مصنوعی در تنظیمات محیط سرور تنظیم نشده است.',
-        });
-        return;
-      }
+      const primaryProvider = resolveAiProviderFromRequest(req);
+      const searchRoute = resolveWebSearchRouteFromRequest(req);
+      const settings = (bundle.project.settingsJson || {}) as Partial<DocxExportConfig>;
+      const groundingModel = normalizeGoogleModelId(settings.aiModel);
 
       const body = req.body as {
         targetType: 'conflict' | 'outline_node' | 'full_document';
@@ -1462,7 +1973,7 @@ export function createProjectRouter(): Router {
         }
 
         const prompt = [
-          'دو فایل مختلف درباره یک موضوع اطلاعات متفاوت یا متناقضی ارائه داده‌اند. با استفاده از جستجوی گوگل، صحت علمی/فنی هر دو روایت را بررسی کن و به فارسی دقیق و مستند پاسخ بده:',
+          'دو فایل مختلف درباره یک موضوع اطلاعات متفاوت یا متناقضی ارائه داده‌اند. با استفاده از جستجوی زنده وب، صحت علمی/فنی هر دو روایت را بررسی کن و به فارسی دقیق و مستند پاسخ بده:',
           `موضوع: ${conf.topic}`,
           `روایت ۱ (${conf.fileAName}): ${conf.excerptA}`,
           `روایت ۲ (${conf.fileBName}): ${conf.excerptB}`,
@@ -1472,28 +1983,24 @@ export function createProjectRouter(): Router {
           .filter(Boolean)
           .join('\n');
 
-        const gRes = await generateWithGroundingFallback(ai, prompt, ThinkingLevel.MEDIUM);
+        const searchOut = await executeUnifiedWebSearch({
+          primaryProvider,
+          searchRoute,
+          googleModel: groundingModel,
+          prompt,
+          thinkingLevel: ThinkingLevel.MEDIUM,
+        });
 
-        const summary = (gRes.text || 'نتیجه‌ای از جستجوی وب دریافت نشد.').trim();
-        const sources = extractGroundingSources(gRes);
         const webGroundingJson = {
-          summary,
-          sources,
+          summary: searchOut.summary,
+          sources: searchOut.sources,
           checkedAt: new Date().toISOString(),
           query: body.customQuery || conf.topic,
+          providerLabel: searchOut.providerLabelFa,
         };
 
         await updateConflictRecord(projectId, conf.id, { webGroundingJson });
-        await recordProjectAiUsage(
-          projectId,
-          user.uid,
-          extractUsageDeltaFromResponse(gRes, {
-            modelUsed: 'gemini-4-hydrogen',
-            fallbackPromptChars: prompt.length,
-            fallbackOutputChars: summary.length,
-            isGrounding: true,
-          })
-        );
+        await recordProjectAiUsage(projectId, user.uid, searchOut.usageDelta);
         const refreshed = bundle.project.bookSnapshotJson
           ? await reassembleAndPersistProject(projectId, user.uid)
           : await getProjectBundle(projectId, user.uid).then((b) => (b ? formatBundleForClient(b) : null));
@@ -1511,20 +2018,27 @@ export function createProjectRouter(): Router {
 
         const chapterExcerpt = buildChapterExcerpt(bundle.contentUnits, node.id, 2200);
         const prompt = [
-          `با استفاده از جستجوی گوگل، درباره فصل «${node.title}» در سند «${bundle.project.title}» یک باکس اطلاعات تکمیلی به‌روز، مستند و کاربردی به زبان فارسی (۱ تا ۲ پاراگراف دقیق) بنویس تا نکات علمی یا عملی جاافتاده از متن فعلی را کامل کند.`,
+          `با استفاده از جستجوی زنده وب، درباره فصل «${node.title}» در سند «${bundle.project.title}» یک باکس اطلاعات تکمیلی به‌روز، مستند و کاربردی به زبان فارسی (۱ تا ۲ پاراگراف دقیق) بنویس تا نکات علمی یا عملی جاافتاده از متن فعلی را کامل کند.`,
           chapterExcerpt ? `متن فعلی فصل:\n${chapterExcerpt}` : '',
           body.customQuery ? `تأکید کاربر: ${body.customQuery}` : '',
         ]
           .filter(Boolean)
           .join('\n\n');
 
-        const gRes = await generateWithGroundingFallback(ai, prompt, ThinkingLevel.LOW);
+        const searchOut = await executeUnifiedWebSearch({
+          primaryProvider,
+          searchRoute,
+          googleModel: groundingModel,
+          prompt,
+          thinkingLevel: ThinkingLevel.LOW,
+        });
 
         const webEnrichmentJson = {
           title: node.title,
-          summary: (gRes.text || '').trim(),
-          sources: extractGroundingSources(gRes),
+          summary: searchOut.summary,
+          sources: searchOut.sources,
           checkedAt: new Date().toISOString(),
+          providerLabel: searchOut.providerLabelFa,
         };
 
         await db
@@ -1532,16 +2046,7 @@ export function createProjectRouter(): Router {
           .set({ webEnrichmentJson })
           .where(and(eq(outlineNodes.id, node.id), eq(outlineNodes.projectId, projectId)));
 
-        await recordProjectAiUsage(
-          projectId,
-          user.uid,
-          extractUsageDeltaFromResponse(gRes, {
-            modelUsed: 'gemini-4-hydrogen',
-            fallbackPromptChars: prompt.length,
-            fallbackOutputChars: webEnrichmentJson.summary.length,
-            isGrounding: true,
-          })
-        );
+        await recordProjectAiUsage(projectId, user.uid, searchOut.usageDelta);
 
         const refreshed = bundle.project.bookSnapshotJson
           ? await reassembleAndPersistProject(projectId, user.uid)
@@ -1561,13 +2066,13 @@ export function createProjectRouter(): Router {
         let enrichedChaptersCount = 0;
         let failedChaptersCount = 0;
         let quotaError: { statusCode: number; message: string } | null = null;
+        let lastSearchProviderLabel = 'جستجوی زنده وب';
 
-        // Process sequentially with a tiny gap to protect Free Tier RPM limits while enriching ALL chapters
         for (let i = 0; i < nodes.length; i++) {
           const node = nodes[i];
           const chapterExcerpt = buildChapterExcerpt(bundle.contentUnits, node.id, 2400);
           const prompt = [
-            `شما پژوهشگر فنی و ویراستار علمی هستید. با استفاده از جستجوی گوگل (Google Search)، متن فصل «${node.title}» از سند «${bundle.project.title}» را تکمیل و غنی کن.`,
+            `شما پژوهشگر فنی و ویراستار علمی هستید. با استفاده از جستجوی زنده وب، متن فصل «${node.title}» از سند «${bundle.project.title}» را تکمیل و غنی کن.`,
             'قواعد مهم:',
             '۱) مطالب تکراری موجود در متن فعلی را بازنویسی نکن؛ فقط جزئیات تکمیلی، استانداردهای جدید، اعداد مرجع، نکات ایمنی/عملی و مثال‌های مستند جاافتاده را در ۱ تا ۲ پاراگراف فارسی دقیق و خوانا بنویس.',
             '۲) فقط به منابع معتبر وب استناد کن.',
@@ -1578,27 +2083,23 @@ export function createProjectRouter(): Router {
             .join('\n\n');
 
           try {
-            const gRes = await generateWithGroundingFallback(ai, prompt, ThinkingLevel.LOW);
-            const summary = (gRes.text || '').trim();
-            const sources = extractGroundingSources(gRes);
-            await recordProjectAiUsage(
-              projectId,
-              user.uid,
-              extractUsageDeltaFromResponse(gRes, {
-                modelUsed: 'gemini-4-hydrogen',
-                fallbackPromptChars: prompt.length,
-                fallbackOutputChars: summary.length,
-                isGrounding: true,
-              })
-            );
-            if (summary) {
+            const searchOut = await executeUnifiedWebSearch({
+              primaryProvider,
+              searchRoute,
+              googleModel: groundingModel,
+              prompt,
+              thinkingLevel: ThinkingLevel.LOW,
+            });
+            lastSearchProviderLabel = searchOut.providerLabelFa;
+            await recordProjectAiUsage(projectId, user.uid, searchOut.usageDelta);
+            if (searchOut.summary) {
               await db
                 .update(outlineNodes)
                 .set({
                   webEnrichmentJson: {
-                    title: `تکمیل جامع با جستجوی گوگل — ${node.title}`,
-                    summary,
-                    sources,
+                    title: `تکمیل جامع از وب (${searchOut.providerLabelFa}) — ${node.title}`,
+                    summary: searchOut.summary,
+                    sources: searchOut.sources,
                     checkedAt: new Date().toISOString(),
                   },
                 })
@@ -1610,7 +2111,7 @@ export function createProjectRouter(): Router {
             }
           } catch (chapterErr) {
             failedChaptersCount += 1;
-            const parsedErr = formatGeminiError(chapterErr, 'خطا در جستجوی گوگل برای فصل.');
+            const parsedErr = formatGeminiError(chapterErr, 'خطا در جستجوی وب برای فصل.');
             if (parsedErr.statusCode === 429) {
               quotaError = parsedErr;
               break;
@@ -1627,6 +2128,16 @@ export function createProjectRouter(): Router {
           ? await reassembleAndPersistProject(projectId, user.uid)
           : await getProjectBundle(projectId, user.uid).then((b) => (b ? formatBundleForClient(b) : null));
 
+        await recordProjectRevision({
+          projectId,
+          ownerUid: user.uid,
+          actorType: 'ai',
+          actorName: `هوش مصنوعی + ${lastSearchProviderLabel}`,
+          actionType: 'web_grounding',
+          title: `تکمیل کل سند با ${lastSearchProviderLabel}`,
+          summary: `${toPersianDigits(enrichedChaptersCount)} فصل از ${toPersianDigits(nodes.length)} فصل با منابع معتبر وب تکمیل شد.`,
+        });
+
         res.json({
           enrichedChaptersCount,
           failedChaptersCount,
@@ -1639,7 +2150,172 @@ export function createProjectRouter(): Router {
 
       res.status(400).json({ error: 'نوع هدف جستجوی وب معتبر نیست.' });
     } catch (err) {
-      const formattedErr = formatGeminiError(err, 'خطا در اجرای جستجوی گوگل (Grounding).');
+      const formattedErr = formatGeminiError(err, 'خطا در اجرای جستجوی زنده وب.');
+      res.status(formattedErr.statusCode).json({ error: formattedErr.message });
+    }
+  });
+
+  // 11A. AUDIO / VOICE FILE TRANSCRIPTION (Gemini 3.5 Transcribe / OpenAI Whisper / Groq Whisper / Custom Whisper)
+  router.post('/:id/transcribe-audio', async (req, res) => {
+    try {
+      const user = (req as AuthRequest).user!;
+      const projectId = req.params.id;
+      const bundle = await getProjectBundle(projectId, user.uid);
+      if (!bundle) {
+        res.status(404).json({ error: 'پروژه یافت نشد.' });
+        return;
+      }
+
+      const body = req.body as {
+        audioBase64?: string;
+        mimeType?: string;
+        fileName?: string;
+        addAsSourceFile?: boolean;
+        role?: FileRole;
+      };
+
+      const rawBase64 = String(body.audioBase64 || '').trim();
+      if (!rawBase64) {
+        res.status(400).json({ error: 'داده فایل صوتی ارسال نشده است.' });
+        return;
+      }
+
+      // Limit decoded size to ~18MB to protect server memory
+      const approxBytes = Math.floor((rawBase64.length * 3) / 4);
+      if (approxBytes > 18 * 1024 * 1024) {
+        res.status(413).json({
+          error: 'حجم فایل صوتی بیش از ۱۸ مگابایت است. لطفاً فایل را کوتاه‌تر یا با فرمت MP3/OGG فشرده‌تر ارسال کنید.',
+        });
+        return;
+      }
+
+      const allowedMimes = new Set([
+        'audio/mpeg',
+        'audio/mp3',
+        'audio/wav',
+        'audio/x-wav',
+        'audio/wave',
+        'audio/mp4',
+        'audio/m4a',
+        'audio/x-m4a',
+        'audio/ogg',
+        'audio/webm',
+        'audio/flac',
+        'audio/aac',
+      ]);
+      const rawMime = String(body.mimeType || 'audio/mpeg').toLowerCase().split(';')[0].trim();
+      const mimeType = allowedMimes.has(rawMime) ? rawMime : 'audio/mpeg';
+      const fileName = String(body.fileName || 'voice-note.mp3').trim().slice(0, 120);
+
+      const primaryProvider = resolveAiProviderFromRequest(req);
+      const audioRoute = resolveAudioRouteFromRequest(req);
+
+      const sttResult = await transcribeAudioUnified({
+        audioRoute,
+        primaryProvider,
+        audioBase64: rawBase64,
+        mimeType,
+        fileName,
+      });
+
+      await recordProjectAiUsage(projectId, user.uid, sttResult.usageDelta);
+
+      let sourceFileAdded: { fileName: string; unitCount: number; wordCount: number } | null = null;
+      let refreshedBundle: ReturnType<typeof formatBundleForClient> | null = null;
+
+      if (body.addAsSourceFile) {
+        const baseLabel = fileName.replace(/\.(mp3|wav|m4a|ogg|webm|flac|aac|mp4)$/i, '');
+        const transcriptFileName = `ویس-${baseLabel}.md`;
+        const markdownBody = `# رونویسی صوتی: ${baseLabel}\n\n${sttResult.transcript}\n`;
+
+        const parsed = await parseAnySourceFile({
+          name: transcriptFileName,
+          format: 'md',
+          text: markdownBody,
+        });
+
+        const fileId = `sf_${deterministicHash(`${projectId}:${transcriptFileName}:${Date.now()}:${Math.random()}`)}`;
+        const atomicUnits = extractAtomicUnitsFromBook({
+          projectId,
+          sourceFileId: fileId,
+          fileName: transcriptFileName,
+          fileRole: body.role ?? 'supplement',
+          book: parsed,
+          startingOrder: bundle.contentUnits.length,
+        });
+
+        const wordCount = atomicUnits.reduce(
+          (sum, u) => sum + u.rawText.split(/\s+/).filter(Boolean).length,
+          0
+        );
+        const checksum = deterministicHash(atomicUnits.map((u) => u.normalizedHash).join('|'));
+
+        await insertSourceFileWithUnits({
+          file: {
+            id: fileId,
+            projectId,
+            fileName: transcriptFileName,
+            format: 'md',
+            role: body.role ?? 'supplement',
+            sizeBytes: Buffer.byteLength(markdownBody, 'utf8'),
+            wordCount,
+            fileHash: checksum,
+            metadataJson: {
+              unitCount: atomicUnits.length,
+              transcribedFromAudio: fileName,
+              sttModel: sttResult.modelUsed,
+              sttProvider: sttResult.providerLabelFa,
+            },
+          },
+          units: atomicUnits.map((u) => ({
+            id: u.id,
+            projectId: u.projectId,
+            sourceFileId: u.sourceFileId,
+            unitType: u.unitType,
+            unitOrder: u.unitOrder,
+            rawText: u.rawText,
+            contentHash: u.normalizedHash,
+            status: u.status,
+            canonicalUnitId: null,
+            outlineNodeId: null,
+            payloadJson: {
+              ...(u.metadataJson || {}),
+              headingPath: u.headingPath,
+            },
+          })),
+        });
+
+        sourceFileAdded = {
+          fileName: transcriptFileName,
+          unitCount: atomicUnits.length,
+          wordCount,
+        };
+
+        await recordProjectRevision({
+          projectId,
+          ownerUid: user.uid,
+          actorType: 'ai',
+          actorName: `تبدیل صوت به متن (${sttResult.providerLabelFa})`,
+          actionType: 'files_ingested',
+          title: `افزودن فایل صوتی «${fileName}» به منابع پروژه`,
+          summary: `${toPersianDigits(wordCount)} کلمه و ${toPersianDigits(atomicUnits.length)} واحد متنی با مدل ${sttResult.modelUsed} پیاده‌سازی و ثبت شد.`,
+        });
+
+        const fresh = await getProjectBundle(projectId, user.uid);
+        if (fresh) {
+          refreshedBundle = formatBundleForClient(fresh);
+        }
+      }
+
+      res.json({
+        transcript: sttResult.transcript,
+        modelUsed: sttResult.modelUsed,
+        providerLabelFa: sttResult.providerLabelFa,
+        sourceFileAdded,
+        bundle: refreshedBundle,
+      });
+    } catch (err) {
+      const formattedErr = formatGeminiError(err, 'خطا در تبدیل فایل صوتی به متن.');
       res.status(formattedErr.statusCode).json({ error: formattedErr.message });
     }
   });
@@ -1659,9 +2335,16 @@ export function createProjectRouter(): Router {
         return;
       }
 
-      const ai = createGeminiClient();
-      if (!ai) {
-        res.status(503).json({ error: 'کلید API هوش مصنوعی در تنظیمات سرور تنظیم نشده است.' });
+      const deepProvider = resolveAiProviderFromRequest(req);
+      if (deepProvider.validationError) {
+        res.status(400).json({ error: deepProvider.validationError });
+        return;
+      }
+      if (!deepProvider.apiKey) {
+        res.status(503).json({
+          error:
+            'کلید API هوش مصنوعی فعال نیست. می‌توانید کلید شخصی Google AI Studio یا ارائه‌دهنده سفارشی خود را در بخش تنظیمات وارد کنید.',
+        });
         return;
       }
 
@@ -1726,10 +2409,13 @@ export function createProjectRouter(): Router {
             }))
           : [];
 
+      const editorialDirective = buildEditorialSystemDirective(bundle.project.settingsJson);
+
       const prompt = [
-        'شما سردبیر ارشد فنی و ممیز کیفیت اسناد حرفه‌ای فارسی هستید.',
-        `سند «${bundle.project.title}» (حالت: ${bundle.project.workflowMode}) را با بالاترین دقت بررسی کن و هرگونه نقص ساختاری، عنوان مبهم، نبود جمع‌بندی/هشدار کلیدی، داده متراکم قابل تبدیل به جدول، یا شکاف منطقی بین فصل‌ها را کشف و برطرف کن.`,
-        'قانون مطلق عدم افت محتوا (Strict Zero-Loss): هیچ بخشی از متن اصلی کاربر را حذف نکن؛ فقط بهبودهای افزایشی و ساختاری (اصلاح عنوان فصل، افزودن باکس نکته/هشدار/جمع‌بندی، ساخت جدول مقایسه‌ای/مرجع و افزودن پاراگراف پیوندی یا تعریف جامانده) ارائه بده.',
+        'شما سردبیر ارشد فنی و ممیز کیفیت اسناد حرفه‌ای ریمپ و کالیبراسیون ECU به زبان فارسی هستید.',
+        editorialDirective,
+        `سند «${bundle.project.title}» (حالت: ${bundle.project.workflowMode}) را با بالاترین دقت بررسی کن و هرگونه نقص ساختاری، عنوان مبهم، نبود جمع‌بندی/هشدار کلیدی، داده متراکم قابل تبدیل به جدول (به‌ویژه جداول تغییرات WinOLS شامل نام نقشه، آدرس هگز، ناحیه دور/بار و مقدار تغییر)، یا شکاف منطقی بین فصل‌ها را کشف و برطرف کن.`,
+        'قانون مطلق عدم افت محتوا (Strict Zero-Loss): هیچ بخشی از متن اصلی کاربر را حذف نکن؛ فقط بهبودهای افزایشی و ساختاری (اصلاح عنوان فصل، افزودن باکس نکته/هشدار/جمع‌بندی، ساخت جدول مقایسه‌ای/راهنمای WinOLS و افزودن پاراگراف پیوندی یا تعریف جامانده) مطابق سطح دخالت و لحن بالا ارائه بده.',
         'نکته فرمت جدول: در addedTables هر ردیف داخل آرایه rows باید یک رشته با جداکننده « | » بین ستون‌ها باشد (مثلاً: "مقدار اول | مقدار دوم | توضیح").',
         body.focusNote ? `تمرکز ویژه درخواست‌شده توسط کاربر: ${body.focusNote}` : '',
         `خلاصه ساختار و محتوای فصل‌های سند:\n${JSON.stringify(chapterDigests)}`,
@@ -1857,19 +2543,37 @@ export function createProjectRouter(): Router {
         }>;
       };
 
-      // Resilient multi-tier reasoning ladder:
-      // 1) gemini-4-hydrogen + XHIGH -> 2) gemini-4-hydrogen + HIGH -> 3) gemini-3.1-flash-lite + HIGH -> 4) flash-lite JSON mode
+      const deepSettings = (bundle.project.settingsJson || {}) as Partial<DocxExportConfig>;
+      const preferredDeepModel = normalizeGoogleModelId(deepSettings.aiModel);
+
+      // Resilient multi-tier reasoning ladder using strictly Gemini 4 Hydrogen & Gemini 3.8 Flash (or custom OpenAI model)
       const reviewAttempts: Array<{
         model: string;
         level: ThinkingLevel;
         levelLabel: DeepReviewReportDto['thinkingLevel'];
         useSchema: boolean;
-      }> = [
-        { model: 'gemini-4-hydrogen', level: ThinkingLevel.XHIGH, levelLabel: 'XHIGH', useSchema: true },
-        { model: 'gemini-4-hydrogen', level: ThinkingLevel.HIGH, levelLabel: 'HIGH', useSchema: true },
-        { model: 'gemini-3.1-flash-lite', level: ThinkingLevel.HIGH, levelLabel: 'HIGH', useSchema: true },
-        { model: 'gemini-3.1-flash-lite', level: ThinkingLevel.MEDIUM, levelLabel: 'MEDIUM', useSchema: false },
-      ];
+      }> =
+        isNonGoogleProvider(deepProvider)
+          ? [
+              {
+                model: deepProvider.customModelId,
+                level: ThinkingLevel.HIGH,
+                levelLabel: 'HIGH',
+                useSchema: false,
+              },
+            ]
+          : preferredDeepModel === 'gemini-3.8-flash'
+            ? [
+                { model: 'gemini-3.8-flash', level: ThinkingLevel.HIGH, levelLabel: 'HIGH', useSchema: true },
+                { model: 'gemini-4-hydrogen', level: ThinkingLevel.XHIGH, levelLabel: 'XHIGH', useSchema: true },
+                { model: 'gemini-4-hydrogen', level: ThinkingLevel.HIGH, levelLabel: 'HIGH', useSchema: false },
+              ]
+            : [
+                { model: 'gemini-4-hydrogen', level: ThinkingLevel.XHIGH, levelLabel: 'XHIGH', useSchema: true },
+                { model: 'gemini-4-hydrogen', level: ThinkingLevel.HIGH, levelLabel: 'HIGH', useSchema: true },
+                { model: 'gemini-3.8-flash', level: ThinkingLevel.HIGH, levelLabel: 'HIGH', useSchema: true },
+                { model: 'gemini-3.8-flash', level: ThinkingLevel.MEDIUM, levelLabel: 'MEDIUM', useSchema: false },
+              ];
 
       emitStream({
         type: 'progress',
@@ -1878,8 +2582,8 @@ export function createProjectRouter(): Router {
       });
 
       let parsed: DeepReviewParsed | null = null;
-      let modelUsed = 'gemini-4-hydrogen';
-      let thinkingLevelUsed: DeepReviewReportDto['thinkingLevel'] = 'XHIGH';
+      let modelUsed = reviewAttempts[0].model;
+      let thinkingLevelUsed: DeepReviewReportDto['thinkingLevel'] = reviewAttempts[0].levelLabel;
       let deepReviewUsageDelta: AiUsageDelta | null = null;
       let lastAiErr: unknown = null;
 
@@ -1901,7 +2605,6 @@ export function createProjectRouter(): Router {
           totalAttempts: reviewAttempts.length,
         });
 
-        // Keep-alive progress heartbeat every 2.5s so proxies never idle-timeout during deep thinking
         const heartbeat = wantsStream
           ? setInterval(() => {
               currentPct = Math.min(73, currentPct + 3);
@@ -1918,26 +2621,21 @@ export function createProjectRouter(): Router {
           : null;
 
         try {
-          const aiRes = await ai.models.generateContent({
-            model: attempt.model,
-            contents: prompt,
-            config: {
-              responseMimeType: 'application/json',
-              ...(attempt.useSchema ? { responseSchema: deepReviewSchema } : {}),
-              thinkingConfig: { thinkingLevel: attempt.level },
-            },
+          const aiRes = await generateUnifiedTextOrJson({
+            provider: deepProvider,
+            googleModel: attempt.model,
+            thinkingLevel: attempt.level,
+            prompt,
+            expectJson: true,
+            googleResponseSchema: attempt.useSchema ? deepReviewSchema : undefined,
+            usageFlags: { isDeepReview: true },
           });
           const candidate = safeParseGeminiJson<DeepReviewParsed | null>(aiRes.text, null);
           if (candidate && (candidate.overallAssessment || Array.isArray(candidate.findings))) {
             parsed = candidate;
-            modelUsed = attempt.model;
+            modelUsed = aiRes.modelUsed;
             thinkingLevelUsed = attempt.levelLabel;
-            deepReviewUsageDelta = extractUsageDeltaFromResponse(aiRes, {
-              modelUsed: attempt.model,
-              fallbackPromptChars: prompt.length,
-              fallbackOutputChars: (aiRes.text || '').length,
-              isDeepReview: true,
-            });
+            deepReviewUsageDelta = aiRes.usageDelta;
             break;
           }
           lastAiErr = new Error('پاسخ JSON ساختاریافته از مدل هوش مصنوعی دریافت نشد.');
@@ -1947,9 +2645,13 @@ export function createProjectRouter(): Router {
             `[DeepReview] Attempt ${i + 1}/${reviewAttempts.length} (${attempt.model}/${attempt.levelLabel}) failed:`,
             attemptErr instanceof Error ? attemptErr.message.slice(0, 260) : attemptErr
           );
-          // Do not waste retries on invalid API key (403)
           const rawMsg = attemptErr instanceof Error ? attemptErr.message.toUpperCase() : '';
-          if (rawMsg.includes('403') || rawMsg.includes('PERMISSION_DENIED') || rawMsg.includes('API_KEY_INVALID')) {
+          if (
+            rawMsg.includes('401') ||
+            rawMsg.includes('403') ||
+            rawMsg.includes('PERMISSION_DENIED') ||
+            rawMsg.includes('API_KEY_INVALID')
+          ) {
             break;
           }
           if (i < reviewAttempts.length - 1) {
@@ -2197,6 +2899,17 @@ export function createProjectRouter(): Router {
 
       const finalBundle = await reassembleAndPersistProject(projectId, user.uid);
 
+      await recordProjectRevision({
+        projectId,
+        ownerUid: user.uid,
+        actorType: 'ai',
+        actorName: modelUsed,
+        actionType: 'deep_ai_review',
+        title: `بازبینی عمیق هوش مصنوعی (امتیاز ${toPersianDigits(review.overallScore)}/۱۰۰)`,
+        summary: review.overallAssessment || 'بهبود عنوان‌ها، افزودن کادرهای آموزشی و جداول بدون افت محتوا.',
+        extraDetails: { modelUsed },
+      });
+
       if (wantsStream) {
         emitStream({
           type: 'progress',
@@ -2249,14 +2962,20 @@ export function createProjectRouter(): Router {
         return;
       }
 
-      const ai = createGeminiClient();
-      if (!ai) {
-        res.status(503).json({ error: 'کلید API هوش مصنوعی در تنظیمات سرور تنظیم نشده است.' });
+      const chatProvider = resolveAiProviderFromRequest(req);
+      if (chatProvider.validationError) {
+        res.status(400).json({ error: chatProvider.validationError });
+        return;
+      }
+      if (!chatProvider.apiKey) {
+        res.status(503).json({
+          error:
+            'کلید API هوش مصنوعی تنظیم نشده است. می‌توانید در تنظیمات ارائه‌دهنده کلید شخصی خود را وارد کنید.',
+        });
         return;
       }
 
-      const requestedModel =
-        body.model && ALLOWED_MODELS.has(body.model) ? body.model : 'gemini-4-hydrogen';
+      const requestedModel = normalizeGoogleModelId(body.model);
 
       const projectContext = {
         title: bundle.project.title,
@@ -2283,13 +3002,80 @@ export function createProjectRouter(): Router {
         coveragePercent: bundle.auditReport?.coveragePercent ?? null,
       };
 
+      const chatEditorialDirective = buildEditorialSystemDirective(bundle.project.settingsJson);
+
       const systemInstruction = [
-        'شما دستیار هوشمند و سردبیر ارشد «استودیو صفحه‌آرایی و ادغام بدون افت اسناد» هستید.',
+        'شما دستیار هوشمند و سردبیر ارشد «استودیو صفحه‌آرایی و ادغام بدون افت اسناد» (متخصص جزوه‌های ریمپ و کالیبراسیون ECU/WinOLS) هستید.',
         'همیشه به زبان فارسی دقیق، محترمانه و مختصر پاسخ دهید.',
+        chatEditorialDirective,
         'قانون مطلق: هرگز پیشنهادی ندهید که محتوای یکتایی از فایل‌های کاربر را حذف کند.',
-        'اگر کاربر درخواست ویرایش ساختار سند دارد (مثل تغییر نام فصل، جابه‌جایی فصل، تقسیم فصل، افزودن باکس نکته، ساخت جدول مقایسه‌ای یا درج متن جدید)، حتماً ابزار متناظر را با nodeId دقیق از کانتکست فراخوانی کنید تا کارت تأیید برای کاربر ساخته شود.',
+        'اگر کاربر درخواست ویرایش ساختار سند دارد (مثل تغییر نام فصل، جابه‌جایی فصل، تقسیم فصل، افزودن باکس نکته، ساخت جدول مقایسه‌ای/راهنمای WinOLS یا درج متن جدید)، حتماً ابزار متناظر را با nodeId دقیق از کانتکست فراخوانی کنید تا کارت تأیید برای کاربر ساخته شود.',
         `وضعیت فعلی سند پروژه:\n${JSON.stringify(projectContext)}`,
       ].join('\n');
+
+      // Non-Google provider chat branch (Anthropic Claude Opus/Sonnet, OpenAI, Custom OpenAI-compatible)
+      // Also supports hybrid Web Search when user enables web search in chat!
+      if (isNonGoogleProvider(chatProvider)) {
+        const searchRoute = resolveWebSearchRouteFromRequest(req);
+        let groundingSources: WebGroundingSource[] = [];
+        let webContextNote = '';
+
+        if (body.enableGoogleSearch) {
+          try {
+            const searchOut = await executeUnifiedWebSearch({
+              primaryProvider: chatProvider,
+              searchRoute,
+              googleModel: requestedModel,
+              prompt: `پرسش کاربر درباره سند «${bundle.project.title}»:\n${message}\n\nلطفاً اطلاعات دقیق، به‌روز و مستند را به فارسی جمع‌بندی کن.`,
+              thinkingLevel: ThinkingLevel.LOW,
+            });
+            groundingSources = searchOut.sources;
+            if (searchOut.summary) {
+              webContextNote = `\n\n[نتایج جستجوی زنده وب از ${searchOut.providerLabelFa} برای استناد در پاسخ]:\n${searchOut.summary}`;
+            }
+            await recordProjectAiUsage(projectId, user.uid, searchOut.usageDelta);
+          } catch {
+            // Continue answering with primary model even if secondary web search route is unconfigured
+          }
+        }
+
+        const openAiMessages: Array<{ role: 'user' | 'assistant'; content: string }> = [
+          ...(Array.isArray(body.history) ? body.history.slice(-8) : []).map((h) => ({
+            role: (h.role === 'model' ? 'assistant' : 'user') as 'user' | 'assistant',
+            content: h.text,
+          })),
+          { role: 'user', content: `${message}${webContextNote}` },
+        ];
+        const customRes = await callNonGoogleChatWithFallback({
+          provider: chatProvider,
+          systemInstruction,
+          messages: openAiMessages,
+        });
+        const reply = customRes.text || 'درخواست شما بررسی شد.';
+        const fallbackPrompt = Math.ceil((systemInstruction.length + message.length) / 3);
+        const fallbackOutput = Math.ceil(reply.length / 3);
+        const updatedChatUsage = await recordProjectAiUsage(projectId, user.uid, {
+          promptTokens: customRes.usage.promptTokens || fallbackPrompt,
+          outputTokens: customRes.usage.outputTokens || fallbackOutput,
+          thinkingTokens: 0,
+          totalTokens:
+            customRes.usage.totalTokens ||
+            (customRes.usage.promptTokens || fallbackPrompt) +
+              (customRes.usage.outputTokens || fallbackOutput),
+          requestCount: 1,
+          chatCallCount: 1,
+          modelUsed: customRes.modelUsed,
+        });
+
+        res.json({
+          reply,
+          proposals: [],
+          groundingSources,
+          modelUsed: customRes.modelUsed,
+          ...(updatedChatUsage ? { aiUsage: updatedChatUsage } : {}),
+        });
+        return;
+      }
 
       const recentHistory = (Array.isArray(body.history) ? body.history.slice(-8) : []).map((h) => ({
         role: h.role === 'model' ? 'model' : 'user',
@@ -2303,21 +3089,25 @@ export function createProjectRouter(): Router {
         toolsList.push({ googleSearch: {} });
       }
 
-      const response = await ai.models.generateContent({
-        model: requestedModel,
-        contents: [...recentHistory, { role: 'user', parts: [{ text: message }] }],
-        config: {
-          systemInstruction,
-          tools: toolsList as never,
-          ...(body.enableGoogleSearch
-            ? { toolConfig: { includeServerSideToolInvocations: true } as never }
-            : {}),
-          thinkingConfig: {
-            thinkingLevel:
-              requestedModel === 'gemini-4-hydrogen' ? ThinkingLevel.MEDIUM : ThinkingLevel.LOW,
+      const { result: chatGen } = await executeWithGoogleClientFallback(chatProvider, (aiClient) =>
+        generateGoogleContentResilient({
+          ai: aiClient,
+          model: requestedModel,
+          contents: [...recentHistory, { role: 'user', parts: [{ text: message }] }],
+          config: {
+            systemInstruction,
+            tools: toolsList as never,
+            ...(body.enableGoogleSearch
+              ? { toolConfig: { includeServerSideToolInvocations: true } as never }
+              : {}),
+            thinkingConfig: {
+              thinkingLevel:
+                requestedModel === 'gemini-4-hydrogen' ? ThinkingLevel.MEDIUM : ThinkingLevel.LOW,
+            },
           },
-        },
-      });
+        })
+      );
+      const { response, resolvedModel } = chatGen;
 
       const proposals: ChatProposal[] = [];
       const fnCalls = response.functionCalls || [];
@@ -2370,7 +3160,7 @@ export function createProjectRouter(): Router {
         projectId,
         user.uid,
         extractUsageDeltaFromResponse(response, {
-          modelUsed: requestedModel,
+          modelUsed: resolvedModel,
           fallbackPromptChars: systemInstruction.length + message.length,
           fallbackOutputChars: reply.length,
           isGrounding: Boolean(body.enableGoogleSearch),
@@ -2382,7 +3172,7 @@ export function createProjectRouter(): Router {
         reply,
         proposals,
         groundingSources,
-        modelUsed: requestedModel,
+        modelUsed: resolvedModel,
         ...(updatedChatUsage ? { aiUsage: updatedChatUsage } : {}),
       });
     } catch (err) {
@@ -2569,10 +3359,95 @@ export function createProjectRouter(): Router {
       }
 
       const finalBundle = await reassembleAndPersistProject(projectId, user.uid);
+      await recordProjectRevision({
+        projectId,
+        ownerUid: user.uid,
+        actorType: 'ai',
+        actorName: 'دستیار هوشمند سردبیر',
+        actionType: 'ai_proposal_applied',
+        title: `اعمال پیشنهاد دستیار: ${proposal.title || proposal.action}`,
+        summary: proposal.summary || 'تغییر پیشنهادی دستیار روی ساختار و متن کتاب اعمال شد.',
+      });
       res.json({ ok: true, bundle: finalBundle });
     } catch (err) {
       res.status(500).json({
         error: err instanceof Error ? err.message : 'خطا در اعمال تغییر پیشنهادی روی سند.',
+      });
+    }
+  });
+
+  // 14. CHANGE LOG: LIST PROJECT REVISIONS
+  router.get('/:id/revisions', async (req, res) => {
+    try {
+      const user = (req as AuthRequest).user!;
+      const rows = await listProjectRevisions(req.params.id, user.uid);
+      if (rows === null) {
+        res.status(404).json({ error: 'پروژه موردنظر یافت نشد.' });
+        return;
+      }
+      res.json({
+        revisions: rows.map(formatRevisionRowForClient),
+      });
+    } catch (err) {
+      res.status(500).json({
+        error: err instanceof Error ? err.message : 'خطا در دریافت تاریخچه تغییرات پروژه.',
+      });
+    }
+  });
+
+  // 15. CHANGE LOG: ROLLBACK PROJECT TO A PREVIOUS VERSION SNAPSHOT
+  router.post('/:id/revisions/:revisionId/rollback', async (req, res) => {
+    try {
+      const user = (req as AuthRequest).user!;
+      const { id: projectId, revisionId } = req.params;
+
+      const targetRevision = await getProjectRevisionWithSnapshot(projectId, revisionId, user.uid);
+      if (!targetRevision) {
+        res.status(404).json({ error: 'نسخه انتخاب‌شده در تاریخچه تغییرات این پروژه یافت نشد.' });
+        return;
+      }
+
+      if (!isValidRevisionSnapshot(targetRevision.snapshotJson)) {
+        res.status(400).json({
+          error: 'این رکورد فاقد اسنپ‌شات کامل برای بازگشت خودکار است.',
+        });
+        return;
+      }
+
+      const restoredRaw = await restoreProjectFromRevisionSnapshot(
+        projectId,
+        user.uid,
+        targetRevision.snapshotJson
+      );
+      if (!restoredRaw) {
+        res.status(404).json({ error: 'پروژه موردنظر یافت نشد.' });
+        return;
+      }
+
+      await recordProjectRevision({
+        projectId,
+        ownerUid: user.uid,
+        actorType: 'user',
+        actorName: user.name || (user.isGuest ? 'کاربر مهمان' : 'کاربر استودیو'),
+        actionType: 'rollback_restored',
+        title: `بازگشت به نسخه ${toPersianDigits(targetRevision.versionNumber)} (${targetRevision.title})`,
+        summary: `وضعیت پروژه، فصل‌بندی و سند با موفقیت به نسخه شماره ${toPersianDigits(targetRevision.versionNumber)} بازگردانده شد.`,
+        extraDetails: {
+          restoredFromVersion: targetRevision.versionNumber,
+          restoredFromRevisionId: targetRevision.id,
+        },
+      });
+
+      const updatedRevisions = await listProjectRevisions(projectId, user.uid);
+      res.json({
+        ok: true,
+        restoredVersion: targetRevision.versionNumber,
+        bundle: formatBundleForClient(restoredRaw),
+        revisions: (updatedRevisions || []).map(formatRevisionRowForClient),
+      });
+    } catch (err) {
+      res.status(500).json({
+        error: err instanceof Error ? err.message : 'خطا در بازگردانی پروژه به نسخه قبلی.',
       });
     }
   });
