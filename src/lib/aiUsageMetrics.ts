@@ -1,4 +1,4 @@
-import { AiModelId, GoogleSearchMode, ProjectAiUsageLedger } from './bookTypes.ts';
+import type { AiModelId, GoogleSearchMode, ProjectAiUsageLedger } from './bookTypes.ts';
 import { getGoogleModelMeta, normalizeGoogleModelId } from './aiProviderConfig.ts';
 import { toPersianDigits } from './formatParsers.ts';
 

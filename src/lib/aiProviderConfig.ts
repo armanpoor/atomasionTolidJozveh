@@ -1,4 +1,4 @@
-import { AiModelId, DeepReviewReportDto } from './bookTypes.ts';
+import type { AiModelId, DeepReviewReportDto } from './bookTypes.ts';
 
 export type AiProviderType = 'google_aistudio' | 'openai' | 'anthropic' | 'custom_openai';
 

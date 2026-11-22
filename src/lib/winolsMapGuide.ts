@@ -1,4 +1,4 @@
-import { ContentUnitDto, SourceFileDto, TableBlock } from './bookTypes.ts';
+import type { ContentUnitDto, OutlineNodeDto, ParsedBook, SourceFileDto, TableBlock } from './bookTypes.ts';
 import { toAsciiDigits, toPersianDigits } from './formatParsers.ts';
 
 // ============================================================================
@@ -863,3 +863,312 @@ export function buildWinolsGuideCsv(entries: WinolsMapActionEntry[]): string {
   );
   return `\uFEFF${headers.map(esc).join(',')}\n${rows.join('\n')}`;
 }
+
+// ============================================================================
+// PART 3: GOOGLE SEARCH ENRICHMENT COVERAGE & RPM/LOAD VISUAL COORDINATES
+// ============================================================================
+
+export type WinolsGoogleMatchReason =
+  | 'direct_map_mention'
+  | 'chapter_web_enrichment'
+  | 'none';
+
+export interface WinolsMapGoogleCoverage {
+  mapId: string;
+  mapCode: string;
+  hasGoogleEnrichment: boolean;
+  matchReason: WinolsGoogleMatchReason;
+  matchedChapterNumbers: number[];
+  matchedChapterTitles: string[];
+  webSourcesCount: number;
+  webSources: Array<{ title: string; uri: string }>;
+  summaryExcerpt: string | null;
+  /** Normalized RPM (1000..7000) & Load (0..100%) envelope for the 2D visual chart */
+  plotRpmMin: number;
+  plotRpmMax: number;
+  plotLoadMin: number;
+  plotLoadMax: number;
+  plotRpmCenter: number;
+  plotLoadCenter: number;
+}
+
+export interface WinolsGoogleCoverageSummary {
+  totalMaps: number;
+  enrichedCount: number;
+  localOnlyCount: number;
+  coveragePercent: number;
+  byMapId: Record<string, WinolsMapGoogleCoverage>;
+  items: WinolsMapGoogleCoverage[];
+}
+
+function escapeRegExp(str: string): string {
+  return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function textMentionsMap(text: string, entry: WinolsMapActionEntry): boolean {
+  if (!text) return false;
+  const codePattern = new RegExp(`(?<![A-Za-z0-9_])${escapeRegExp(entry.mapCode)}(?![A-Za-z0-9_])`, 'i');
+  if (codePattern.test(text)) return true;
+  for (const hex of entry.hexAddresses) {
+    if (hex && text.toLowerCase().includes(hex.toLowerCase())) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function clamp(val: number, min: number, max: number): number {
+  return Math.max(min, Math.min(max, val));
+}
+
+function computePlotEnvelope(
+  entry: WinolsMapActionEntry,
+  fallbackIndex: number
+): {
+  plotRpmMin: number;
+  plotRpmMax: number;
+  plotLoadMin: number;
+  plotLoadMax: number;
+  plotRpmCenter: number;
+  plotLoadCenter: number;
+} {
+  // Default category envelopes when a map is scalar or lacks explicit RPM/Load bounds
+  const categoryDefaults: Record<
+    WinolsMapCategory,
+    { rpmMin: number; rpmMax: number; loadMin: number; loadMax: number }
+  > = {
+    ignition: { rpmMin: 2800, rpmMax: 5600, loadMin: 60, loadMax: 95 },
+    fuel: { rpmMin: 3200, rpmMax: 6200, loadMin: 72, loadMax: 100 },
+    torque: { rpmMin: 2200, rpmMax: 5400, loadMin: 55, loadMax: 92 },
+    boost: { rpmMin: 2400, rpmMax: 5500, loadMin: 65, loadMax: 100 },
+    limiter: { rpmMin: 5800, rpmMax: 6900, loadMin: 84, loadMax: 100 },
+    pedal: { rpmMin: 1500, rpmMax: 4500, loadMin: 25, loadMax: 75 },
+    injection: { rpmMin: 2000, rpmMax: 5200, loadMin: 45, loadMax: 90 },
+    emission: { rpmMin: 1400, rpmMax: 3400, loadMin: 15, loadMax: 55 },
+  };
+
+  const def = categoryDefaults[entry.category] || {
+    rpmMin: 2500,
+    rpmMax: 5200,
+    loadMin: 50,
+    loadMax: 85,
+  };
+
+  let rpmMin = entry.targetRpmRange ? entry.targetRpmRange.min : def.rpmMin;
+  let rpmMax = entry.targetRpmRange ? entry.targetRpmRange.max : def.rpmMax;
+  let loadMin = entry.targetLoadRange ? entry.targetLoadRange.min : def.loadMin;
+  let loadMax = entry.targetLoadRange ? entry.targetLoadRange.max : def.loadMax;
+
+  // Special handling for rev limiters (NMAX / VMAX) when a single RPM limit is detected
+  if (entry.isScalar && entry.category === 'limiter') {
+    const detectedRpm = entry.numericValuesDetected
+      .map((v) => Number(toAsciiDigits(v).replace(/[^\d.]/g, '')))
+      .find((n) => n >= 4500 && n <= 9000);
+    if (detectedRpm) {
+      rpmMin = clamp(detectedRpm - 550, 1200, 6600);
+      rpmMax = clamp(detectedRpm + 150, 1800, 7000);
+    }
+    loadMin = 84;
+    loadMax = 99;
+  }
+
+  rpmMin = clamp(rpmMin, 1000, 6600);
+  rpmMax = clamp(Math.max(rpmMax, rpmMin + 500), 1500, 7000);
+  loadMin = clamp(loadMin, 5, 88);
+  loadMax = clamp(Math.max(loadMax, loadMin + 12), 18, 100);
+
+  // Subtle deterministic micro-offset when multiple maps share identical bounds so pins stay separable
+  const jitterRpm = ((fallbackIndex % 3) - 1) * 120;
+  const jitterLoad = ((fallbackIndex % 2) === 0 ? -1 : 1) * 2.5;
+  const plotRpmCenter = clamp(Math.round((rpmMin + rpmMax) / 2 + jitterRpm), 1150, 6850);
+  const plotLoadCenter = clamp(Math.round((loadMin + loadMax) / 2 + jitterLoad), 10, 96);
+
+  return {
+    plotRpmMin: rpmMin,
+    plotRpmMax: rpmMax,
+    plotLoadMin: loadMin,
+    plotLoadMax: loadMax,
+    plotRpmCenter,
+    plotLoadCenter,
+  };
+}
+
+interface ExtractedEnrichmentRecord {
+  chapterNumber: number;
+  chapterTitle: string;
+  chapterPlainText: string;
+  enrichmentTitle: string;
+  enrichmentSummary: string;
+  sources: Array<{ title: string; uri: string }>;
+}
+
+/**
+ * Deterministically inspects the final Word book (`ParsedBook`) and optional `outlineNodes`
+ * to identify which detected WinOLS maps carry "تکمیل‌شده با جستجوی گوگل" (`web_enrichment`
+ * or web-grounded conflict notes) explanations in the exported `.docx`.
+ */
+export function analyzeWinolsGoogleEnrichment(params: {
+  entries: WinolsMapActionEntry[];
+  book?: ParsedBook | null;
+  outlineNodes?: OutlineNodeDto[];
+}): WinolsGoogleCoverageSummary {
+  const { entries, book, outlineNodes } = params;
+  const enrichmentRecords: ExtractedEnrichmentRecord[] = [];
+
+  if (book && Array.isArray(book.chapters)) {
+    for (const ch of book.chapters) {
+      if (ch.id === 'ch_winols_quick_guide') continue;
+
+      const allBlocks = [
+        ...(ch.introBlocks || []),
+        ...(ch.sections || []).flatMap((sec) => sec.blocks || []),
+      ];
+
+      const chapterTextParts: string[] = [ch.title];
+      for (const sec of ch.sections || []) {
+        chapterTextParts.push(sec.title);
+      }
+
+      for (const b of allBlocks) {
+        if (b.type === 'paragraph') chapterTextParts.push(b.text);
+        else if (b.type === 'subheading') chapterTextParts.push(b.text);
+        else if (b.type === 'callout') chapterTextParts.push(b.title, ...(b.paragraphs || []));
+        else if (b.type === 'list') chapterTextParts.push(...(b.items || []));
+        else if (b.type === 'table') {
+          if (b.caption) chapterTextParts.push(b.caption);
+          chapterTextParts.push(...(b.headers || []));
+          for (const row of b.rows || []) chapterTextParts.push(...row);
+        }
+      }
+      const chapterPlainText = chapterTextParts.join('\n');
+
+      for (const b of allBlocks) {
+        if (b.type === 'web_enrichment' && b.summary?.trim()) {
+          enrichmentRecords.push({
+            chapterNumber: ch.chapterNumber,
+            chapterTitle: ch.title,
+            chapterPlainText,
+            enrichmentTitle: b.title || ch.title,
+            enrichmentSummary: b.summary,
+            sources: (b.sources || []).map((s) => ({ title: s.title, uri: s.uri })),
+          });
+        } else if (b.type === 'conflict_note' && b.webSummary?.trim()) {
+          enrichmentRecords.push({
+            chapterNumber: ch.chapterNumber,
+            chapterTitle: ch.title,
+            chapterPlainText: `${chapterPlainText}\n${b.topic}\n${b.excerptA}\n${b.excerptB}`,
+            enrichmentTitle: b.topic || ch.title,
+            enrichmentSummary: b.webSummary,
+            sources: (b.webSources || []).map((s) => ({ title: s.title, uri: s.uri })),
+          });
+        }
+      }
+    }
+  }
+
+  // Fallback to outlineNodes.webEnrichmentJson if book snapshot has no records yet
+  if (enrichmentRecords.length === 0 && Array.isArray(outlineNodes)) {
+    outlineNodes.forEach((node, idx) => {
+      const w = node.webEnrichmentJson as
+        | { title?: string; summary?: string; sources?: Array<{ title: string; uri: string }> }
+        | null
+        | undefined;
+      if (w && typeof w.summary === 'string' && w.summary.trim()) {
+        enrichmentRecords.push({
+          chapterNumber: idx + 1,
+          chapterTitle: node.title,
+          chapterPlainText: `${node.title}\n${node.summary || ''}`,
+          enrichmentTitle: w.title || node.title,
+          enrichmentSummary: w.summary,
+          sources: Array.isArray(w.sources) ? w.sources : [],
+        });
+      }
+    });
+  }
+
+  // Pre-check which enrichment records explicitly mention specific WinOLS map codes
+  const recordExplicitlyNamesAnyMap = enrichmentRecords.map((rec) => {
+    const combined = `${rec.enrichmentTitle}\n${rec.enrichmentSummary}`;
+    return entries.some((entry) => textMentionsMap(combined, entry));
+  });
+
+  const byMapId: Record<string, WinolsMapGoogleCoverage> = {};
+  const items: WinolsMapGoogleCoverage[] = [];
+
+  entries.forEach((entry, idx) => {
+    const env = computePlotEnvelope(entry, idx);
+    const directMatches: ExtractedEnrichmentRecord[] = [];
+    const chapterMatches: ExtractedEnrichmentRecord[] = [];
+
+    enrichmentRecords.forEach((rec, rIdx) => {
+      const combinedEnrichment = `${rec.enrichmentTitle}\n${rec.enrichmentSummary}`;
+      if (textMentionsMap(combinedEnrichment, entry)) {
+        directMatches.push(rec);
+      } else if (
+        !recordExplicitlyNamesAnyMap[rIdx] &&
+        textMentionsMap(rec.chapterPlainText, entry)
+      ) {
+        chapterMatches.push(rec);
+      }
+    });
+
+    const chosen = directMatches.length > 0 ? directMatches : chapterMatches;
+    const matchReason: WinolsGoogleMatchReason =
+      directMatches.length > 0
+        ? 'direct_map_mention'
+        : chapterMatches.length > 0
+          ? 'chapter_web_enrichment'
+          : 'none';
+
+    const uniqueSourcesMap = new Map<string, { title: string; uri: string }>();
+    for (const rec of chosen) {
+      for (const s of rec.sources) {
+        if (s?.uri && !uniqueSourcesMap.has(s.uri)) {
+          uniqueSourcesMap.set(s.uri, { title: s.title || s.uri, uri: s.uri });
+        }
+      }
+    }
+    const webSources = Array.from(uniqueSourcesMap.values());
+    const matchedChapterNumbers = Array.from(new Set(chosen.map((r) => r.chapterNumber))).sort(
+      (a, b) => a - b
+    );
+    const matchedChapterTitles = Array.from(new Set(chosen.map((r) => r.chapterTitle)));
+    const firstSummary = chosen[0]?.enrichmentSummary?.trim() || null;
+    const summaryExcerpt = firstSummary
+      ? firstSummary.length > 220
+        ? `${firstSummary.slice(0, 217).trim()}...`
+        : firstSummary
+      : null;
+
+    const item: WinolsMapGoogleCoverage = {
+      mapId: entry.id,
+      mapCode: entry.mapCode,
+      hasGoogleEnrichment: chosen.length > 0,
+      matchReason,
+      matchedChapterNumbers,
+      matchedChapterTitles,
+      webSourcesCount: webSources.length,
+      webSources,
+      summaryExcerpt,
+      ...env,
+    };
+
+    byMapId[entry.id] = item;
+    items.push(item);
+  });
+
+  const totalMaps = items.length;
+  const enrichedCount = items.filter((i) => i.hasGoogleEnrichment).length;
+  const localOnlyCount = totalMaps - enrichedCount;
+  const coveragePercent = totalMaps > 0 ? Math.round((enrichedCount / totalMaps) * 100) : 0;
+
+  return {
+    totalMaps,
+    enrichedCount,
+    localOnlyCount,
+    coveragePercent,
+    byMapId,
+    items,
+  };
+}
+

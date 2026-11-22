@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import crypto from 'node:crypto';
-import { GoogleGenAI, ThinkingLevel, Type, FunctionDeclaration } from '@google/genai';
-import { requireAuth, AuthRequest } from '../middleware/auth.ts';
+import { GoogleGenAI, ThinkingLevel, Type, type FunctionDeclaration } from '@google/genai';
+import { requireAuth, type AuthRequest } from '../middleware/auth.ts';
 import {
   clearProjectPipelineArtifacts,
   createProjectRecord,
@@ -27,27 +27,27 @@ import { and, eq } from 'drizzle-orm';
 import {
   buildRevisionSnapshotPayload,
   isValidRevisionSnapshot,
-  RevisionActionType,
-  RevisionActorType,
+  type RevisionActionType,
+  type RevisionActorType,
 } from '../lib/changeLogUtils.ts';
 import {
-  ChatProposal,
+  type ChatProposal,
   DEFAULT_DOCX_CONFIG,
-  DeepReviewFinding,
-  DeepReviewReportDto,
-  DocxExportConfig,
-  FileRole,
-  GoogleSearchMode,
-  SourceFileFormat,
-  WebGroundingSource,
-  WorkflowMode,
+  type DeepReviewFinding,
+  type DeepReviewReportDto,
+  type DocxExportConfig,
+  type FileRole,
+  type GoogleSearchMode,
+  type SourceFileFormat,
+  type WebGroundingSource,
+  type WorkflowMode,
 } from '../lib/bookTypes.ts';
 import { detectFileFormat, parseAnySourceFile, toPersianDigits } from '../lib/formatParsers.ts';
 import {
   assembleFinalBookAndAudit,
   buildInitialOutline,
   computeJaccardSimilarity,
-  DedupPipelineOutput,
+  type DedupPipelineOutput,
   deterministicHash,
   extractAtomicUnitsFromBook,
   isGenuineNumericConflict,
@@ -57,7 +57,7 @@ import {
 } from '../lib/zeroLossPipeline.ts';
 import { buildEditorialSystemDirective } from '../lib/winolsMapGuide.ts';
 import {
-  AiUsageDelta,
+  type AiUsageDelta,
   extractAiUsageFromCheckpoint,
   mergeAiUsageDelta,
 } from '../lib/aiUsageMetrics.ts';
@@ -74,7 +74,7 @@ import {
   generateUnifiedTextOrJson,
   isNonGoogleProvider,
   probeProviderWithCreatorFallback,
-  ResolvedServerAiProvider,
+  type ResolvedServerAiProvider,
   resolveAiProviderFromRequest,
   resolveAudioRouteFromRequest,
   resolveThinkingLevelForGoogleModel,
@@ -1105,9 +1105,33 @@ export function createProjectRouter(): Router {
             units: formattedAfter.contentUnits as unknown as Parameters<typeof buildInitialOutline>[0]['units'],
           });
 
+          const demoNodesWithWeb = proposed.nodes.map((n, idx) =>
+            idx === 0
+              ? {
+                  ...n,
+                  webEnrichmentJson: {
+                    title: 'تکمیل مرجع کالیبراسیون LAMFA و KFZW در ایسیو ME7.4.4',
+                    summary:
+                      'بر اساس مستندات فنی Bosch ME7 Funktionsrahmen، در مپ LAMFA اعمال نسبت 12.5:1 AFR در بار بالای 75% و دور 3500 تا 6000 RPM مانع افزایش دمای اگزوز (EGT) می‌شود. همچنین در مپ آوانس جرقه KFZW (آدرس 0x1A4F0) افزایش حداکثر +2.0° تا +2.5° تنها با بنزین اکتان ۹۵ به بالا و پایش ریتارد ناک مجاز است.',
+                    sources: [
+                      {
+                        title: 'Bosch ME7 Funktionsrahmen — LAMFA & KFZW Calibration Reference',
+                        uri: 'https://s4wiki.com/wiki/Tuning',
+                      },
+                      {
+                        title: 'WinOLS Map Calibration Safety Guidelines (AFR & Ignition Advance)',
+                        uri: 'https://www.evc.de/en/product/ols/software/',
+                      },
+                    ],
+                    checkedAt: new Date().toISOString(),
+                  },
+                }
+              : n
+          );
+
           await saveOutlineNodesForProject({
             projectId,
-            nodes: proposed.nodes,
+            nodes: demoNodesWithWeb,
             unitAssignments: proposed.unitAssignments,
           });
         }

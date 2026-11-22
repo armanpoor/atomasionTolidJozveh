@@ -1,5 +1,5 @@
-import { DiagramBlock, DiagramItem, DiagramKind } from './bookTypes';
-import { toPersianDigits } from './formatParsers';
+import type { DiagramBlock, DiagramItem, DiagramKind } from './bookTypes.ts';
+import { toPersianDigits } from './formatParsers.ts';
 
 const SVG_WIDTH = 960;
 const SVG_HEIGHT = 480;

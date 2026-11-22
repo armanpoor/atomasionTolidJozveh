@@ -1,4 +1,4 @@
-import { ContentUnitDto, DiagramBlock, FigureBlock, SourceFileDto, TableBlock } from './bookTypes.ts';
+import type { ContentUnitDto, DiagramBlock, FigureBlock, SourceFileDto, TableBlock } from './bookTypes.ts';
 import { extractEcuPlatforms, hasDisjointEcuPlatforms } from './ecuTechnicalIntegrity.ts';
 import { toAsciiDigits } from './formatParsers.ts';
 

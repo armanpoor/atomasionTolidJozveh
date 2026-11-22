@@ -1800,6 +1800,11 @@ export default function App() {
                 {winolsWorkbenchOpen && (
                   <WinolsMapWorkbench
                     report={winolsGuideReport}
+                    auditReport={bundle?.auditReport ?? null}
+                    book={activeBook}
+                    outlineNodes={bundle?.outlineNodes ?? []}
+                    enrichingGoogle={enrichingFullGoogle}
+                    onEnrichAllWithGoogle={handleEnrichFullDocumentWithGoogle}
                     onClose={() => setWinolsWorkbenchOpen(false)}
                     hasWinolsAppendixChapter={activeBook.chapters.some(
                       (c) => c.id === 'ch_winols_quick_guide'

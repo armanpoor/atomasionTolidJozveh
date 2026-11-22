@@ -156,3 +156,79 @@ test('extractWinolsMapGuides ignores merged duplicate units and returns empty re
   assert.equal(report.mapsDetected, 0);
   assert.equal(report.summaryTable, null);
 });
+
+test('analyzeWinolsGoogleEnrichment detects direct map-level Google enrichments vs local-only maps and computes RPM/Load coordinates', async () => {
+  const { analyzeWinolsGoogleEnrichment } = await import('./winolsMapGuide');
+  const files = [makeFile('f1', 'جزوه_ME7.4.4.docx')];
+  const units = [
+    makeUnit('u1', 'f1', 'در ایسیو ME7.4.4 نقشه KFZW (آدرس 0x1A4F0) در دور 3000 تا 5500 RPM و بار 70 تا 100% به میزان +2.5° اصلاح می‌شود.'),
+    makeUnit('u2', 'f1', 'نقشه LAMFA در دور 3500 تا 6000 RPM روی 12.5:1 AFR تنظیم شود.'),
+    makeUnit('u3', 'f1', 'نقشه KFMIRL در دور 2500 تا 5500 RPM و بار 65 تا 100% اصلاح می‌شود.'),
+    makeUnit('u4', 'f1', 'محدودکننده دور NMAX از 6500 RPM به 6950 RPM افزایش می‌یابد.'),
+  ];
+  const report = extractWinolsMapGuides({ sourceFiles: files, units });
+
+  const mockBook = {
+    title: 'کتاب مرجع کالیبراسیون',
+    subtitle: '',
+    editionNote: '',
+    sourceFiles: ['جزوه_ME7.4.4.docx'],
+    volumes: [{ id: 'v1', index: 1, title: 'مجلد ۱' }],
+    chapters: [
+      {
+        id: 'ch_1',
+        chapterNumber: 1,
+        title: 'فصل ۱: کالیبراسیون ME7.4.4',
+        volumeIndex: 1,
+        volumeTitle: 'مجلد ۱',
+        sourceFileName: 'جزوه_ME7.4.4.docx',
+        meta: [],
+        introBlocks: [
+          { type: 'paragraph' as const, id: 'p1', text: 'نقشه‌های LAMFA، KFZW، KFMIRL و NMAX در این فصل بررسی می‌شوند.' },
+          {
+            type: 'web_enrichment' as const,
+            id: 'web_1',
+            title: 'تکمیل مرجع LAMFA و KFZW',
+            summary: 'بر اساس مستندات Bosch، تنظیم LAMFA روی 12.5:1 و آوانس KFZW تا +2.5° ایمن است.',
+            sources: [{ title: 'Bosch Reference', uri: 'https://example.com/bosch-me7' }],
+            checkedAt: '2026-11-22T00:00:00Z',
+          },
+        ],
+        sections: [],
+      },
+    ],
+    tableIndex: [],
+    glossary: [],
+    footnotes: [],
+    cheatSheets: [],
+    visualSuggestions: [],
+    sourceMapRows: [],
+  };
+
+  const cov = analyzeWinolsGoogleEnrichment({
+    entries: report.entries,
+    book: mockBook,
+  });
+
+  assert.equal(cov.totalMaps, 4);
+  assert.equal(cov.enrichedCount, 2);
+  assert.equal(cov.localOnlyCount, 2);
+  assert.equal(cov.coveragePercent, 50);
+
+  const lamfaEntry = report.entries.find((e) => e.mapCode === 'LAMFA')!;
+  const kfzwEntry = report.entries.find((e) => e.mapCode === 'KFZW')!;
+  const kfmirlEntry = report.entries.find((e) => e.mapCode === 'KFMIRL')!;
+  const nmaxEntry = report.entries.find((e) => e.mapCode === 'NMAX')!;
+
+  assert.equal(cov.byMapId[lamfaEntry.id].hasGoogleEnrichment, true);
+  assert.equal(cov.byMapId[lamfaEntry.id].matchReason, 'direct_map_mention');
+  assert.equal(cov.byMapId[lamfaEntry.id].webSourcesCount, 1);
+  assert.equal(cov.byMapId[kfzwEntry.id].hasGoogleEnrichment, true);
+  assert.equal(cov.byMapId[kfmirlEntry.id].hasGoogleEnrichment, false);
+  assert.equal(cov.byMapId[nmaxEntry.id].hasGoogleEnrichment, false);
+
+  // Verify RPM/Load coordinates are bounded cleanly for D3 scatter plot
+  assert.ok(cov.byMapId[kfzwEntry.id].plotRpmCenter >= 3000 && cov.byMapId[kfzwEntry.id].plotRpmCenter <= 5500);
+  assert.ok(cov.byMapId[nmaxEntry.id].plotRpmCenter >= 5800 && cov.byMapId[nmaxEntry.id].plotRpmCenter <= 7000);
+});
+

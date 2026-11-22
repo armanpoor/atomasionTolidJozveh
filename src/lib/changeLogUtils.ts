@@ -1,4 +1,4 @@
-import type { ParsedBook, ProjectStatus, WorkflowMode } from './bookTypes';
+import type { ParsedBook, ProjectStatus, WorkflowMode } from './bookTypes.ts';
 
 export type RevisionActorType = 'user' | 'ai' | 'system';
 

@@ -1,4 +1,4 @@
-import { ContentBlock, ParsedBook, TableBlock } from './bookTypes.ts';
+import type { ContentBlock, ParsedBook, TableBlock } from './bookTypes.ts';
 import { toAsciiDigits } from './formatParsers.ts';
 
 // ============================================================================

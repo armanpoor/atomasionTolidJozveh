@@ -1,5 +1,5 @@
 import JSZip from 'jszip';
-import {
+import type {
   CalloutBlock,
   CalloutVariant,
   ChapterMetaItem,
@@ -12,7 +12,7 @@ import {
   SourceFileFormat,
   TableBlock,
   VolumeNode,
-} from './bookTypes';
+} from './bookTypes.ts';
 
 const PERSIAN_DIGITS = '۰۱۲۳۴۵۶۷۸۹';
 

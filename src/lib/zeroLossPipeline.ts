@@ -1,4 +1,4 @@
-import {
+import type {
   ChapterNode,
   ConflictDto,
   ContentBlock,
@@ -22,7 +22,7 @@ import {
 } from './ecuTechnicalIntegrity.ts';
 import { toAsciiDigits, toPersianDigits } from './formatParsers.ts';
 import { analyzeNumericDiscrepancies } from './numericDiscrepancyAnalyzer.ts';
-import { extractWinolsMapGuides } from './winolsMapGuide.ts';
+import { analyzeWinolsGoogleEnrichment, extractWinolsMapGuides } from './winolsMapGuide.ts';
 
 // ============================================================================
 // DETERMINISTIC NORMALIZATION, HASHING & TOKEN SIMILARITY
@@ -1898,6 +1898,12 @@ export function assembleFinalBookAndAudit(params: {
     }
   }
 
+  const winolsGoogleCoverage = analyzeWinolsGoogleEnrichment({
+    entries: winolsGuideReport.entries,
+    book,
+    outlineNodes: params.outlineNodes,
+  });
+
   return {
     book,
     audit: {
@@ -1917,6 +1923,7 @@ export function assembleFinalBookAndAudit(params: {
         technicalIntegrity,
         numericDiscrepancyReport,
         winolsGuideReport,
+        winolsGoogleCoverage,
         perFileCoverage: params.sourceFiles.map((f) => {
           const fUnits = params.units.filter((u) => u.sourceFileId === f.id);
           const fCovered = fUnits.filter(

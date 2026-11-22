@@ -1,6 +1,6 @@
 import type { Server as HttpServer } from 'node:http';
 import { WebSocketServer, WebSocket } from 'ws';
-import { FunctionDeclaration, Modality, Type } from '@google/genai';
+import { type FunctionDeclaration, Modality, Type } from '@google/genai';
 import crypto from 'node:crypto';
 import { adminAuth } from '../lib/firebase-admin.ts';
 import { getProjectBundle } from '../db/repository.ts';
