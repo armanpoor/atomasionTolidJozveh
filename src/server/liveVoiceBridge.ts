@@ -50,6 +50,9 @@ const LIVE_VOICE_TOOLS: FunctionDeclaration[] = [
 
 export function attachLiveVoiceWebSocket(server: HttpServer) {
   const wss = new WebSocketServer({ server, path: '/ws/live' });
+  wss.on('error', (err) => {
+    console.error('Live voice WebSocket server error:', err);
+  });
 
   wss.on('connection', (ws: WebSocket) => {
     let liveSession: Awaited<ReturnType<NonNullable<ReturnType<typeof createGeminiClient>>['live']['connect']>> | null =

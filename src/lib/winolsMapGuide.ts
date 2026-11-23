@@ -228,6 +228,23 @@ export interface WinolsZoneMatrix {
   selectionInstructionFa: string;
 }
 
+export interface WinolsDamosExtractedMeta {
+  factor?: number;
+  offset?: number;
+  dataOrg?: '8bit' | '16bit';
+  signed?: boolean;
+  byteOrder?: 'LoHi' | 'HiLo';
+  baseAddressHex?: string;
+  axisXHex?: string;
+  axisYHex?: string;
+  axisXLabel?: string;
+  axisYLabel?: string;
+  axisXUnit?: string;
+  axisYUnit?: string;
+  unit?: string;
+  lineSwappingRequired?: boolean;
+}
+
 export interface WinolsMapActionEntry {
   id: string;
   mapCode: string;
@@ -250,6 +267,7 @@ export interface WinolsMapActionEntry {
   evidenceSnippets: string[];
   zoneMatrix: WinolsZoneMatrix | null;
   confidence: 'high' | 'medium';
+  damosMeta?: WinolsDamosExtractedMeta;
 }
 
 export interface WinolsExtractionReport {
@@ -272,9 +290,11 @@ interface WinolsMapSpec {
   defaultUnit: string;
   defaultDeltaLabel: string;
   safetyChecklistFa: string;
+  defaultDamosMeta?: WinolsDamosExtractedMeta;
 }
 
 const WINOLS_MAP_CATALOG: WinolsMapSpec[] = [
+  // ---- BOSCH / EUROPEAN STANDARD MAPS ----
   {
     code: 'KFZW',
     aliases: [/\bKFZW2?\b/i, /\bKFZWOP2?\b/i, /جدول\s+آوانس\s+جرقه/i, /مپ\s+آوانس/i],
@@ -289,6 +309,7 @@ const WINOLS_MAP_CATALOG: WinolsMapSpec[] = [
     defaultDeltaLabel: '+2.0°',
     safetyChecklistFa:
       'لاگ‌گیری ناک (Knock Retard) روی بنزین واقعی الزامی است؛ در صورت مشاهده ناک بالای ۲ درجه، آوانس را برگردانید.',
+    defaultDamosMeta: { factor: 0.75, offset: 0, dataOrg: '8bit', signed: true, unit: 'deg' },
   },
   {
     code: 'LAMFA',
@@ -304,6 +325,7 @@ const WINOLS_MAP_CATALOG: WinolsMapSpec[] = [
     defaultDeltaLabel: '12.5:1',
     safetyChecklistFa:
       'در بار کامل (WOT) با وایدبند بررسی کنید؛ مخلوط فقیرتر از 13.0:1 زیر بار خطر افزایش EGT و ذوب پیستون دارد.',
+    defaultDamosMeta: { factor: 0.007813, offset: 0, dataOrg: '8bit', signed: false, unit: 'Lambda' },
   },
   {
     code: 'KFMIRL',
@@ -319,6 +341,7 @@ const WINOLS_MAP_CATALOG: WinolsMapSpec[] = [
     defaultDeltaLabel: '+10%',
     safetyChecklistFa:
       'تغییر KFMIRL بدون هماهنگی محور KFMIOP باعث خطای Torque Monitoring (کپ کردن دریچه گاز) می‌شود.',
+    defaultDamosMeta: { factor: 0.023438, offset: 0, dataOrg: '16bit', signed: false, unit: '%' },
   },
   {
     code: 'LDRXN',
@@ -334,10 +357,11 @@ const WINOLS_MAP_CATALOG: WinolsMapSpec[] = [
     defaultDeltaLabel: '+0.2 bar',
     safetyChecklistFa:
       'محدودکننده تک‌مقداری SVBL و دمای هوای ورودی (IAT) را چک کنید تا توربو به ناحیه Surge یا Overspeed وارد نشود.',
+    defaultDamosMeta: { factor: 0.023438, offset: 0, dataOrg: '16bit', signed: false, unit: '%' },
   },
   {
     code: 'NMAX',
-    aliases: [/\bNMAX(?:OG|DV)?\b/i, /محدودکننده\s+دور/i, /محدوده\s+کات[‌\s]?آف/i, /مپ\s+کات[‌\s]?آف/i],
+    aliases: [/\bNMAX(?:OG|DV)?\b/i, /\bHard\s*Limit\b/i, /محدودکننده\s+دور/i, /محدوده\s+کات[‌\s]?آف/i, /مپ\s+کات[‌\s]?آف/i, /کات[‌\s]?آف\s+رگباری/i],
     nameFa: 'محدودکننده حداکثر دور موتور (Rev Limiter / Cut-Off)',
     category: 'limiter',
     categoryLabelFa: 'محدودکننده (Limiter)',
@@ -349,6 +373,7 @@ const WINOLS_MAP_CATALOG: WinolsMapSpec[] = [
     defaultDeltaLabel: '+350 RPM',
     safetyChecklistFa:
       'افزایش بیش‌ازحد کات‌آف در موتور با فنر سوپاپ استاندارد باعث شناور شدن سوپاپ (Valve Float) می‌شود.',
+    defaultDamosMeta: { factor: 1, offset: 0, dataOrg: '16bit', signed: false, unit: 'RPM' },
   },
   {
     code: 'KFPED',
@@ -364,6 +389,7 @@ const WINOLS_MAP_CATALOG: WinolsMapSpec[] = [
     defaultDeltaLabel: '+8%',
     safetyChecklistFa:
       'در درصدهای زیر ۲۰٪ پدال (ترافیک و شروع حرکت) افزایش شدید ندهید تا خودرو دچار تقه و کله کردن نشود.',
+    defaultDamosMeta: { factor: 0.003052, offset: 0, dataOrg: '16bit', signed: false, unit: '%' },
   },
   {
     code: 'KRKTE',
@@ -379,10 +405,11 @@ const WINOLS_MAP_CATALOG: WinolsMapSpec[] = [
     defaultDeltaLabel: 'تنظیم دقیق',
     safetyChecklistFa:
       'پس از تغییر ضریب انژکتور، مقادیر STFT و LTFT را در دور آرام و بار جاده پایش کنید (بازه‌ی ±۵٪).',
+    defaultDamosMeta: { factor: 0.000111, offset: 0, dataOrg: '16bit', signed: false, unit: 'ms/%' },
   },
   {
     code: 'VMAX',
-    aliases: [/\bVMAX\b/i, /محدودکننده\s+سرعت/i],
+    aliases: [/\bVMAX\b/i, /\bSpeed\s+Limiter\b/i, /محدودکننده\s+سرعت/i],
     nameFa: 'محدودکننده حداکثر سرعت خودرو (Speed Limiter)',
     category: 'limiter',
     categoryLabelFa: 'محدودکننده (Limiter)',
@@ -393,28 +420,565 @@ const WINOLS_MAP_CATALOG: WinolsMapSpec[] = [
     defaultUnit: 'km/h',
     defaultDeltaLabel: 'برداشت محدودیت',
     safetyChecklistFa:
-      'شاخص سرعت تایرها و سیستم ترمز خودرو را پیش از افزایش VMAX بررسی کنید.',
+      'شاخص سرعت تایرها و سیستم ترمز خودرو را پیش از افزایش VMAX بررسی کنید (در زیمنس زامیاد هر ۳ پارامتر باید یکسان شوند).',
+    defaultDamosMeta: { factor: 1, offset: 0, dataOrg: '8bit', signed: false, unit: 'km/h' },
+  },
+
+  // ---- IRANIAN SIEMENS / TNM / WINOLS CALIBRATION MAPS ----
+  {
+    code: 'IGN_BASE',
+    aliases: [/\bIGN[_\s]?Base\b/i, /\bIGN\s*1\b/i, /نقشه\s+پایه\s+آوانس\s+جرقه/i, /آوانس\s+جرقه\s+بنزین/i],
+    nameFa: 'نقشه پایه آوانس جرقه بنزین زیمنس (IGN_Base / IGN 1)',
+    category: 'ignition',
+    categoryLabelFa: 'جرقه‌زنی و آوانس',
+    defaultDimensions: '12x16',
+    isScalar: false,
+    defaultRpmRange: { min: 2500, max: 5800 },
+    defaultLoadRange: { min: 60, max: 100 },
+    defaultUnit: '°BTDC',
+    defaultDeltaLabel: '+2.5°',
+    safetyChecklistFa:
+      'در موتورهای تراکم بالا (مثل EF7 با نسبت 11:1) بدون غنی‌سازی سوخت و پایش سنسور ناک، آوانس تهاجمی ندهید؛ فاکتور استاندارد زیمنس 0.375 و آفست -23.6 است.',
+    defaultDamosMeta: {
+      factor: 0.375,
+      offset: -23.6,
+      dataOrg: '8bit',
+      signed: false,
+      unit: 'degBTDC',
+      axisXLabel: 'Engine Speed (RPM)',
+      axisYLabel: 'Air Mass / Load',
+    },
+  },
+  {
+    code: 'IGN_2_GAS',
+    aliases: [/\bIGN[_\s]?2(?:[_\s]?Gas(?:[_\s]?Base)?)?\b/i, /آوانس\s+جرقه\s+گاز/i, /جدول\s+دوم\s+جرقه/i],
+    nameFa: 'نقشه پایه آوانس جرقه گاز دوگانه‌سوز (IGN 2 / CNG-LPG)',
+    category: 'ignition',
+    categoryLabelFa: 'جرقه‌زنی و آوانس',
+    defaultDimensions: '12x16',
+    isScalar: false,
+    defaultRpmRange: { min: 1500, max: 4500 },
+    defaultLoadRange: { min: 40, max: 90 },
+    defaultUnit: '°BTDC',
+    defaultDeltaLabel: '+4.0°',
+    safetyChecklistFa:
+      'در ایسیوهای دوگانه‌سوز زیمنس، IGN 2 باید دقیقاً چسبیده به IGN 1 و یک مستطیل کامل تشکیل دهد؛ مراقب افزایش دمای سوپاپ‌های دود در CNG باشید.',
+    defaultDamosMeta: {
+      factor: 0.375,
+      offset: -23.6,
+      dataOrg: '8bit',
+      signed: false,
+      unit: 'degBTDC',
+      axisXLabel: 'Engine Speed (RPM)',
+      axisYLabel: 'Air Mass / Load',
+    },
+  },
+  {
+    code: 'IGN_CORR_FL',
+    aliases: [
+      /\bFull\s+Load\s+Ignition\s+Correction\b/i,
+      /\bGeneral\s+Ignition\s+Correction\b/i,
+      /\bIGN\s+Correction\b/i,
+      /اصلاح\s+(?:کلی\s+)?(?:آوانس\s+)?جرقه/i,
+    ],
+    nameFa: 'جدول اصلاح آوانس جرقه بار کامل / عمومی (IGN Correction)',
+    category: 'ignition',
+    categoryLabelFa: 'جرقه‌زنی و آوانس',
+    defaultDimensions: '4x16',
+    isScalar: false,
+    defaultRpmRange: { min: 3000, max: 6000 },
+    defaultLoadRange: { min: 70, max: 100 },
+    defaultUnit: 'deg',
+    defaultDeltaLabel: '0.02 (خنثی)',
+    safetyChecklistFa:
+      'در EF7 مقدار ثابت 0.02 برای جلوگیری از خطای Division by Zero قرار داده شده و نباید دستکاری شود؛ اصلاحات جرقه روی IGN 1 / IGN 2 انجام شود.',
+    defaultDamosMeta: { factor: 0.08292, offset: 0, dataOrg: '8bit', signed: false, unit: 'deg' },
+  },
+  {
+    code: 'FULL_LOAD_DET',
+    aliases: [/\bFull\s+Load\s+Detection\b/i, /تشخیص\s+بار\s+کامل/i, /آستانه\s+بار\s+کامل/i],
+    nameFa: 'منحنی آستانه تشخیص بار کامل (Full Load Detection)',
+    category: 'pedal',
+    categoryLabelFa: 'پدال و دریچه گاز',
+    defaultDimensions: '16x1',
+    isScalar: false,
+    defaultRpmRange: { min: 1500, max: 6000 },
+    defaultLoadRange: { min: 50, max: 85 },
+    defaultUnit: '%',
+    defaultDeltaLabel: '80% -> 70%',
+    safetyChecklistFa:
+      'کاهش بیش‌ازحد آستانه بار کامل (زیر ۴۰٪) باعث خروج زودهنگام از حلقه بسته و افزایش شدید مصرف سوخت شهری می‌شود.',
+    defaultDamosMeta: { factor: 0.468627, offset: 0, dataOrg: '8bit', signed: false, unit: '%' },
+  },
+  {
+    code: 'VE_TABLE',
+    aliases: [/\bVE\s+Table\b/i, /\bVolumetric\s+Efficiency\b/i, /بازده\s+تنفسی/i, /جدول\s+VE\b/i],
+    nameFa: 'جدول بازده تنفسی سیلندر (Volumetric Efficiency — VE)',
+    category: 'torque',
+    categoryLabelFa: 'جریان هوا و تنفس',
+    defaultDimensions: '12x16',
+    isScalar: false,
+    defaultRpmRange: { min: 2000, max: 6000 },
+    defaultLoadRange: { min: 50, max: 100 },
+    defaultUnit: 'ratio',
+    defaultDeltaLabel: '+5%',
+    safetyChecklistFa:
+      'در موتورهای دارای VVT (مانند EF7) منحنی VE ذاتاً غیرخطی است؛ در خودروهای دارای میل‌سوپاپ اسپرت حداکثر +۵٪ با پایش وایدبند اصلاح شود.',
+    defaultDamosMeta: { factor: 0.00390625, offset: 0, dataOrg: '8bit', signed: false, unit: '-' },
+  },
+  {
+    code: 'AIR_MASS_OFFSET_SLOPE',
+    aliases: [
+      /\bAir\s+Mass\s+Offset\b/i,
+      /\bAir\s+Mass\s+Factor\b/i,
+      /\bAir\s+Mass\s+Slope\b/i,
+      /عرض\s+از\s+مبدأ\s+جریان\s+هوا/i,
+      /شیب\s+خط\s+جریان\s+هوا/i,
+      /جداول\s+محاسباتی\s+هوا/i,
+    ],
+    nameFa: 'نقشه‌های سه‌بعدی عرض از مبدأ و شیب جریان هوا (Air Mass Offset & Slope)',
+    category: 'torque',
+    categoryLabelFa: 'جریان هوا و تنفس',
+    defaultDimensions: '8x12',
+    isScalar: false,
+    defaultRpmRange: { min: 3500, max: 6500 },
+    defaultLoadRange: { min: 70, max: 100 },
+    defaultUnit: 'mg/stk',
+    defaultDeltaLabel: '+5% گوشه‌ای',
+    safetyChecklistFa:
+      'در EF7 شبکه CBAR مبنای محوریابی 0x14000 است (محور X: 14FDA و محور Y: 14078)؛ تغییر را صرفاً به‌صورت گوشه‌ای (+۵٪ بار سنگین و دور بالا) اعمال کنید.',
+    defaultDamosMeta: {
+      factor: 0.03125,
+      offset: 0,
+      dataOrg: '16bit',
+      signed: false,
+      unit: 'mg/stk',
+      axisXLabel: 'RPM / VVT',
+      axisYLabel: 'MAP (hPa)',
+    },
+  },
+  {
+    code: 'AIR_MASS_MAP',
+    aliases: [/\bAir\s+Mass\s+vs\s+(?:MAP|Pressure)\b/i, /دبی\s+جرمی\s+هوا.*فشار/i],
+    nameFa: 'نقشه جرم هوای ورودی بر اساس فشار مانیفولد (Air Mass vs MAP)',
+    category: 'torque',
+    categoryLabelFa: 'جریان هوا و تنفس',
+    defaultDimensions: '16x8',
+    isScalar: false,
+    defaultRpmRange: { min: 2000, max: 6000 },
+    defaultLoadRange: { min: 50, max: 100 },
+    defaultUnit: 'mg/stk',
+    defaultDeltaLabel: '+4%',
+    safetyChecklistFa:
+      'تغییر نامتوازن مدل Speed-Density باعث خطای سنسور MAP و به‌هم‌ریختن Fuel Trim در دور آرام می‌شود.',
+    defaultDamosMeta: { factor: 0.00032195, offset: 0, dataOrg: '16bit', signed: false, unit: 'mg/stk' },
+  },
+  {
+    code: 'AIR_MASS_TPS',
+    aliases: [/\bAir\s+Mass\s+vs\s+TPS\b/i, /جرم\s+هوا.*دریچه\s+گاز/i],
+    nameFa: 'نقشه جرم هوا بر اساس زاویه دریچه گاز (Air Mass vs TPS)',
+    category: 'pedal',
+    categoryLabelFa: 'پدال و دریچه گاز',
+    defaultDimensions: '16x8',
+    isScalar: false,
+    defaultRpmRange: { min: 1500, max: 5500 },
+    defaultLoadRange: { min: 30, max: 100 },
+    defaultUnit: 'mg/stk',
+    defaultDeltaLabel: '+3%',
+    safetyChecklistFa:
+      'در خودروهای دارای دریچه گاز بزرگ‌تر (مانند دریچه نیسانی) باید هم‌زمان با جدول MAP و Injection Multiplier هماهنگ شود.',
+    defaultDamosMeta: { factor: 0.03125, offset: 0, dataOrg: '16bit', signed: false, unit: 'mg/stk' },
+  },
+  {
+    code: 'VALVE_OVERLAP',
+    aliases: [/\bValve\s+Overlap\b/i, /هم[‌\s]?پوشانی\s+سوپاپ/i, /قیچی\s+سوپاپ/i],
+    nameFa: 'نقشه هم‌پوشانی سوپاپ‌ها (Valve Overlap)',
+    category: 'torque',
+    categoryLabelFa: 'جریان هوا و تنفس',
+    defaultDimensions: '8x8',
+    isScalar: false,
+    defaultRpmRange: { min: 2500, max: 6000 },
+    defaultLoadRange: { min: 50, max: 100 },
+    defaultUnit: 'deg',
+    defaultDeltaLabel: '-10%',
+    safetyChecklistFa:
+      'در خودروهای دارای میل‌سوپاپ اسپرت (تیبا/XU7) کاهش حدود -۱۰٪ در جدول قیچی سوپاپ برای اصلاح مدل هوا در WinOLS توصیه می‌شود.',
+    defaultDamosMeta: { factor: 0.002061, offset: -198.2, dataOrg: '16bit', signed: false, unit: 'deg' },
+  },
+  {
+    code: 'VVT_MAP',
+    aliases: [/\bVVT\s+Map\b/i, /نقشه\s+(?:زمان[‌\s]?بندی\s+متغیر\s+سوپاپ|VVT)/i, /جدول\s+VVT\b/i],
+    nameFa: 'نقشه زمان‌بندی متغیر سوپاپ هوا (VVT / CVVT Map)',
+    category: 'torque',
+    categoryLabelFa: 'تایمینگ سوپاپ (VVT)',
+    defaultDimensions: '12x16',
+    isScalar: false,
+    defaultRpmRange: { min: 2000, max: 6000 },
+    defaultLoadRange: { min: 40, max: 100 },
+    defaultUnit: 'deg',
+    defaultDeltaLabel: '+2..3% (سقف 5%)',
+    safetyChecklistFa:
+      'خط قرمز مطلق ۵٪! تجاوز از ۵٪ در جدول VVT موتور EF7 فاصله خلاصی 1.2mm در TDC را از بین برده و منجر به برخورد فیزیکی سوپاپ با پیستون می‌شود.',
+    defaultDamosMeta: {
+      factor: 0.375,
+      offset: 0,
+      dataOrg: '8bit',
+      signed: false,
+      unit: 'deg',
+      axisXLabel: 'Air Mass (mg/stroke)',
+      axisYLabel: 'Engine Speed (RPM)',
+    },
+  },
+  {
+    code: 'FULL_LOAD_ENRICH',
+    aliases: [/\bFull\s+Load\s+Enrichment\b/i, /غنی[‌\s]?سازی\s+بار\s+کامل/i, /غنی[‌\s]?سازی\s+شتاب/i],
+    nameFa: 'زوج‌جداول غنی‌سازی سوخت در بار کامل (Full Load Enrichment)',
+    category: 'fuel',
+    categoryLabelFa: 'سوخت و AFR',
+    defaultDimensions: '6x16',
+    isScalar: false,
+    defaultRpmRange: { min: 3000, max: 6500 },
+    defaultLoadRange: { min: 75, max: 100 },
+    defaultUnit: 'raw',
+    defaultDeltaLabel: '+5% (بنزین)',
+    safetyChecklistFa:
+      'در شبکه EF7 CVR جدول اول (اعداد بزرگ‌تر) مربوط به گاز CNG بوده و تغییر آن اکیداً ممنوع است (خطر انفجار منیفولد)؛ تغییر +۵٪ فقط روی جدول بنزین اعمال شود.',
+    defaultDamosMeta: {
+      factor: 1,
+      offset: 0,
+      dataOrg: '8bit',
+      signed: false,
+      unit: 'raw',
+      axisXLabel: 'MAP (600-1100 hPa)',
+      axisYLabel: 'RPM (600-6500)',
+    },
+  },
+  {
+    code: 'FUEL_MASS_CORR',
+    aliases: [
+      /\bCorrection\s+Factor\s+for\s+Fuel\s+Mass\b/i,
+      /\bInjection\s+Multiplier\b/i,
+      /ضریب\s+تصحیح\s+جرم\s+سوخت/i,
+      /ضریب\s+پاشش/i,
+    ],
+    nameFa: 'جدول ضریب تصحیح جرم سوخت (Fuel Mass Correction / Multiplier)',
+    category: 'fuel',
+    categoryLabelFa: 'سوخت و AFR',
+    defaultDimensions: '12x16',
+    isScalar: false,
+    defaultRpmRange: { min: 2000, max: 6000 },
+    defaultLoadRange: { min: 50, max: 100 },
+    defaultUnit: 'factor',
+    defaultDeltaLabel: '+5%',
+    safetyChecklistFa:
+      'در TU5 معمولاً کم‌بار/میانی +۵٪ و بار کامل بالای ۴۰۰۰ دور برای اصلاح AFR از 11.5 به 12.5..13 به میزان -۵٪ تنظیم می‌شود؛ پایش وایدبند الزامی است.',
+    defaultDamosMeta: { factor: 0.007813, offset: 0, dataOrg: '8bit', signed: false, unit: 'factor' },
+  },
+  {
+    code: 'LAMBDA_5PARAM',
+    aliases: [
+      /\b58982\b/,
+      /\bMinimal\s+Lambda\b/i,
+      /بلوک\s+۵\s*گانه\s+لامبدا/i,
+      /۵\s+متغیر\s+(?:کنترل\s+)?(?:سنسور\s+اکسیژن|لامبدا)/i,
+      /۵\s+تک[‌\s]?پارامتر\s+لامبدا/i,
+    ],
+    nameFa: 'بلوک ۵ پارامتر محدودکننده حلقه بسته لامبدا (58982..55706)',
+    category: 'fuel',
+    categoryLabelFa: 'سوخت و AFR',
+    defaultDimensions: '1x1 (5x Scalar)',
+    isScalar: true,
+    defaultRpmRange: { min: 1500, max: 5000 },
+    defaultLoadRange: { min: 20, max: 80 },
+    defaultUnit: '%',
+    defaultDeltaLabel: 'Factor 0.001526',
+    safetyChecklistFa:
+      'حتماً در حالت 16-bit Decimal و گزینه Signed برای Low Limit (63570) بررسی شود تا بازه منفی (-25% تا -3%) به‌درستی تفسیر شود.',
+    defaultDamosMeta: { factor: 0.001526, offset: 0, dataOrg: '16bit', signed: true, unit: '%' },
+  },
+  {
+    code: 'OVERRUN',
+    aliases: [/\bOverrun\b/i, /قطع\s+سوخت\s+در\s+شتاب\s+منفی/i, /\bFuel\s+Resume\s+RPM\b/i],
+    nameFa: 'جدول قطع و وصل سوخت در شتاب منفی (Overrun Fuel Cut-Off)',
+    category: 'fuel',
+    categoryLabelFa: 'سوخت و AFR',
+    defaultDimensions: '6x6',
+    isScalar: false,
+    defaultRpmRange: { min: 1300, max: 2500 },
+    defaultLoadRange: { min: 10, max: 35 },
+    defaultUnit: 'RPM',
+    defaultDeltaLabel: '+150 RPM',
+    safetyChecklistFa:
+      'در حالت گاز (CNG) قطع سوخت زیر 2000 RPM اکیداً ممنوع است (خطر انفجار برگشتی و خرد شدن منیفولد هوا)!',
+    defaultDamosMeta: { factor: 32, offset: 0, dataOrg: '8bit', signed: false, unit: 'RPM' },
+  },
+  {
+    code: 'COIL_DWELL',
+    aliases: [/\bCoil\s+Dwell(?:\s+Time)?\b/i, /\bCoil\s+Charge\s+Time\b/i, /ولتاژ\s+کوئل/i, /شارژ\s+کوئل/i],
+    nameFa: 'نقشه زمان شارژ و ولتاژ کوئل (Coil Dwell Time)',
+    category: 'ignition',
+    categoryLabelFa: 'جرقه‌زنی و آوانس',
+    defaultDimensions: '6x6',
+    isScalar: false,
+    defaultRpmRange: { min: 1000, max: 6000 },
+    defaultLoadRange: { min: 20, max: 100 },
+    defaultUnit: 'ms',
+    defaultDeltaLabel: '+8% (سقف 15%)',
+    safetyChecklistFa:
+      'افزایش بیش از ۱۵٪ زمان شارژ کوئل باعث داغ شدن بیش‌ازحد و سوختن ترانزیستورهای درایور کوئل یا خود کوئل (به‌ویژه در EF7) می‌شود.',
+    defaultDamosMeta: { factor: 0.00004, offset: 0, dataOrg: '16bit', signed: false, unit: 'ms' },
+  },
+  {
+    code: 'CPS_CANISTER',
+    aliases: [/\bCanister\s+Purge\b/i, /\bCPS\b(?=\s|[)/،])/, /شیر\s+برقی\s+کنیستر/i, /جدول\s+کنیستر/i],
+    nameFa: 'نقشه کنترل شیر برقی کنیستر (Canister Purge / CPS)',
+    category: 'emission',
+    categoryLabelFa: 'آلایندگی و کنیستر',
+    defaultDimensions: '16x12',
+    isScalar: false,
+    defaultRpmRange: { min: 1500, max: 3500 },
+    defaultLoadRange: { min: 20, max: 60 },
+    defaultUnit: '%',
+    defaultDeltaLabel: '+5% رانندگی عادی',
+    safetyChecklistFa:
+      'تغییر جدول کنیستر صرفاً در ناحیه رانندگی روزمره (حداکثر +۵٪ در EF7) مجاز است و نواحی غیرکاری نباید دستکاری شوند.',
+    defaultDamosMeta: { factor: 0.003051, offset: 0, dataOrg: '16bit', signed: false, unit: '%' },
+  },
+  {
+    code: 'EGT_MODEL',
+    aliases: [/\bEGT\b/i, /مدل\s+حرارتی\s+اگزوز/i, /دمای\s+اگزوز/i],
+    nameFa: 'جدول مدل حرارتی دمای گازهای اگزوز (EGT Thermal Model)',
+    category: 'emission',
+    categoryLabelFa: 'مدیریت حرارتی و EGT',
+    defaultDimensions: '9x20',
+    isScalar: false,
+    defaultRpmRange: { min: 3000, max: 6500 },
+    defaultLoadRange: { min: 70, max: 100 },
+    defaultUnit: '°C',
+    defaultDeltaLabel: 'پایش حرارتی',
+    safetyChecklistFa:
+      'از دستکاری کورکورانه مدل حفاظتی EGT خودداری کنید؛ در موتورهای دوگانه‌سوز، جداول EGT بنزین و گاز مجزا هستند.',
+    defaultDamosMeta: { factor: 0.000625, offset: -273.15, dataOrg: '16bit', signed: false, unit: 'degC' },
+  },
+  {
+    code: 'INJ_DEAD_TIME',
+    aliases: [/\bInjection\s+Dead\s+Time\b/i, /\bDead\s+Time\b/i, /زمان\s+مرده\s+انژکتور/i],
+    nameFa: 'منحنی زمان مرده انژکتور بر اساس ولتاژ باتری (Injection Dead Time)',
+    category: 'injection',
+    categoryLabelFa: 'انژکتور و پاشش',
+    defaultDimensions: '7x1',
+    isScalar: false,
+    defaultRpmRange: { min: 800, max: 3000 },
+    defaultLoadRange: { min: 10, max: 60 },
+    defaultUnit: 'ms',
+    defaultDeltaLabel: '0.58 ms',
+    safetyChecklistFa:
+      'تنها هنگام تعویض سوزن انژکتور یا اصلاح دقیق دور آرام تغییر داده شود؛ در زیمنس دوگانه‌سوز جداول Dead Time بنزین و گاز جداگانه است.',
+    defaultDamosMeta: { factor: 0.390625, offset: 0, dataOrg: '8bit', signed: false, unit: 'ms' },
+  },
+  {
+    code: 'INJ_CAPACITY',
+    aliases: [/\bInjector\s+Capacity\b/i, /ظرفیت\s+انژکتور/i, /\b10558\b/],
+    nameFa: 'پارامتر ثابت ظرفیت پاشش انژکتور (Injector Capacity)',
+    category: 'injection',
+    categoryLabelFa: 'انژکتور و پاشش',
+    defaultDimensions: '1x1 (Scalar)',
+    isScalar: true,
+    defaultRpmRange: { min: 1000, max: 6000 },
+    defaultLoadRange: { min: 20, max: 100 },
+    defaultUnit: 'cc/min',
+    defaultDeltaLabel: 'تطبیق دبی سوزن',
+    safetyChecklistFa:
+      'پس از نصب انژکتور با دبی بالاتر، این تک‌پارامتر (مثلاً آدرس 0x10558 در XU7 CGE) را متناسب با دبی واقعی کالیبره کنید.',
+    defaultDamosMeta: { factor: 1, offset: 0, dataOrg: '16bit', signed: false, unit: 'cc/min' },
+  },
+  {
+    code: 'ENGINE_VOLUME',
+    aliases: [/\bEngine\s+Volume\b/i, /حجم\s+موتور/i, /\b1073A\b/i],
+    nameFa: 'پارامتر ثابت حجم موتور (Engine Displacement Volume)',
+    category: 'torque',
+    categoryLabelFa: 'جریان هوا و تنفس',
+    defaultDimensions: '1x1 (Scalar)',
+    isScalar: true,
+    defaultRpmRange: { min: 1000, max: 6000 },
+    defaultLoadRange: { min: 20, max: 100 },
+    defaultUnit: 'L',
+    defaultDeltaLabel: '1.800 L',
+    safetyChecklistFa:
+      'تنها در صورت تغییر حجم واقعی موتور (استروکر یا تعویض بلوک سیلندر) تغییر داده شود (مثلاً آدرس 0x1073A در XU7 عدد خام 18 = 1.800L).',
+    defaultDamosMeta: { factor: 0.1, offset: 0, dataOrg: '8bit', signed: false, unit: 'L' },
+  },
+  {
+    code: 'TORQUE_OPT',
+    aliases: [/\bReverse\s+Torque\b/i, /\bTorque\s+[12]\b/i, /گشتاور\s+معکوس/i, /گشتاور\s+۱\s+و\s+۲/i],
+    nameFa: 'جداول مدیریت گشتاور و گشتاور معکوس (Torque 1/2 & Reverse Torque)',
+    category: 'torque',
+    categoryLabelFa: 'مدیریت گشتاور',
+    defaultDimensions: '12x16',
+    isScalar: false,
+    defaultRpmRange: { min: 1800, max: 5500 },
+    defaultLoadRange: { min: 50, max: 100 },
+    defaultUnit: '%',
+    defaultDeltaLabel: '+13% .. +18%',
+    safetyChecklistFa:
+      'در L90 دنده اتوماتیک (گیربکس AL4) و دریچه برقی، دستکاری جداول ممنوعه گشتاور 13x17 باعث خطای گیربکس و محدودیت شتاب می‌شود.',
+    defaultDamosMeta: { factor: 0.003052, offset: 0, dataOrg: '16bit', signed: false, unit: '%' },
+  },
+  {
+    code: 'IDLE_RPM',
+    aliases: [/\bIdle\s+RPM\b/i, /\bIGN\s+at\s+Idle\b/i, /دور\s+آرام/i],
+    nameFa: 'جدول تنظیم دور آرام موتور (Target Idle RPM)',
+    category: 'limiter',
+    categoryLabelFa: 'دور آرام و فن',
+    defaultDimensions: '8x1',
+    isScalar: false,
+    defaultRpmRange: { min: 800, max: 1500 },
+    defaultLoadRange: { min: 5, max: 25 },
+    defaultUnit: 'RPM',
+    defaultDeltaLabel: '+100 RPM',
+    safetyChecklistFa:
+      'در زیمنس باید هر ۳ یا ۴ جدول دور آرام به‌صورت یکنواخت اصلاح شوند و حتی برای ۱ واحد تغییر، Checksum اصلاح گردد.',
+    defaultDamosMeta: { factor: 10, offset: 0, dataOrg: '8bit', signed: false, unit: 'RPM' },
   },
 ];
 
 const ECU_MODEL_REGEX =
-  /\b(?:Bosch\s+)?(?:ME\d+(?:\.\d+){1,3}|MED\d+(?:\.\d+){1,2}|EDC\d+[A-Z0-9._-]*|SIM2K[- ]?\d+|SSAT|LZNF|MAW|S2000|SL96|J34|J35|Valeo\s*J\d+|M7\.4\.4|M7\.9\.7|ME17(?:\.\d+)*|EMS\d+|Delphi\s*MT\d+)\b/gi;
-const HEX_ADDR_REGEX = /\b0x[0-9A-Fa-f]{4,8}\b/g;
+  /\b(?:Bosch\s+|Siemens\s+)?(?:ME\d+(?:\.\d+){1,3}|MED\d+(?:\.\d+){1,2}|EDC\d+[A-Z0-9._-]*|SIM2K[- ]?\d+|SIM2C|SIM3|SSAT(?:\s+No[- ]?Flash)?|EasyU|LZNF|MAW|S2000|S200|S100|S300|SL96|J34|J35|Valeo\s*J\d+|M7\.4\.4|M7\.9\.7|ME17(?:\.\d+)*|EMS3132|Sirius\s*32|Delphi\s*MT\d+|CBAR|CBiR|CVR|CBR|CBM(?:\s+No[- ]?Flash)?|CGE(?:\s+No[- ]?Flash)?|CGI|CGX|CG4|CR3|CI7|CIU|CBi|CA6|CBY|CCX(?:\s+IR2)?|CIX\d*|PTP|S90)\b/gi;
+const HEX_PREFIXED_REGEX = /\b0x[0-9A-Fa-f]{4,8}\b/g;
+// Contextual bare hex extractor for messy Iranian WinOLS notes (e.g., "آدرس 1A9EE", "18C1D", "14FDA", "10558", "1073A", "14078")
+const BARE_HEX_WITH_LETTERS_REGEX = /\b(?:[0-9A-Fa-f]{4,6})\b/g;
+const CONTEXTUAL_NUMERIC_HEX_REGEX =
+  /(?:آدرس(?:\s+پایه|\s+نهایی|\s+هگز)?|محور\s*[XY]|ناحیه\s+کاری|خط\s+هگزادسیمال|addr(?:ess)?|offset|base|->|=|\()[\s:`*«]*([1-9A-F][0-9A-Fa-f]{3,5})\b/gi;
 const DIM_REGEX = /\b(\d{1,2})\s*[x×*]\s*(\d{1,2})\b/i;
 
 const STANDARD_RPM_AXIS = [1500, 2500, 3500, 4500, 5500, 6500];
 const STANDARD_LOAD_AXIS = [20, 40, 60, 80, 100];
 
+const KNOWN_NON_HEX_TOKENS = new Set([
+  'C167', 'ST10', 'F273', 'F276', 'CBAR', 'CBIR', 'CCX', 'CIX', 'CGE', 'CGI', 'CBM',
+  'S200', 'S100', 'S300', 'SSAT', 'EASY', 'BIOS', 'BOOT', 'DATA', 'CODE', 'CAFE', 'DEAD',
+  'FEED', 'FACE', 'BASE', 'ACID', 'ABBA', 'BABA', 'DADA', 'FADE', '1400', '1401', '1402',
+  '1403', '1404', '2024', '2025', '2026', '25504', '58982', '16384', '63570', '32767', '55706',
+  '65535', '65536', '13540000',
+]);
+
+function extractHexAddressesFromSegment(segment: string): string[] {
+  const ascii = toAsciiDigits(segment);
+  const results = new Set<string>();
+
+  // 1. Explicit 0x... hex addresses (always reliable)
+  for (const m of ascii.matchAll(HEX_PREFIXED_REGEX)) {
+    const clean = `0x${m[0].slice(2).toUpperCase()}`;
+    results.add(clean);
+  }
+
+  // 2. Bare 4-6 char hex containing at least one digit AND one A-F letter (e.g., 1A9EE, 6A9EE, 18C1D, 14FDA, 1073A, 189AB)
+  for (const m of ascii.matchAll(BARE_HEX_WITH_LETTERS_REGEX)) {
+    const token = m[0].toUpperCase();
+    if (KNOWN_NON_HEX_TOKENS.has(token)) continue;
+    if (!/[0-9]/.test(token) || !/[A-F]/.test(token)) continue;
+    // Skip common automotive/ECU codes like 206, 405, A4, C3, M15, EF7, TU5, XU7, F4R, K4M, V16, C4E, C34, FCE6, FC66, AA00
+    if (/^(?:FCE6|FC66|FC26|AA00|FE8|C34|C4E|EF7|TU5|XU7|K4M|M15|B5|A2L|CA6)$/i.test(token)) continue;
+    // Must be 4..6 chars and typically start with 0..7 or 1..6 (typical Siemens/Bosch flash addresses)
+    if (token.length >= 4 && token.length <= 6 && /^[0-7A-F]/.test(token)) {
+      results.add(`0x${token}`);
+    }
+  }
+
+  // 3. Pure-digit 5-char addresses ONLY when explicitly preceded by address/axis context (e.g., "آدرس 14078", "ظرفیت انژکتور (10558)", "آدرس 19912")
+  for (const m of ascii.matchAll(CONTEXTUAL_NUMERIC_HEX_REGEX)) {
+    const token = m[1].toUpperCase();
+    if (KNOWN_NON_HEX_TOKENS.has(token)) continue;
+    // Exclude plain working-area bases unless no other address exists, and exclude obvious RPM/year numbers
+    if (/^(?:140[0-9]|20[0-2][0-9]|1[0-9]{3}|[2-7]000|6500|3500|2500|1500|12000)$/.test(token)) continue;
+    if (token.length === 5 && /^[1-7][0-9A-F]{4}$/.test(token)) {
+      results.add(`0x${token}`);
+    }
+  }
+
+  return Array.from(results);
+}
+
+function extractDamosMetaFromSegment(segment: string): Partial<WinolsDamosExtractedMeta> {
+  const ascii = toAsciiDigits(segment);
+  const meta: Partial<WinolsDamosExtractedMeta> = {};
+
+  // Factor extraction: "فاکتور 0.375", "Factor = 0.00390625", "ضریب تبدیل 0.001526"
+  const factorMatch = ascii.match(
+    /(?:فاکتور(?:\s+تبدیل)?|ضریب(?:\s+تبدیل(?:\s+مشترک)?)?|factor)[\s:=`*(]*([0-9]+(?:\.[0-9]+)?)/i
+  );
+  if (factorMatch) {
+    const f = Number(factorMatch[1]);
+    if (Number.isFinite(f) && f > 0 && f <= 1000) meta.factor = f;
+  }
+
+  // Offset extraction: "آفست -23.6", "Offset = -273.15"
+  const offsetMatch = ascii.match(
+    /(?:آفست|افست|offset)[\s:=`*(]*([+-]?[0-9]+(?:\.[0-9]+)?)/i
+  );
+  if (offsetMatch) {
+    const o = Number(offsetMatch[1]);
+    if (Number.isFinite(o) && Math.abs(o) <= 10000) meta.offset = o;
+  }
+
+  // Data Org (8-bit / 16-bit)
+  if (/\b16[-\s]?bit\b|۱۶\s*بیتی|16\s*بیتی/i.test(ascii)) {
+    meta.dataOrg = '16bit';
+  } else if (/\b8[-\s]?bit\b|۸\s*بیتی|8\s*بیتی/i.test(ascii)) {
+    meta.dataOrg = '8bit';
+  }
+
+  // Signed
+  if (/\bSigned\b|\bSign\b|علامت[‌\s]?دار/i.test(ascii)) {
+    meta.signed = true;
+  }
+
+  // Byte order
+  if (/\bHi[-\s]?Lo\b|\b25504\b|Motorola/i.test(ascii)) {
+    meta.byteOrder = 'HiLo';
+  } else if (/\bLo[-\s]?Hi\b|Intel/i.test(ascii)) {
+    meta.byteOrder = 'LoHi';
+  }
+
+  // Working area base
+  if (/\b0x68000\b|\b68000\b|No[-\s]?Flash/i.test(ascii)) {
+    meta.baseAddressHex = '0x68000';
+    meta.lineSwappingRequired = false;
+  } else if (/\b0x14000\b|\b14000\b|\bCBAR\b|\bCVR\b|\bCBiR\b/i.test(ascii)) {
+    meta.baseAddressHex = '0x14000';
+  } else if (/\b0x18000\b|\b18000\b/i.test(ascii)) {
+    meta.baseAddressHex = '0x18000';
+  } else if (/\b0x8000\b|\b8000\b/i.test(ascii)) {
+    meta.baseAddressHex = '0x8000';
+  }
+
+  // Axis X / Y hex addresses (e.g., "X: 18750", "محور X ... 14FDA", "محور عمودی Y ... 14078")
+  const axisXMatch = ascii.match(
+    /(?:محور\s+(?:افقی\s+)?X|axis\s*X|X\s*:)[^\n]{0,90}?(?:0x)?([1-7][0-9A-Fa-f]{4})\b/i
+  );
+  if (axisXMatch) {
+    meta.axisXHex = `0x${axisXMatch[1].toUpperCase()}`;
+  }
+  const axisYMatch = ascii.match(
+    /(?:محور\s+(?:عمودی\s+)?Y|axis\s*Y|Y\s*:)[^\n]{0,90}?(?:0x)?([1-7][0-9A-Fa-f]{4})\b/i
+  );
+  if (axisYMatch) {
+    meta.axisYHex = `0x${axisYMatch[1].toUpperCase()}`;
+  }
+
+  return meta;
+}
+
 function extractRpmRangeFromText(text: string): { min: number; max: number } | null {
   const ascii = toAsciiDigits(text);
   // Pattern: "3000 تا 5500 RPM" or "3000-5500 دور"
   const rangeMatch = ascii.match(
-    /\b([1-8]\d{3})\s*(?:تا|[-–—]|to)\s*([1-8]\d{3})\s*(?:rpm|دور)?/i
+    /\b([1-8]\d{3})\s*(?:تا|[-–—]|to|\.\.)\s*([1-8]\d{3})\s*(?:rpm|دور)?/i
   );
   if (rangeMatch) {
     const a = Number(rangeMatch[1]);
     const b = Number(rangeMatch[2]);
-    if (a >= 800 && b <= 9000 && a < b) {
+    if (a >= 600 && b <= 9000 && a < b) {
       return { min: a, max: b };
     }
   }
@@ -433,7 +997,7 @@ function extractLoadRangeFromText(text: string): { min: number; max: number } | 
   const ascii = toAsciiDigits(text);
   // Pattern: "بار 70 تا 100%" or "70-100% load"
   const rangeMatch = ascii.match(
-    /(?:بار|پدال|load|throttle)[^\d]{0,14}(\d{2,3})\s*(?:تا|[-–—]|to)\s*(\d{2,3})\s*[%٪]?/i
+    /(?:بار|پدال|load|throttle)[^\d]{0,14}(\d{2,3})\s*(?:تا|[-–—]|to|\.\.)\s*(\d{2,3})\s*[%٪]?/i
   );
   if (rangeMatch) {
     const a = Number(rangeMatch[1]);
@@ -513,7 +1077,6 @@ function extractModificationValues(
     }
   }
 
-  // Detect "from X to Y" transitions (e.g., "6500 به 6950 RPM" or two distinct numbers in table)
   const uniqueFound = Array.from(new Set(found)).slice(0, 6);
 
   let deltaLabel = spec.defaultDeltaLabel;
@@ -522,7 +1085,6 @@ function extractModificationValues(
     if (signed) {
       deltaLabel = signed;
     } else if (spec.category === 'ignition') {
-      // If text mentions "تا 2.5°", display +2.5°
       const smallDeg = uniqueFound.find((v) => {
         const n = parseFloat(v);
         return !Number.isNaN(n) && n > 0 && n <= 6;
@@ -555,7 +1117,6 @@ function buildWinols2DZoneMatrix(params: {
   const cells: WinolsZoneCell[][] = [];
   let highlightedCellCount = 0;
 
-  // Build ramp delta label (half of numeric delta when parseable)
   const numMatch = deltaLabel.match(/^([+-]?)(\d+(?:\.\d+)?)(.*)$/);
   const rampLabel = numMatch
     ? `${numMatch[1]}${Number((parseFloat(numMatch[2]) * 0.5).toFixed(1))}${numMatch[3]}`
@@ -609,10 +1170,10 @@ function buildWinols2DZoneMatrix(params: {
 }
 
 /**
- * Deterministically scans all project content units (prose + tables) to detect WinOLS
- * calibration map modifications, extract ECU models, hex addresses, RPM/Load operating
- * windows, and generate both interactive 2D WinOLS Cell-Zone Matrices and an export-ready
- * WinOLS Quick-Action Table (`TableBlock`).
+ * Deterministically scans all project content units (prose + tables + messy unstructured notes)
+ * to detect WinOLS calibration maps across both Iranian Siemens/TNM/S2000/SSAT and Bosch families,
+ * extracting hex addresses, DAMOS technical parameters (Factor, Offset, Bit-width, Sign, Axis X/Y),
+ * RPM/Load operating windows, 2D WinOLS Cell-Zone Matrices, and a print-ready Summary Table.
  */
 export function extractWinolsMapGuides(params: {
   sourceFiles: SourceFileDto[];
@@ -621,7 +1182,6 @@ export function extractWinolsMapGuides(params: {
   const fileMap = new Map(params.sourceFiles.map((f) => [f.id, f.fileName]));
   const activeUnits = params.units.filter((u) => u.status !== 'merged');
 
-  // Collect all evidence blocks per catalog map
   const mapHits = new Map<
     string,
     {
@@ -633,6 +1193,7 @@ export function extractWinolsMapGuides(params: {
       dimensions: string | null;
       rpmRange: { min: number; max: number } | null;
       loadRange: { min: number; max: number } | null;
+      damosMeta: WinolsDamosExtractedMeta;
     }
   >();
 
@@ -646,18 +1207,42 @@ export function extractWinolsMapGuides(params: {
     }
   }
 
+  let customGenericCounter = 0;
+
   for (const unit of activeUnits) {
     const fileName = fileMap.get(unit.sourceFileId) || 'سند منبع';
-    // Split multi-line tables/paragraphs into granular lines so we bind hex addresses accurately to the right map
     const segments = unit.rawText
       .split(/\n+/)
       .map((s) => s.trim())
       .filter(Boolean);
 
     for (const segment of segments) {
+      let matchedAnyCatalog = false;
+      let matchedExplicitBosch = false;
+      const BOSCH_CODES = new Set([
+        'KFZW',
+        'KFZW2',
+        'LAMFA',
+        'KFMIRL',
+        'KFMIOP',
+        'LDRXN',
+        'KFLBTS',
+        'NMAX',
+      ]);
+      const isSiemensContext = /(?:زیمنس|siemens|tnm|ef7|cbar|cbir|تیبا|tiba|پراید|pride|xu7|tu5|l90|ems3132)/i.test(
+        segment
+      );
+
       for (const spec of WINOLS_MAP_CATALOG) {
+        if (!BOSCH_CODES.has(spec.code) && !isSiemensContext && matchedExplicitBosch) {
+          continue;
+        }
         const matched = spec.aliases.some((re) => re.test(segment));
         if (!matched) continue;
+        matchedAnyCatalog = true;
+        if (BOSCH_CODES.has(spec.code)) {
+          matchedExplicitBosch = true;
+        }
 
         let bucket = mapHits.get(spec.code);
         if (!bucket) {
@@ -670,6 +1255,7 @@ export function extractWinolsMapGuides(params: {
             dimensions: null,
             rpmRange: null,
             loadRange: null,
+            damosMeta: { ...(spec.defaultDamosMeta || {}) },
           };
           mapHits.set(spec.code, bucket);
         }
@@ -686,10 +1272,10 @@ export function extractWinolsMapGuides(params: {
           }
         }
 
-        const segHex = segment.match(HEX_ADDR_REGEX) || [];
-        segHex.forEach((h) => bucket!.hexAddresses.add(h.toUpperCase().replace(/^0X/, '0x')));
+        const segHex = extractHexAddressesFromSegment(segment);
+        segHex.forEach((h) => bucket!.hexAddresses.add(h));
 
-        const dimM = segment.match(DIM_REGEX);
+        const dimM = toAsciiDigits(segment).match(DIM_REGEX);
         if (dimM && !bucket.dimensions) {
           bucket.dimensions = `${dimM[1]}x${dimM[2]}`;
         }
@@ -702,6 +1288,69 @@ export function extractWinolsMapGuides(params: {
         const segLoad = extractLoadRangeFromText(segment);
         if (segLoad && !bucket.loadRange) {
           bucket.loadRange = segLoad;
+        }
+
+        const extractedMeta = extractDamosMetaFromSegment(segment);
+        if (extractedMeta.factor !== undefined) bucket.damosMeta.factor = extractedMeta.factor;
+        if (extractedMeta.offset !== undefined) bucket.damosMeta.offset = extractedMeta.offset;
+        if (extractedMeta.dataOrg) bucket.damosMeta.dataOrg = extractedMeta.dataOrg;
+        if (extractedMeta.signed) bucket.damosMeta.signed = true;
+        if (extractedMeta.byteOrder) bucket.damosMeta.byteOrder = extractedMeta.byteOrder;
+        if (extractedMeta.baseAddressHex) bucket.damosMeta.baseAddressHex = extractedMeta.baseAddressHex;
+        if (extractedMeta.axisXHex) bucket.damosMeta.axisXHex = extractedMeta.axisXHex;
+        if (extractedMeta.axisYHex) bucket.damosMeta.axisYHex = extractedMeta.axisYHex;
+        if (extractedMeta.lineSwappingRequired !== undefined) {
+          bucket.damosMeta.lineSwappingRequired = extractedMeta.lineSwappingRequired;
+        }
+      }
+
+      // Messy-Document Generic Fallback: recover custom/unlisted WinOLS maps that specify a Hex address + Dimension or Factor
+      if (!matchedAnyCatalog && customGenericCounter < 12) {
+        const asciiSeg = toAsciiDigits(segment);
+        const explicitHex = asciiSeg.match(HEX_PREFIXED_REGEX) || [];
+        const dimM = asciiSeg.match(DIM_REGEX);
+        const hasMapCue = /(?:جدول|مپ|نقشه|map|table|فاکتور|factor|winols|damos|داموس)/i.test(asciiSeg);
+        const firstHex = explicitHex[0];
+        if (firstHex && hasMapCue && (dimM || /factor|فاکتور/i.test(asciiSeg))) {
+          const hexClean = `0x${firstHex.slice(2).toUpperCase()}`;
+          // Skip if this hex is already owned by a catalog map
+          const alreadyOwned = Array.from(mapHits.values()).some((b) => b.hexAddresses.has(hexClean));
+          if (!alreadyOwned) {
+            customGenericCounter += 1;
+            const customCode = `CUSTOM_${hexClean.slice(2)}`;
+            if (!mapHits.has(customCode)) {
+              const extractedMeta = extractDamosMetaFromSegment(segment);
+              const isScalar = !dimM || (dimM[1] === '1' && dimM[2] === '1');
+              const customSpec: WinolsMapSpec = {
+                code: customCode,
+                aliases: [],
+                nameFa: `نقشه سفارشی استخراج‌شده (${hexClean})`,
+                category: 'torque',
+                categoryLabelFa: 'نقشه سفارشی (متن آزاد)',
+                defaultDimensions: dimM ? `${dimM[1]}x${dimM[2]}` : '1x1 (Scalar)',
+                isScalar,
+                defaultRpmRange: { min: 2000, max: 5500 },
+                defaultLoadRange: { min: 50, max: 100 },
+                defaultUnit: '%',
+                defaultDeltaLabel: 'مطابق جزوه',
+                safetyChecklistFa:
+                  'این نقشه به‌صورت خودکار از متن آزاد/نامرتب استخراج شده است؛ پیش از اعمال روی دامپ واقعی، آدرس هگز و فاکتور آن را در WinOLS 2.24 بررسی کنید.',
+                defaultDamosMeta: extractedMeta,
+              };
+              const ecus = new Set<string>((segment.match(ECU_MODEL_REGEX) || []).map((e) => e.trim()));
+              mapHits.set(customCode, {
+                spec: customSpec,
+                texts: [segment],
+                files: new Set([fileName]),
+                ecuModels: ecus,
+                hexAddresses: new Set(explicitHex.map((h) => `0x${h.slice(2).toUpperCase()}`)),
+                dimensions: dimM ? `${dimM[1]}x${dimM[2]}` : null,
+                rpmRange: extractRpmRangeFromText(segment),
+                loadRange: extractLoadRangeFromText(segment),
+                damosMeta: extractedMeta,
+              });
+            }
+          }
         }
       }
     }
@@ -738,7 +1387,7 @@ export function extractWinolsMapGuides(params: {
           hexList.length > 0
             ? `در WinOLS با کلید Ctrl+G به آدرس هگز ${hexList[0]} بروید (یا نقشه ${code} را در فهرست Potential Maps باز کنید).`
             : `در WinOLS با استفاده از Damos / Map Pack نقشه تک‌مقداری ${code} را جستجو و باز کنید.`,
-          `مقدار فعلی استوک را یادداشت کرده و مقدار جدید (${deltaLabel}) را با رعایت ضریب (Factor) استاندارد ایسیو وارد کنید.`,
+          `مقدار فعلی استوک را یادداشت کرده و مقدار جدید (${deltaLabel}) را با رعایت ضریب (Factor=${bucket.damosMeta.factor ?? 1}) استاندارد ایسیو وارد کنید.`,
           `پس از ذخیره، Checksum فایل خروجی را قبل از رایت روی ECU حتماً تصحیح کنید.`,
         ]
       : [
@@ -775,6 +1424,7 @@ export function extractWinolsMapGuides(params: {
       evidenceSnippets: Array.from(new Set(bucket.texts)).slice(0, 3),
       zoneMatrix,
       confidence,
+      damosMeta: bucket.damosMeta,
     });
   }
 

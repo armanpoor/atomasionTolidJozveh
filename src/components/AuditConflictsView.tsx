@@ -20,6 +20,7 @@ import {
 import type { TechnicalIntegrityAuditReport } from '../lib/ecuTechnicalIntegrity';
 import type { NumericDiscrepancyReport } from '../lib/numericDiscrepancyAnalyzer';
 import { toPersianDigits } from '../lib/formatParsers';
+import { computeHarnessComparisonProof, formatUsdClean } from '../lib/tokenOptimizer';
 import { NumericDiscrepancyAnalyzer } from './NumericDiscrepancyAnalyzer';
 
 interface AuditConflictsViewProps {
@@ -199,6 +200,75 @@ export const AuditConflictsView: React.FC<AuditConflictsViewProps> = ({
             </div>
           </div>
         )}
+
+        {/* Verifiable Engineering Superiority vs Raw LLM (Opus) & Coding Harnesses (Claude Code) */}
+        {auditReport && (() => {
+          const proof = computeHarnessComparisonProof({
+            totalInputUnits: auditReport.totalInputUnits,
+            uniqueUnitsPreserved: auditReport.uniqueUnitsPreserved,
+            coveragePercent: auditReport.coveragePercent,
+            duplicatesMerged: auditReport.duplicatesMerged,
+            totalSourceFiles: auditReport.totalSourceFiles,
+            conflictsCount: conflicts.length,
+            technicalEntitiesTotal: technicalIntegrity?.totalEntitiesInSources,
+            technicalEntitiesPreserved: technicalIntegrity?.preservedEntitiesCount,
+          });
+          return (
+            <section
+              data-testid="harness-superiority-proof-card"
+              className="rounded-xl border border-[#C6D5E6] bg-white p-4 sm:p-5 space-y-4 shadow-[0_1px_2px_rgba(26,24,22,0.03)]"
+            >
+              <div className="flex flex-wrap items-start justify-between gap-3 border-b border-[#EAE5DA] pb-3.5">
+                <div className="space-y-0.5">
+                  <div className="text-[11px] font-bold text-[#B45309]">
+                    اثبات فنی مزیت معماری (مقایسه واقعی بر اساس حجم همین پروژه)
+                  </div>
+                  <h3 className="text-sm sm:text-[15px] font-extrabold text-[#1E3A5F]">
+                    چرا خروجی این موتور از مدل خام (Claude Opus) و Agentها (Claude Code) دقیق‌تر و کم‌هزینه‌تر است؟
+                  </h3>
+                </div>
+                <div className="flex items-center gap-3 rounded-lg border border-[#C7DDD0] bg-[#F2F7F4] px-3 py-2 text-xs tabular-nums">
+                  <div>
+                    <div className="text-[10.5px] font-semibold text-[#14532D]">صرفه‌جویی توکن</div>
+                    <div className="text-base font-extrabold text-[#14532D]">
+                      {toPersianDigits(proof.tokenSavingsPercent)}٪ کمتر
+                    </div>
+                  </div>
+                  <div className="h-7 w-px bg-[#C7DDD0]" />
+                  <div>
+                    <div className="text-[10.5px] font-semibold text-[#1E3A5F]">برآورد هزینه (۳ سطحی / خام)</div>
+                    <div className="font-mono text-xs font-extrabold text-[#1E3A5F]" dir="ltr">
+                      {formatUsdClean(proof.estimatedOurMultiTierCostUsd)}{' '}
+                      <span className="font-normal text-[#78716C] line-through">
+                        {formatUsdClean(proof.estimatedRawOpusCostUsd)}
+                      </span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                {proof.proofPillars.map((pillar) => (
+                  <div
+                    key={pillar.id}
+                    className="rounded-lg border border-[#E6E0D4] bg-[#FCFBF8] p-3.5 space-y-1.5"
+                  >
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <h4 className="text-xs font-extrabold text-[#1A1816]">{pillar.titleFa}</h4>
+                      <span className="rounded border border-[#C7DDD0] bg-[#EEF6F0] px-2 py-0.5 text-[10.5px] font-bold text-[#14532D] tabular-nums">
+                        {toPersianDigits(pillar.ourMetricFa)}
+                      </span>
+                    </div>
+                    <p className="text-[11.5px] leading-6 text-[#292524]">{pillar.detailFa}</p>
+                    <p className="text-[11px] leading-5 text-[#9A3412]">
+                      <strong>ریسک مدل خام / Agent:</strong> {pillar.rawLlmRiskFa}
+                    </p>
+                  </div>
+                ))}
+              </div>
+            </section>
+          );
+        })()}
 
         {/* Deterministic Technical Entity Integrity Gate (0% AI) */}
         {technicalIntegrity && technicalIntegrity.totalEntitiesInSources > 0 && (() => {

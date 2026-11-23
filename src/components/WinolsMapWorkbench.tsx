@@ -7,6 +7,7 @@ import {
   Cpu,
   Download,
   ExternalLink,
+  FileCode2,
   FileSpreadsheet,
   Globe,
   Grid2x2,
@@ -16,6 +17,7 @@ import {
   X,
 } from 'lucide-react';
 import type { AuditReportDto, OutlineNodeDto, ParsedBook } from '../lib/bookTypes';
+import type { ProjectRevisionDto } from '../lib/changeLogUtils';
 import { toPersianDigits } from '../lib/formatParsers';
 import {
   analyzeWinolsGoogleEnrichment,
@@ -24,33 +26,48 @@ import {
   WinolsGoogleCoverageSummary,
   WinolsMapActionEntry,
 } from '../lib/winolsMapGuide';
+import { WinolsDamosBuilderPanel } from './WinolsDamosBuilderPanel';
 import { WinolsRpmLoadScatterPlot } from './WinolsRpmLoadScatterPlot';
 
 interface WinolsMapWorkbenchProps {
+  projectTitle?: string;
   report: WinolsExtractionReport;
   auditReport?: AuditReportDto | null;
   book?: ParsedBook | null;
   outlineNodes?: OutlineNodeDto[];
   enrichingGoogle?: boolean;
   onEnrichAllWithGoogle?: () => Promise<void> | void;
+  onLogActivity?: (payload: {
+    actionType: ProjectRevisionDto['actionType'];
+    title: string;
+    summary: string;
+    extraDetails?: Record<string, unknown>;
+  }) => void;
   onClose?: () => void;
   onJumpToWinolsAppendix?: () => void;
   hasWinolsAppendixChapter?: boolean;
 }
 
 export const WinolsMapWorkbench: React.FC<WinolsMapWorkbenchProps> = ({
+  projectTitle,
   report,
   auditReport,
   book,
   outlineNodes,
   enrichingGoogle = false,
   onEnrichAllWithGoogle,
+  onLogActivity,
   onClose,
   onJumpToWinolsAppendix,
   hasWinolsAppendixChapter = false,
 }) => {
+  const [workbenchTab, setWorkbenchTab] = useState<'analysis' | 'damos'>(
+    report.mapsDetected > 0 ? 'analysis' : 'damos'
+  );
   const [selectedMapId, setSelectedMapId] = useState<string>(report.entries[0]?.id ?? '');
   const [copiedTable, setCopiedTable] = useState(false);
+
+  const effectiveProjectTitle = projectTitle || book?.title || 'WinOLS_Remap_Project';
 
   const activeEntry: WinolsMapActionEntry | null = useMemo(() => {
     if (report.entries.length === 0) return null;
@@ -93,6 +110,16 @@ export const WinolsMapWorkbench: React.FC<WinolsMapWorkbenchProps> = ({
     a.click();
     a.remove();
     URL.revokeObjectURL(url);
+    onLogActivity?.({
+      actionType: 'winols_damos_exported',
+      title: 'خروجی جدول CSV راهنمای نقشه‌های WinOLS',
+      summary: `دانلود فایل winols-map-guide.csv شامل ${report.entries.length} نقشه استخراج‌شده.`,
+      extraDetails: {
+        format: 'guide_csv',
+        mapCount: report.entries.length,
+        fileName: 'winols-map-guide.csv',
+      },
+    });
   };
 
   const handleCopyMarkdownTable = async () => {
@@ -110,44 +137,10 @@ export const WinolsMapWorkbench: React.FC<WinolsMapWorkbenchProps> = ({
     }
   };
 
-  if (report.mapsDetected === 0 || !activeEntry) {
-    return (
-      <section
-        aria-label="میز کار راهنمای نقشه‌های WinOLS"
-        className="border-b border-[#E2DDD3] bg-[#FBF9F4] px-4 py-4 sm:px-6"
-      >
-        <div className="mx-auto max-w-6xl flex flex-wrap items-center justify-between gap-3">
-          <div className="flex items-center gap-2.5">
-            <Cpu className="h-4 w-4 text-[#1E3A5F]" />
-            <div>
-              <h3 className="text-xs font-extrabold text-[#1A1816]">
-                میز کار راهنمای تغییرات WinOLS
-              </h3>
-              <p className="text-[11px] text-[#57534E]">
-                در متن فایل‌های فعلی پروژه، نام نقشه استاندارد WinOLS (مانند KFZW، LAMFA، KFMIRL، LDRXN یا NMAX) یافت نشد.
-              </p>
-            </div>
-          </div>
-          {onClose && (
-            <button
-              type="button"
-              onClick={onClose}
-              aria-label="بستن میز کار WinOLS"
-              className="inline-flex min-h-[34px] items-center gap-1 rounded-md border border-[#D6D0C4] bg-white px-2.5 text-xs font-bold text-[#44403C] hover:bg-[#F3F0E8] cursor-pointer"
-            >
-              <X className="h-3.5 w-3.5" />
-              بستن
-            </button>
-          )}
-        </div>
-      </section>
-    );
-  }
-
   return (
     <section
       aria-label="میز کار راهنمای نقشه‌های WinOLS"
-      className="border-b border-[#D8D2C5] bg-[#F8F6F1] px-4 py-4 sm:px-6 max-h-[68vh] overflow-y-auto"
+      className="border-b border-[#D8D2C5] bg-[#F8F6F1] px-4 py-4 sm:px-6 max-h-[72vh] overflow-y-auto"
     >
       <div className="mx-auto max-w-6xl space-y-4">
         {/* Header & Export Actions */}
@@ -158,10 +151,12 @@ export const WinolsMapWorkbench: React.FC<WinolsMapWorkbenchProps> = ({
             </div>
             <div className="min-w-0">
               <h3 className="text-sm font-extrabold text-[#1A1816]">
-                میز کار نقشه WinOLS و راهنمای انتخاب سلول‌ها
+                میز کار نقشه WinOLS و داموس‌ساز ۲.۲۴
               </h3>
               <p className="text-[11px] text-[#57534E] tabular-nums">
-                {toPersianDigits(report.mapsDetected)} نقشه کالیبراسیون به‌صورت قطعی از جزوه‌ها استخراج شد · بدون تغییر یا حدس اعداد فنی
+                {report.mapsDetected > 0
+                  ? `${toPersianDigits(report.mapsDetected)} نقشه کالیبراسیون به‌صورت قطعی از جزوه‌ها استخراج شد · سازگار با زیمنس (TNM/WinOLS) و بوش`
+                  : 'نقشه‌ای به‌طور خودکار یافت نشد — می‌توانید در تب داموس‌ساز، نقشه‌ها را دستی تعریف کرده یا از ماشین‌حساب FCE6 استفاده کنید.'}
               </p>
             </div>
           </div>
@@ -177,31 +172,35 @@ export const WinolsMapWorkbench: React.FC<WinolsMapWorkbenchProps> = ({
                 مشاهده پیوست جدول در کتاب
               </button>
             )}
-            <button
-              type="button"
-              onClick={handleCopyMarkdownTable}
-              className="inline-flex min-h-[34px] items-center gap-1.5 rounded-md border border-[#C8C1B4] bg-white px-2.5 text-[11px] font-bold text-[#1A1816] hover:bg-[#FAF9F6] cursor-pointer"
-            >
-              {copiedTable ? (
-                <>
-                  <Check className="h-3.5 w-3.5 text-[#14532D]" />
-                  کپی شد
-                </>
-              ) : (
-                <>
-                  <Copy className="h-3.5 w-3.5 text-[#57534E]" />
-                  کپی جدول WinOLS
-                </>
-              )}
-            </button>
-            <button
-              type="button"
-              onClick={handleDownloadCsv}
-              className="inline-flex min-h-[34px] items-center gap-1.5 rounded-md border border-[#1E3A5F] bg-[#1E3A5F] px-3 text-[11px] font-bold text-white hover:bg-[#162C49] cursor-pointer"
-            >
-              <Download className="h-3.5 w-3.5" />
-              دانلود CSV جدول
-            </button>
+            {report.summaryTable && (
+              <button
+                type="button"
+                onClick={handleCopyMarkdownTable}
+                className="inline-flex min-h-[34px] items-center gap-1.5 rounded-md border border-[#C8C1B4] bg-white px-2.5 text-[11px] font-bold text-[#1A1816] hover:bg-[#FAF9F6] cursor-pointer"
+              >
+                {copiedTable ? (
+                  <>
+                    <Check className="h-3.5 w-3.5 text-[#14532D]" />
+                    کپی شد
+                  </>
+                ) : (
+                  <>
+                    <Copy className="h-3.5 w-3.5 text-[#57534E]" />
+                    کپی جدول WinOLS
+                  </>
+                )}
+              </button>
+            )}
+            {report.entries.length > 0 && (
+              <button
+                type="button"
+                onClick={handleDownloadCsv}
+                className="inline-flex min-h-[34px] items-center gap-1.5 rounded-md border border-[#1E3A5F] bg-[#1E3A5F] px-3 text-[11px] font-bold text-white hover:bg-[#162C49] cursor-pointer"
+              >
+                <Download className="h-3.5 w-3.5" />
+                دانلود CSV جدول
+              </button>
+            )}
             {onClose && (
               <button
                 type="button"
@@ -216,6 +215,73 @@ export const WinolsMapWorkbench: React.FC<WinolsMapWorkbenchProps> = ({
           </div>
         </div>
 
+        {/* Top Mode Switcher: Analysis/D3 vs WinOLS 2.24 DAMOS (.a2l) + FCE6 Calculator */}
+        <div
+          role="tablist"
+          aria-label="بخش‌های میز کار WinOLS"
+          className="flex flex-wrap items-center gap-2 border-b border-[#E2DDD3] pb-2.5"
+        >
+          <button
+            type="button"
+            role="tab"
+            aria-selected={workbenchTab === 'analysis'}
+            onClick={() => setWorkbenchTab('analysis')}
+            className={`inline-flex min-h-[36px] items-center gap-1.5 rounded-md border px-3.5 py-1.5 text-xs font-bold transition-colors cursor-pointer ${
+              workbenchTab === 'analysis'
+                ? 'border-[#1E3A5F] bg-[#1E3A5F] text-white'
+                : 'border-[#D6D0C4] bg-white text-[#1A1816] hover:bg-[#FAF9F6]'
+            }`}
+          >
+            <Grid2x2 className="h-3.5 w-3.5" />
+            <span>نمای تحلیل، نمودار D3 و ماتریس سلول‌ها</span>
+          </button>
+
+          <button
+            type="button"
+            role="tab"
+            aria-selected={workbenchTab === 'damos'}
+            onClick={() => setWorkbenchTab('damos')}
+            className={`inline-flex min-h-[36px] items-center gap-1.5 rounded-md border px-3.5 py-1.5 text-xs font-bold transition-colors cursor-pointer ${
+              workbenchTab === 'damos'
+                ? 'border-[#14532D] bg-[#14532D] text-white'
+                : 'border-[#BBF7D0] bg-[#ECFDF5] text-[#14532D] hover:bg-[#DCFCE7]'
+            }`}
+          >
+            <FileCode2 className="h-3.5 w-3.5" />
+            <span>داموس‌ساز WinOLS 2.24 (.a2l) + ماشین‌حساب FCE6</span>
+          </button>
+        </div>
+
+        {workbenchTab === 'damos' ? (
+          <WinolsDamosBuilderPanel
+            projectTitle={effectiveProjectTitle}
+            report={report}
+            onLogActivity={onLogActivity}
+          />
+        ) : !activeEntry ? (
+          <div className="rounded-lg border border-[#E2DDD3] bg-white p-5 flex flex-wrap items-center justify-between gap-3">
+            <div className="flex items-center gap-2.5">
+              <Cpu className="h-5 w-5 text-[#1E3A5F]" />
+              <div>
+                <h4 className="text-xs font-extrabold text-[#1A1816]">
+                  هنوز نقشه‌ای در متن جزوه شناسایی نشده است
+                </h4>
+                <p className="mt-0.5 text-[11px] text-[#57534E]">
+                  در متن فعلی پروژه نام نقشه استاندارد بوش یا زیمنس یافت نشد. می‌توانید به تب «داموس‌ساز WinOLS 2.24» بروید و نقشه‌ها را با آدرس هگز دلخواه تعریف کنید.
+                </p>
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={() => setWorkbenchTab('damos')}
+              className="inline-flex min-h-[34px] items-center gap-1.5 rounded-md bg-[#14532D] px-3 text-xs font-bold text-white hover:bg-[#166534] cursor-pointer"
+            >
+              <FileCode2 className="h-3.5 w-3.5" />
+              رفتن به داموس‌ساز WinOLS 2.24
+            </button>
+          </div>
+        ) : (
+          <>
         {/* Map Selector Tabs with Google Enrichment Indicator */}
         <div
           role="tablist"
@@ -693,6 +759,8 @@ export const WinolsMapWorkbench: React.FC<WinolsMapWorkbenchProps> = ({
               </table>
             </div>
           </div>
+        )}
+          </>
         )}
       </div>
     </section>

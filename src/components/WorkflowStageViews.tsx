@@ -22,6 +22,7 @@ import {
   ConflictDto,
   DocxExportConfig,
   ParsedBook,
+  ProjectBundleDto,
   ProjectSummaryDto,
   SourceFileDto,
   WorkflowMode,
@@ -34,6 +35,7 @@ import { ProjectsDashboardWidget } from './ProjectsDashboardWidget';
 interface StageIngestViewProps {
   projects: ProjectSummaryDto[];
   activeProjectId: string | null;
+  activeBundle?: ProjectBundleDto | null;
   activeAiModel: AiModelId;
   audioEngineLabel?: string;
   probeData: AiQuotaProbeResponse | null;
@@ -63,6 +65,7 @@ const ROLE_LABELS: Record<string, string> = {
 export const StageIngestView: React.FC<StageIngestViewProps> = ({
   projects,
   activeProjectId,
+  activeBundle = null,
   activeAiModel,
   audioEngineLabel = 'Gemini Audio (gemini-3.5-transcribe)',
   probeData,
@@ -149,6 +152,7 @@ export const StageIngestView: React.FC<StageIngestViewProps> = ({
     <ProjectsDashboardWidget
       projects={projects}
       activeProjectId={activeProjectId}
+      activeBundle={activeBundle}
       activeAiModel={activeAiModel}
       probeData={probeData}
       onSelectProject={onSelectProject}

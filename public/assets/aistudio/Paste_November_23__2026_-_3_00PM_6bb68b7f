@@ -1,0 +1,215 @@
+نقش و مأموریت (فاز ۴ — ممیزی و مقاوم‌سازی جامع Red-Team در ۵۳ محور برای هارنس ECU & WinOLS):
+به‌عنوان مهندس ارشد Red-Team و معمار قابلیت اطمینان (Staff Reliability Engineer) روی همین پروژه (React + TypeScript + Express + Cloud SQL + IndexedDB)، کل پیاده‌سازی فازهای ۱ تا ۳ هارنس تخصصی ECU و WinOLS را ممیزی و مقاوم‌سازی کن تا در کتاب‌ها و جزوات حجیم، هیچ نشت پنهان توکن، خطای کاذب (False Positive)، کرش سرور/مرورگر، شکستگی فایل Word یا افت دقت فنی و بصری باقی نماند.
+۱. نقشه فایل‌های موجود پروژه و قواعد غیرقابل‌نقض
+فایل‌های هدف هارنس و هسته:
+لایه خالص هارنس: src/lib/harness/types.ts، harnessStore.ts، layer1Guard.ts، patchAndBudget.ts، promptBuilder.ts، irToBookAdapter.ts، harnessCore.test.ts
+یکپارچگی فنی و اقتصاد توکن: src/lib/ecuTechnicalIntegrity.ts، src/lib/tokenOptimizer.ts، src/lib/aiProviderConfig.ts
+درگاه و ارکستراتور سرور: src/server/aiProvider.ts، src/server/harnessOrchestrator.ts، src/server/projectRoutes.ts
+مبدل خروجی و رابط کاربری: src/lib/docxGenerator.ts، src/lib/docxRtlPostProcessor.ts، src/hooks/useHarnessRunner.ts، src/components/HarnessControlPanel.tsx، src/components/OutlineEditorView.tsx، src/components/Stage3LiveTextPreviewPanel.tsx، src/components/ChapterCoverageChartWidget.tsx
+قاعده عدم تخریب (Zero Regression):
+تمام قابلیت‌های فعلی باید ۱۰۰٪ بدون شکستگی حفظ شوند: ورود با گوگل و نشست ایزوله مهمان، جست‌وجوی متنی سایدبار (SidebarContentSearch.tsx)، نمودار توزیع فصل‌ها و پوشش (ChapterCoverageChartWidget.tsx)، پیش‌نمایش چاپ A4 راست‌چین با فونت وزیر (PrintPreviewModal.tsx)، تاریخچه تغییرات و خروجی استاندارد .docx.
+هویت بصری استودیو دقیقاً حفظ شود: پالت گرم تحریریه (#F8F6F1، #FCFBF8، #1E3A5F، #14532D، #B48A4E، #9A3412، #E2DDD3)، فونت وزیر، tabular-nums و toPersianDigits، بدون کپسول تزئینی (Zero-Pill) و بدون حاشیه ضخیم سمت چپ (border-l-4).
+کلیدهای API هرگز به کد کلاینت منتقل نشوند؛ تمامی فراخوانی‌های مدل صرفاً از مسیر درگاه سرور (src/server/aiProvider.ts) انجام شوند.
+۲. پروتکل اجرای مرحله‌ای ایمن (الزامی برای جلوگیری از Timeout در AI Studio)
+این مأموریت به ۵ بسته مستقل و متوالی (بسته A تا E) تقسیم شده است:
+در این نوبت فقط و فقط «بسته A» را کامل اجرا کن. به هیچ وجه وارد کدنویسی بسته‌های B تا E نشو.
+پیش از تغییر هر فایل، پیاده‌سازی فعلی آن را ممیزی کن تا مشخص شود کدام محورها اکنون ناقص یا آسیب‌پذیرند.
+پس از پیاده‌سازی بسته فعال:
+تست‌های واحد اجباری همان بسته را در node:test اضافه و تمام تست‌های قدیمی و جدید را با npx --yes tsx --test اجرا و سبز کن.
+compile_applet و lint_applet را با صفر خطا پاس کن.
+در پایان، یک جدول گزارش کوتاه Red-Team ارائه بده شامل: «محور / نقص کشف‌شده در کد قبلی»، «تغییر دقیق انجام‌شده» و «فایل اصلاح‌شده + نتیجه تست».
+بلافاصله پس از گزارش بسته A متوقف شو و منتظر دستور «ادامه به بسته بعدی» بمان. همین پروتکل برای بسته‌های B، C، D و E نیز تکرار خواهد شد.
+۳. شرح دقیق ۵ بسته مقاوم‌سازی (۵۳ نقطه Red-Team)
+بسته A: قطعه‌بندی ساختارآگاه، ممیزی Blueprint و ممیز قطعی لایه ۱
+(مسیرهای اصلی: src/lib/harness/types.ts, layer1Guard.ts, irToBookAdapter.ts, promptBuilder.ts, src/lib/ecuTechnicalIntegrity.ts)
+قطعه‌بندی آگاه به مرز ساختار: جلوگیری از شکستن جدول، فرمول، پین‌اوت یا بلوک هگز وسط دو Chunk + ثبت فیلدهای پیوستگی (continuedFromChunkId / continuesToChunkId) تا Blueprint قطعات پیوسته را هم‌زمان در یک زیربخش تخصیص دهد.
+نرمال‌ساز قطعی فارسی، اعداد و هگز (حذف False Positives):
+یکسان‌سازی ي←ی، ك←ک، حذف کاراکترهای نامرئی و استانداردسازی نیم‌فاصله پیش از تطبیق LivingGlossary.
+تبدیل ارقام فارسی/عربی به لاتین، هم‌ارزی اعشار (14.70 == 14.7)، هم‌ارزی ابعاد (16×16 == 16x16) و هم‌ارزی هگز بدون حساسیت به حروف و صفر ابتدایی (0x001A4F == 0x1a4f).
+استثنا کردن اعداد صرفاً ترتیبی/شماره‌گذاری گام‌ها در step_list و فهرست‌ها در حالی که هر عدد فنی ساختگی ۱۰۰٪ رد شود.
+تطابق سه‌گانه (علامت + عدد + واحد) و منع تبدیل واحد سرخود: کشف وارونگی علامت (-2.5° در برابر +2.5°) و جابه‌جایی واحد (1200 RPM در برابر 1200 ms) + رد هرگونه تبدیل واحد یا مبنای عددی که در متن منبع وجود ندارد.
+ایزولاسیون پلتفرم ایسیو (ecuPlatformTags): برچسب‌گذاری پلتفرم ایسیو روی قطعات و زیربخش‌ها (با بهره‌گیری از extractEcuPlatforms) و صدور خطای ecu_platform_mismatch در صورت نشت آدرس یا نقشه یک ایسیوی دیگر بدون بافت مقایسه‌ای.
+الزام حفظ هشدارهای ایمنی حیاتی: تشخیص کلیدواژه‌های ایمنی در sourceChunks (سوختن، ناک، ایموبلایزر، قفل شدن، چک‌سام، بکاپ، اتصال کوتاه، خطر، هشدار) و الزام وجود حداقل یک بلوک callout_warning متصل به همان قطعه.
+نرخ حفظ موجودیت فنی به‌جای نسبت خام کلمات: در رونوشت‌های محاوره‌ای پرحشو، معیار سخت لایه ۱ حفظ ۱۰۰٪ موجودیت‌های فنی (هگز، DTC، نام نقشه، زوج عدد/واحد، واژه‌نامه) همراه با کف معقول حجم متن باشد تا ویرایش فشرده و تمیز به‌اشتباه رد نشود.
+سلامت ماتریس جدول (table): بررسی قطعی مستطیلی بودن تمام ردیف‌ها (row.length === headers.length) و انطباق سرستون‌ها با داده‌های منبع.
+مهار تکرار، خروجی خالی، تنبلی gap_flag و ارجاعات شکسته:
+تشخیص قطعی N-gram Repetition و آرایه خالی blocks: [] پیش از لایه ۲ با کدهای degenerate_repetition_detected و empty_blocks_output.
+ثبت هشدار/خطای excessive_gap_bailout اگر بیش از ۳۰٪ بلوک‌های یک زیربخش غنی به source_gap_flag تبدیل شوند.
+پشتیبانی از بلوک source_conflict_flag برای نمایش شفاف تناقض میان دو منبع بدون انتخاب سلیقه‌ای.
+منع ارجاع عددی جعلی در متن («جدول ۳-۲»، «شکل زیر» بدون وجود figure_ref) و پشتیبانی از توکن ساختاری [[ref:sectionId]].
+کنترل تشابه بین‌بخشی (Jaccard/MinHash) با ۵ زیربخش قبلی همان فصل برای کشف مقدمه‌های تکراری (cross_section_duplication).
+ممیزی Blueprint، قفل تغییر منابع (Source Mutation Drift) و دفاع در برابر Prompt Injection:
+پیش از تأیید HITL: گزارش دقیق قطعات یتیم (Unassigned) و تکراری (Duplicated)، اعمال سقف سخت توکن ورودی هر زیربخش (۶ تا ۸ هزار توکن) همراه با پیشنهاد شکستن خودکار زیربخش‌های حجیم.
+ذخیره sourceCorpusHash و chunkContentHash هنگام تأیید HITL و توقف فوری با کد source_drift_detected در صورت تغییر منابع مرحله ۱ پس از تأیید.
+محصورسازی اکید هر قطعه منبع در تگ XML (<source_chunk id="...">...</source_chunk>) همراه با Escape کامل تگ‌های داخلی برای خنثی‌سازی Indirect Prompt Injection.
+بسته B: درگاه سرور، سازگاری 9Router/پروکسی، اقتصاد توکن، کش و مدار شکن بودجه
+(مسیرهای اصلی: src/server/aiProvider.ts, src/lib/harness/promptBuilder.ts, patchAndBudget.ts, src/lib/tokenOptimizer.ts)
+ماتریس قابلیت ارائه‌دهندگان (ProviderCapabilityProfile): حذف خودکار پارامترهای ناسازگار (cache_control، thinkingConfig، temperature روی مدل‌های Reasoning) و Fallback امن از json_schema به json_object روی روترهای سفارشی مانند 9Router.
+تشخیص پاسخ‌های غیرJSON/HTML و دسته‌بندی قطعی خطاها:
+بازرسی Content-Type و بدنه پاسخ برای شناسایی صفحات خطای HTML (مثل Cloudflare 502) با کد upstream_gateway_error (هرگز وارد حلقه Patch نشود).
+تفکیک قطعی Retryable (429/502/503/529 با Exponential Backoff + Jitter + احترام به Retry-After) از Fatal (400/401/402/403 با توقف فوری).
+تعمیر قطعی JSON پیش از رد اسکیما (۰ توکن): حذف Markdown Fence و اجرای تعمیرگر قطعی JSON (مانند jsonrepair یا پارسر ترمیم‌گر قطعی) پیش از اعلام خطای اسکیما تا خروجی مدل گران به‌خاطر یک کامای اضافه یا کوتیشن از بین نرود.
+مچ‌گیری تعویض بی‌صدای مدل و مهار Reasoning Tokens:
+مقایسه response.model واقعی برگشتی با مدل درخواستی؛ در صورت مغایرت ثبت هشدار model_mismatch، محاسبه هزینه با تعرفه مدل واقعی و گزینه توقف خودکار در صورت افت رده harness_author.
+اعمال سقف سخت thinking_budget / reasoning_effort به تفکیک نقش (خاموش یا حداقل برای harness_utility و harness_judge) و تفکیک reasoningTokens در گزارش هزینه.
+قفل prefixHash، مدیریت TTL/آستانه کش، واژه‌نامه دولایه و آمار واقعی کش:
+محاسبه و قفل prefixHash روی پیشوند ثابت (تضمین صفر داده متغیر در پیشوند) + بررسی آستانه حداقل طول کش (1024/2048 توکن) و نمایش هشدار شفاف در ایستگاه HITL.
+ثبت lastPrefixUsedAt برای مدیریت انقضای TTL کش (جلوگیری از جریمه بی‌دلیل Cache Write در اجرای تک‌مرحله‌ای یا پس از مکث طولانی).
+واژه‌نامه دولایه: هسته فریز‌شده در پیشوند کش + deltaGlossary کوتاه در پسوند پویا که صرفاً در مرز فصل‌ها به هسته ادغام می‌شود.
+استخراج آمار کش صرفاً از فیلدهای واقعی پاسخ API (cache_read_input_tokens، cached_tokens، cachedContentTokenCount) و نمایش صریح «گزارش‌نشده توسط ارائه‌دهنده» در نبود داده (هرگز عدد ساختگی یا تخمینی جایگزین نشود).
+مدار شکن بودجه لحظه‌ای + کالیبراسیون توکن فارسی + هزینه‌های خون‌آشام:
+تخمینگر محافظه‌کارانه فارسی (chars / 1.6) با کالیبراسیون پویا بر اساس نسبت واقعی فراخوانی قبلی.
+بررسی hardCostCapUsd پیش از تک‌تک زیرفراخوانی‌ها (author, judge, patch #1, patch #2, utility) بر مبنای توکن واقعی برگشتی API.
+دفترکل costAuditLedger با ثبت pending_charge پیش از fetch و تبدیل Timeoutهای بی‌جواب به unreconciled_estimated_cost (محاسبه‌شده در سقف بودجه).
+بسته C: ارکستراتور سرور، قفل‌های ایمن، اصلاح جراحی و قاضی ضدطوطی‌وار
+(مسیرهای اصلی: src/server/harnessOrchestrator.ts, src/server/projectRoutes.ts, src/hooks/useHarnessRunner.ts)
+قفل اجرا، Lease TTL و Idempotency (stepRunId):
+جلوگیری قطعی از فراخوانی تکراری مدل گران با stepRunId و قفل در سطح projectId + sectionId.
+افزودن lockExpiresAt (Lease TTL مثلاً ۵ دقیقه) + Heartbeat در حین اجرا برای جلوگیری از قفل مرده هنگام کرش Express، همراه با مسیر/دکمه آزادسازی قفل منقضی‌شده.
+انتقال واقعی لغو درخواست (AbortController): اتصال توقف کاربر (Pause) در کلاینت ← رویداد close در Express ← AbortSignal در fetch ارائه‌دهنده تا پس از توقف، هیچ زیرفراخوانی بعدی اجرا یا شارژ نشود.
+حفظ خروجی گران Author (drafted_unverified) و کشف بریدگی خروجی:
+ذخیره فوری خروجی سالم harness_author در Checkpoint پیش از ورود به لایه ۲ یا Patch تا در صورت خطای شبکه یا توقف بودجه، خروجی گران دوباره تولید نشود.
+بررسی finishReason / stop_reason پیش از لایه ۱: در صورت length / MAX_TOKENS ثبت فوری output_truncated بدون ورود به حلقه harness_patch.
+چرخه کامل اصلاح جراحی (Surgical Patch):
+ارسال صرفاً بلوک‌های معیوب (blockId) + خطای دقیق + قطعات منبع مرتبط؛ جایگذاری قطعی (Splice) خروجی در آرایه اصلی بدون تغییر بلوک‌های سالم؛ و بازاجرای اجباری ممیز لایه ۱ و در صورت قبولی، لایه ۲ پس از هر Patch.
+ممیز معنایی لایه ۲ مستند و ضدتأیید طوطی‌وار (harness_judge):
+الزام به ممیزی ادعا‌به‌ادعا (Claim-by-Claim) با فیلدهای sourceQuote، outputQuote، حکم (supported | contradicted | unsupported) و severity: 'critical' | 'minor'.
+فعال‌سازی Patch صرفاً روی خطاهای critical و رد پاسخ‌های بی‌زحمت (passed: true با صفر ادعای بررسی‌شده روی زیربخش فنی) با کد low_effort_judge_audit.
+حافظه افزایشی ضدتحریف و شناسنامه منشأ (Provenance):
+تبدیل RollingSummary به فهرست افزایشی (Append-Only) از کارت‌های ۱-خطی زیربخش‌ها و تزریق پنجره لغزان (۵ زیربخش اخیر + خلاصه فصل‌های قبل) بدون بازخلاصه‌سازی زنجیره‌ای.
+ذخیره متادیتای منشأ (modelRequested, modelActual, prefixHash, harnessPromptVersion, patchCount, actualCostUsd, verifiedAt) روی هر زیربخش.
+بسته D: ذخیره‌سازی ترکیبی، همگام‌سازی، حالت مهمان، نسخه‌بندی و مهاجرت
+(مسیرهای اصلی: src/lib/harness/harnessStore.ts, src/server/projectRoutes.ts, src/server/harnessOrchestrator.ts, src/components/HarnessControlPanel.tsx)
+جلوگیری از باد کردن Cloud SQL: ذخیره صرفاً sourceChunkIds داخل checkpointJson.harnessState (بدون کپی متن خام) و محدود کردن اسنپ‌شات کامل projectRevisions به نقاط عطف (تأیید HITL، پایان هر فصل، حل قرنطینه، پایان کتاب).
+کنترل همزمانی خوش‌بینانه (stateVersion): افزودن نسخه افزایشی به وضعیت پروژه و برگرداندن 409 Conflict هنگام تداخل دو تب/دو دستگاه تا تب قدیمی روی کار جدیدتر بازنویسی نکند.
+مقاومت IndexedDB و نسخه‌بندی اسکیما:
+مدیریت QuotaExceededError با پاکسازی LRU روی آینه پروژه‌های قدیمی‌تر همگام‌شده و Fallback ایمن در حالت ناشناس مرورگر.
+افزودن schemaVersion به HarnessState و SemanticIR همراه با تابع قطعی و تست‌شده migrateHarnessState().
+صحت کامل حالت مهمان، انتقال به حساب گوگل و پشتیبان قابل‌حمل:
+اطمینان از کارکرد بی‌خطای تمام مسیرهای /api/projects/:id/harness/* در حالت مهمان (۰ خطای 401/404).
+اجرای اعتبارسنجی ساختاری لایه ۱ روی ویرایش‌های دستی در صف قرنطینه + ثبت manual_override_reason هنگام عبور دستی از هشدار محتوایی.
+افزودن قابلیت Export/Import بسته قابل‌حمل هارنس (.json)، خروجی گزارش مالی/ممیزی (CSV/JSON) و انتقال ایمن پروژه مهمان به حساب گوگل پس از ورود.
+بسته E: مبدل قطعی سند، صفحه‌آرایی A4/DOCX، عملکرد مرورگر و کنترل‌های UI
+(مسیرهای اصلی: src/lib/harness/irToBookAdapter.ts, src/lib/docxGenerator.ts, src/lib/docxRtlPostProcessor.ts, src/components/HarnessControlPanel.tsx, src/components/Stage3LiveTextPreviewPanel.tsx)
+حفظ تصاویر و نمودارهای WinOLS (figure_ref): افزودن بلوک figure_ref (assetId, caption, sourceChunkIds) به SemanticIR و درج تصویر اصلی با کیفیت کامل در پیش‌نمایش A4 و فایل .docx.
+پاکساز XML 1.0 و ایزولاسیون BiDi:
+حذف قطعی کاراکترهای کنترلی غیرمجاز XML 1.0 (\x00–\x08, \x0B, \x0C, \x0E–\x1F) در irToBookAdapter.ts و docxGenerator.ts تا فایل Word هرگز Corrupted نشود.
+ایزولاسیون قطعی دوجهته (Unicode LRI/PDI در پیش‌نمایش و <w:rtl w:val="0"/> در .docx با بهره‌گیری از segmentBidiTechnicalRuns) برای اعداد منفی، آدرس هگز، کد خطا و نام نقشه‌ها (-5.5° BTDC, ME7.4.4 (0x1A4F)).
+جداول عریض (16x16) و فرمول‌های استاندارد:
+تشخیص خودکار جداول با بیش از ۸ ستون و اعمال فونت فشرده tabular-nums + اسکرول افقی در پیش‌نمایش و بخش افقی (Landscape Section Break) در .docx و چاپ A4.
+استانداردسازی رندر بلوک formula (فرمول + توضیح متغیرها) با نمایش خوانا و یکدست در A4 و Word.
+مقیاس‌پذیری مرورگر (بدون فریز شدن UI):
+مجازی‌سازی (Windowed / Active-Chapter Rendering) در Stage3LiveTextPreviewPanel.tsx و انتقال مونتاژ .docx به Web Worker همراه با نوار پیشرفت.
+اجرای آزمایشی ۱ زیربخش (Pilot Run) و دروازه سلامت خروجی:
+افزودن دکمه «اجرای آزمایشی ۱ زیربخش نمونه (Pilot Run)» در ایستگاه HITL با نمایش گزارش کامل هزینه واقعی، آمار واقعی کش و پیش‌نمایش پیش از باز کردن اجرای کل کتاب.
+افزودن دروازه سلامت پیش از دانلود .docx (Pre-Export Integrity Gate) با نمایش تعداد بخش‌های verified، quarantined، pending و برچسب‌های gap/conflict و انتخاب حالت خروجی.
+۴. معیار پذیرش و تست‌های واحد اجباری (در پایان هر بسته پیش از توقف)
+در پایان هر بسته، تست‌های واحد واقعی (node:test) آن بسته را بنویس و اجرا کن تا ۱۰۰٪ تست‌های قدیم و جدید سبز شوند:
+تست‌های بسته A: قبولی ۱۶×۱۶ / ۱۴.۷ / 0x1a4f / ايسيـو در برابر منبع، رد 0x1A5F ساختگی، رد وارونگی -2.5° به +2.5°، رد نشت پلتفرم ایسیوی دیگر (ecu_platform_mismatch)، الزام callout_warning برای متن دارای هشدار سوختن ایسیو، رد جدول نامتقارن، تشخیص لوپ تکرار (degenerate_repetition_detected)، و تشخیص source_drift_detected و قطعات یتیم.
+تست‌های بسته B: تعمیر JSON دارای کامای اضافه/Markdown Fence، مچ‌گیری model_mismatch در 9Router، توقف مدار شکن دقیقاً پیش از patch #2 روی مصرف واقعی، ثبت unreconciled_estimated_cost روی Timeout، ثابت ماندن prefixHash در ۳ زیربخش متوالی و نمایش «گزارش‌نشده» در نبود آمار کش.
+تست‌های بسته C: جلوگیری از اجرای تکراری با stepRunId، آزادسازی قفل پس از انقضای lockExpiresAt، ذخیره drafted_unverified پس از Author و ازسرگیری بدون فراخوانی مجدد Author، تشخیص finishReason: length بدون ورود به Patch، بازاجرای لایه ۱ و ۲ پس از Splice اصلاح جراحی، و رد پاسخ طوطی‌وار قاضی لایه ۲ (low_effort_judge_audit).
+تست‌های بسته D: رد نوشتن هم‌زمان با 409 Conflict روی stateVersion قدیمی، مهاجرت موفق schemaVersion قدیمی، عدم تکرار متن خام در checkpointJson، و پاس شدن کامل مسیر مهمان با ۰ خطای 401/404.
+تست‌های بسته E: تولید XML معتبر .docx از ورودی آلوده به \x0B/\x00، رندر سالم figure_ref و جدول 16x16 افقی، حفظ ایزولاسیون -5.5° BTDC، و تأیید نهایی در مرورگر Chromium (1440×900) با ۰ خطای کنسول.
+اکنون صرفاً «بسته A» را آغاز کن، تست‌ها + compile_applet + lint_applet را سبز کن، جدول گزارش Red-Team بسته A را ارائه بده و متوقف شو.
+نقش و مأموریت (فاز ۴ — ممیزی و مقاوم‌سازی جامع ۵۳-نقطه‌ای Red-Team روی هارنس ECU & WinOLS):
+به‌عنوان مهندس ارشد Red-Team، امنیت و سیستم‌های AI تولیدی، کل پیاده‌سازی فازهای ۱ تا ۳ هارنس تخصصی خودرو، ECU و WinOLS در این کدبیس (src/lib/harness/*، src/server/aiProvider.ts، src/server/harnessOrchestrator.ts، src/server/projectRoutes.ts، src/lib/docxGenerator.ts و کامپوننت‌های مرتبط در src/components/*) را با نگاه نقادانه ممیزی و مقاوم‌سازی کن تا در پروژه‌های حجیم و واقعی هیچ نشت پنهان توکن، خطای کاذب (False Positive/Negative)، قفل مرده، کرش سرور/مرورگر، خرابی XML ورد یا افت دقت علمی و بصری باقی نماند.
+پروتکل اجرای مرحله‌ای ایمن (الزامی — ضد Timeout در AI Studio)
+این مأموریت به ۵ بسته مستقل و پیاپی (بسته A تا بسته E) تقسیم شده است:
+در این نوبت صرفاً بسته A را به‌طور کامل پیاده‌سازی کن. از شروع بسته‌های B تا E در این پاسخ خودداری کن.
+پیش از پایان هر بسته، تست‌های واحد جدید همان بسته را بنویس، تمام تست‌های قدیم و جدید را با npx --yes tsx --test ۱۰۰٪ سبز کن و compile_applet و lint_applet را با صفر خطا پاس کن.
+در پایان هر بسته، یک جدول گزارش کوتاه Red-Team ارائه بده با ستون‌های: «بند / ریسک کشف‌شده»، «نقص دقیق در کد قبلی»، «فایل و اصلاح اعمال‌شده» و «نتیجه تست واحد»؛ سپس متوقف شو و منتظر دستور «ادامه به بسته بعدی» بمان.
+قواعد غیرقابل‌نقض (عدم تخریب و حفظ هویت استودیو)
+حفظ کامل قابلیت‌های موجود: ورود با گوگل و نشست ایزوله مهمان، جست‌وجوی سایدبار (SidebarContentSearch.tsx)، نمودار Recharts و دفتر کل پوشش (ChapterCoverageChartWidget.tsx)، پیش‌نمایش آنی مرحله ۳ (Stage3LiveTextPreviewPanel.tsx)، پیش‌نمایش چاپ A4 راست‌چین با فونت وزیر مدیوم (PrintPreviewModal.tsx) و خروجی استاندارد .docx (docxGenerator.ts + docxRtlPostProcessor.ts) باید ۱۰۰٪ سالم بمانند.
+مرز امنیتی: هیچ کلید API یا فراخوانی مستقیم مدل هوش مصنوعی نباید به کلاینت منتقل شود؛ تمامی فراخوانی‌ها و محاسبات بودجه صرفاً سمت سرور انجام شوند.
+هویت بصری استودیو: حفظ دقیق پالت تحریریه گرم (#F8F6F1, #FCFBF8, #1E3A5F, #14532D, #B48A4E, #9A3412, #E2DDD3)، راست‌چینی کامل، toPersianDigits و tabular-nums، بدون کپسول تزئینی (Zero-Pill)، بدون border-l-4 و بدون نقاط چشمک‌زن.
+بسته A: قطعه‌بندی ساختارآگاه، ممیزی Blueprint و ممیز قطعی لایه ۱
+فایل‌های هدف: src/lib/harness/types.ts، src/lib/harness/layer1Guard.ts، src/lib/harness/irToBookAdapter.ts، src/lib/harness/promptBuilder.ts، ماژول قطعه‌بندی منابع و src/lib/harness/harnessCore.test.ts
+قطعه‌بندی آگاه به مرز ساختار (Structure-Aware Chunking): جلوگیری قطعی از شکستن جدول، فرمول، پین‌اوت یا بلوک هگز بین دو قطعه؛ در صورت اجبار به تقسیم بلوک‌های بسیار طولانی، ثبت شناسه‌های پیوستگی (continuedFromChunkId و continuesToChunkId) و الزام به تخصیص هم‌زمان آن‌ها در یک زیربخش داخل MasterBlueprint.
+نرمال‌ساز قطعی فارسی، اعداد و هگز (حذف False Positives):
+پیش‌پردازش یکسان ي←ی، ك←ک، حذف کاراکترهای کنترلی/نامرئی و استانداردسازی نیم‌فاصله پیش از تطبیق LivingGlossary.
+تبدیل ارقام فارسی/عربی به لاتین، هم‌ارزی اعشار (14.70 == 14.7)، هم‌ارزی ابعاد نقشه (16×16 == 16x16) و هم‌ارزی آدرس هگز بدون حساسیت به حروف و صفر ابتدایی (0x001A4F == 0x1a4f).
+استثنا کردن اعداد صرفاً ترتیبی/شماره‌گذاری گام‌ها در step_list و فهرست‌ها، در حالی که هر عدد فنی ساختگی همچنان ۱۰۰٪ رد شود.
+تطابق اکید زوج (علامت + عدد + واحد) و منع تبدیل واحد سرخود: تشخیص وارونگی علامت (-2.5° در برابر +2.5°) و جابه‌جایی واحد (1200 RPM در برابر 1200 ms) و رد هرگونه تبدیل واحد یا مبنای عددی که عیناً در sourceChunks وجود ندارد.
+ایزولاسیون پلتفرم ایسیو (ecuPlatformTags): برچسب‌گذاری خودکار پلتفرم ECU روی قطعات منبع و زیربخش‌ها (با تکیه بر ecuTechnicalIntegrity.ts) و صدور خطای قطعی ecu_platform_mismatch در صورت نشت آدرس هگز یا نقشه یک ایسیوی دیگر خارج از بافت مقایسه‌ای صریح.
+الزام قطعی حفظ هشدارهای ایمنی حیاتی: اسکن کلیدواژه‌های ایمنی در sourceChunks (سوختن، ناک، ایموبلایزر، قفل شدن، چک‌سام، بکاپ، اتصال کوتاه، خطر، هشدار) و الزام به وجود حداقل یک بلوک callout_warning متصل به همان sourceChunkId.
+معیار حفظ موجودیت فنی به جای نسبت خام کلمات: روی متن‌ها و رونوشت‌های محاوره‌ای پرحشو، معیار سخت لایه ۱ حفظ ۱۰۰٪ موجودیت‌های فنی (هگز، DTC، نقشه WinOLS، زوج عدد/واحد، اصطلاحات واژه‌نامه) همراه با یک کف معقول طول متن باشد تا خلاصه‌سازی حشو باعث خطای کاذب نشود.
+سلامت ماتریس جدول (table): کنترل قطعی مستطیلی بودن همه ردیف‌ها (row.length === headers.length) و تطابق معنایی/ساختاری سرستون‌ها با جدول منبع.
+مهار تکرار، خروجی خالی، تنبلی gap_flag، تناقض منابع و ارجاع شکسته:
+تشخیص قطعی N-gram Repetition و آرایه خالی blocks: [] پیش از لایه ۲ (degenerate_repetition_detected و empty_blocks_output).
+صدور خطای excessive_gap_bailout اگر بیش از ۳۰٪ بلوک‌های یک زیربخش غنی به source_gap_flag تبدیل شوند.
+افزودن نوع بلوک ساختاری source_conflict_flag برای ثبت شفاف تناقض میان دو منبع ورودی.
+منع ارجاع عددی جعلی در متن (مانند «جدول ۳-۲» یا «شکل زیر» بدون وجود figure_ref) و پشتیبانی از توکن ارجاع داخلی [[ref:sectionId]].
+کنترل تشابه بین‌بخشی (Jaccard/MinHash) در برابر ۵ زیربخش قبلی همان فصل برای کشف مقدمه‌ها یا پاراگراف‌های تکراری (cross_section_duplication).
+ممیزی Blueprint، قفل تغییر منابع و ضد Indirect Prompt Injection:
+پیش از تأیید دروازه HITL: گزارش شفاف قطعات یتیم (Unassigned) و تکراری (Duplicated)، اعمال سقف سخت توکن ورودی هر زیربخش (۶٬۰۰۰ تا ۸٬۰۰۰ توکن) همراه با پیشنهاد/عملکرد شکستن خودکار زیربخش‌های غول‌پیکر.
+ثبت sourceCorpusHash و chunkContentHash در لحظه تأیید HITL و توقف با خطای source_drift_detected در صورت تغییر منابع مرحله ۱ پس از تأیید.
+محصورسازی اکید هر قطعه منبع درون تگ <source_chunk id="...">...</source_chunk> همراه با Escape کامل تگ‌های داخلی برای مقابله با Indirect Prompt Injection.
+بسته B: درگاه سرور، پروکسی/9Router، اقتصاد توکن، کش و مدار شکن بودجه
+فایل‌های هدف: src/server/aiProvider.ts، src/lib/harness/promptBuilder.ts، src/lib/harness/patchAndBudget.ts، src/lib/tokenOptimizer.ts
+ماتریس قابلیت ارائه‌دهندگان (ProviderCapabilityProfile): حذف خودکار پارامترهای ناسازگار (cache_control، thinkingConfig، temperature روی مدل‌های Reasoning) و Fallback امن از json_schema به json_object برای روترهای سفارشی مانند 9Router و OpenRouter.
+تشخیص پاسخ‌های HTML/غیرJSON و تفکیک خطاها:
+بازرسی Content-Type و بدنه پاسخ برای شناسایی صفحات خطای HTML (مانند Cloudflare 502/504) با کد upstream_gateway_error (هرگز نباید به چرخه Patch برود).
+تفکیک قطعی Retryable (429/502/503/529 با Exponential Backoff + Jitter + احترام به هدر Retry-After) از Fatal (400/401/402/403 با توقف فوری و پیام شفاف فارسی).
+تعمیر قطعی JSON پیش از رد اسکیما (هزینه ۰ توکن): حذف Markdown Fence و اجرای تعمیرگر قطعی JSON (مانند کامای اضافه، کوتیشن باز یا کاراکترهای سرگردان) پیش از اعلام خطای اسکیما تا خروجی مدل گران هدر نرود.
+مچ‌گیری تعویض بی‌صدای مدل و مهار Reasoning Tokens:
+مقایسه response.model واقعی برگشتی با مدل درخواستی؛ در صورت مغایرت ثبت هشدار model_mismatch، محاسبه هزینه با تعرفه مدل واقعی و قابلیت توقف خودکار هنگام افت رده در نقش harness_author.
+اعمال سقف سخت thinking_budget / reasoning_effort به تفکیک نقش (خاموش یا حداقل روی harness_utility و harness_judge) و ثبت مجزای reasoningTokens در تله‌متری هزینه.
+قفل prefixHash، مدیریت TTL/آستانه کش، واژه‌نامه دولایه و آمار واقعی کش:
+محاسبه و قفل prefixHash روی پیشوند ثابت (تضمین نبود هیچ متغیر پویا) + بررسی حداقل آستانه کش (۱۰۲۴/۲۰۴۸ توکن) و نمایش هشدار شفاف در دروازه HITL.
+ثبت lastPrefixUsedAt برای مدیریت انقضای TTL کش (جلوگیری از جریمه بی‌دلیل Cache Write در اجرای تک‌گام یا پس از مکث طولانی).
+واژه‌نامه دولایه: هسته فریز‌شده در پیشوند کش + deltaGlossary کوتاه در پسوند پویا که فقط در مرز فصل‌ها به هسته ادغام می‌شود.
+خواندن آمار کش منحصراً از فیلدهای واقعی پاسخ API (cache_read_input_tokens، cached_tokens، cachedContentTokenCount) و نمایش صریح «گزارش‌نشده توسط ارائه‌دهنده» در نبود داده (هرگز عدد تخمینی یا ساختگی).
+مدار شکن بودجه لحظه‌ای + کالیبراسیون فارسی + مهار هزینه‌های خون‌آشام:
+تخمین‌گر محافظه‌کارانه توکن فارسی (chars / 1.6) با کالیبراسیون پویا بر اساس نسبت واقعی فراخوانی قبلی.
+بررسی hardCostCapUsd پیش از تک‌تک زیرفراخوانی‌ها (author، judge، patch #1، patch #2، utility) بر مبنای توکن واقعی برگشتی API.
+پیاده‌سازی دفتر کل costAuditLedger با ثبت pending_charge پیش از fetch و تبدیل Timeoutهای بی‌جواب به unreconciled_estimated_cost (لحاظ‌شده در سقف بودجه).
+بسته C: ارکستراتور سرور، قفل‌های ایمن، اصلاح جراحی و قاضی ضدتأیید طوطیوار
+فایل‌های هدف: src/server/harnessOrchestrator.ts، src/server/projectRoutes.ts، src/hooks/useHarnessRunner.ts
+قفل اجرا، Lease TTL و Idempotency (stepRunId):
+جلوگیری قطعی از اجرای هم‌زمان یا تکراری مدل گران با stepRunId و قفل در سطح projectId + sectionId.
+افزودن lockExpiresAt (Lease TTL مثلاً ۵ دقیقه) + Heartbeat در طول اجرا برای جلوگیری از قفل مرده پس از کرش سرور، همراه با مسیر/دکمه آزادسازی قفل منقضی‌شده.
+انتقال واقعی لغو درخواست (AbortController): اتصال توقف کاربر (Pause) در کلاینت ← رویداد close در Express ← AbortSignal در fetch ارائه‌دهنده تا پس از توقف کاربر هیچ زیرفراخوانی بعدی پول مصرف نکند.
+حفظ خروجی گران Author (drafted_unverified) و تشخیص بریدگی خروجی:
+ذخیره فوری خروجی سالم harness_author در Checkpoint پیش از ورود به لایه ۲ یا Patch تا در صورت خطای شبکه یا توقف بودجه در مراحل بعدی، خروجی Author دوباره تولید نشود.
+بررسی finishReason / stop_reason پیش از لایه ۱: در صورت length یا MAX_TOKENS ثبت فوری خطای output_truncated بدون ورود به حلقه harness_patch.
+چرخه کامل اصلاح جراحی (Surgical Patch): ارسال صرفاً بلوک‌های معیوب (blockId) + شرح دقیق خطا + قطعات منبع مرتبط؛ جایگذاری قطعی (Splice) بلوک‌های ترمیم‌شده در آرایه اصلی بدون دست‌زدن به بلوک‌های سالم؛ و بازاجرای اجباری ممیز لایه ۱ و در صورت قبولی، لایه ۲ پس از هر Patch.
+ممیز معنایی لایه ۲ مستند و ضدتأیید طوطیوار (harness_judge):
+الزام به ارزیابی ادعابه‌ادعا (Claim-by-Claim) با فیلدهای sourceQuote، outputQuote، حکم (supported | contradicted | unsupported) و شدت (critical | minor).
+فعال‌سازی Patch منحصراً روی خطاهای critical و رد پاسخ‌های بی‌زحمت (passed: true با صفر ادعای بررسی‌شده روی زیربخش فنی) با کد low_effort_judge_audit.
+حافظه افزایشی ضدتحریف و شناسنامه منشأ (Provenance):
+تبدیل RollingSummary به لیست افزایشی (Append-Only) از کارت‌های ۱-خطی زیربخش‌ها و تزریق پنجره لغزان (۵ زیربخش اخیر + خلاصه فصل‌های قبلی) بدون بازخلاصه‌سازی زنجیره‌ای.
+ذخیره کامل متادیتای منشأ (modelRequested، modelActual، prefixHash، harnessPromptVersion، patchCount، actualCostUsd، verifiedAt) روی هر زیربخش.
+بسته D: ذخیره‌سازی ترکیبی، همگام‌سازی، حالت مهمان، نسخه‌بندی و مهاجرت
+فایل‌های هدف: src/lib/harness/harnessStore.ts، src/server/projectRoutes.ts، src/server/harnessOrchestrator.ts، src/lib/apiClient.ts
+جلوگیری از تورم Cloud SQL: ذخیره صرفاً sourceChunkIds در checkpointJson.harnessState (بدون کپی متن خام قطعات) و محدود کردن اسنپ‌شات کامل projectRevisions به نقاط عطف (تأیید HITL، پایان هر فصل، حل قرنطینه، پایان کتاب).
+کنترل هم‌زمانی خوش‌بینانه (stateVersion): افزودن شماره نسخه افزایشی روی وضعیت هارنس پروژه و برگرداندن 409 Conflict هنگام تداخل دو تب یا دو دستگاه تا تب قدیمی روی پیشرفت جدیدتر بازنویسی نکند.
+مقاومت IndexedDB و مهاجرت اسکیما:
+مدیریت QuotaExceededError با پاک‌سازی LRU روی آینه پروژه‌های قدیمی‌ترِ همگام‌شده و Fallback امن در حالت ناشناس مرورگر.
+افزودن schemaVersion به HarnessState و SemanticIR به همراه تابع قطعی و تست‌شده migrateHarnessState().
+صحت کامل حالت مهمان، انتقال به حساب گوگل و پشتیبان قابل‌حمل:
+تضمین کارکرد بی‌خطای تمام مسیرهای /api/projects/:id/harness/* در نشست مهمان (۰ خطای 401/404).
+اجرای اعتبارسنجی ساختاری لایه ۱ روی ویرایش‌های دستی در صف قرنطینه + ثبت اجباری manual_override_reason هنگام عبور دستی از هشدار محتوایی.
+افزودن قابلیت Export/Import بسته قابل‌حمل هارنس (.json)، خروجی گزارش مالی و ممیزی (CSV/JSON) و انتقال ایمن پروژه مهمان به حساب گوگل پس از ورود.
+بسته E: مبدل قطعی سند، صفحه‌آرایی A4/DOCX، کارایی مرورگر و دروازه‌های UI
+فایل‌های هدف: src/lib/harness/irToBookAdapter.ts، src/lib/docxGenerator.ts، src/lib/ecuTechnicalIntegrity.ts، src/components/HarnessControlPanel.tsx، src/components/Stage3LiveTextPreviewPanel.tsx، src/components/WorkflowStageViews.tsx
+حفظ تصاویر و نمودارهای WinOLS (figure_ref): افزودن بلوک figure_ref (assetId، caption، sourceChunkIds) به SemanticIR و درج تصویر اصلی با کیفیت کامل در پیش‌نمایش A4 و فایل .docx.
+پاک‌ساز XML 1.0 و ایزولاسیون قطعی BiDi:
+حذف قطعی کاراکترهای کنترلی غیرمجاز XML 1.0 (\x00–\x08, \x0B, \x0C, \x0E–\x1F) در irToBookAdapter.ts و docxGenerator.ts تا فایل Word هرگز Corrupted نشود.
+ایزولاسیون دوجهته قطعی (Unicode LRI/PDI در پیش‌نمایش و <w:rtl w:val="0"/> در .docx) برای اعداد منفی، آدرس‌های هگز، کدهای خطا و نام نقشه‌ها (مانند -5.5° BTDC و ME7.4.4 (0x1A4F)).
+جداول عریض (16x16) و فرمول‌های استاندارد:
+تشخیص خودکار جداول با بیش از ۸ ستون و اعمال فونت فشرده tabular-nums + اسکرول افقی در پیش‌نمایش و بخش افقی (Landscape Section Break) در چاپ A4 و .docx.
+استانداردسازی رندر بلوک formula (فرمول + توضیح متغیرها) به‌صورت خوانا و یکدست در A4 و Word.
+مقیاس‌پذیری مرورگر (بدون فریز شدن UI):
+پیاده‌سازی Windowed / Active-Chapter Rendering در Stage3LiveTextPreviewPanel.tsx برای کتاب‌های حجیم.
+اجرای مونتاژ .docx درون Web Worker همراه با نمایش نوار پیشرفت واقعی.
+اجرای آزمایشی ۱ زیربخش (Pilot Run) و دروازه سلامت خروجی:
+افزودن دکمه «اجرای آزمایشی ۱ زیربخش نمونه (Pilot Run)» در ایستگاه HITL همراه با نمایش گزارش کامل هزینه واقعی، آمار واقعی کش و پیش‌نمایش زنده پیش از آزادسازی اجرای کل کتاب.
+افزودن دروازه سلامت پیش از دانلود .docx (Pre-Export Integrity Gate) با نمایش شمارش دقیق بخش‌های verified، quarantined، pending و برچسب‌های gap/conflict و انتخاب حالت خروجی.
+معیار پذیرش و تست‌های واحد اجباری (برای هر بسته پیش از توقف)
+در پایان هر بسته، تست‌های واقعی node:test را بنویس و اجرا کن تا ۱۰۰٪ تست‌های کل پروژه سبز شوند:
+تست‌های بسته A: قبولی ۱۶×۱۶/۱۴.۷/0x1a4f/ايسيـو در برابر منبع؛ رد 0x1A5F ساختگی؛ رد وارونگی -2.5° به +2.5°؛ رد نشت پلتفرم ایسیوی دیگر؛ الزام callout_warning برای متن دارای هشدار سوختن ایسیو؛ رد جدول نامتقارن؛ تشخیص لوپ تکرار و blocks: []؛ تشخیص source_drift_detected، قطعات یتیم و خنثی‌سازی Prompt Injection در تگ <source_chunk>.
+تست‌های بسته B: تعمیر JSON دارای کامای اضافه و Markdown Fence؛ مچ‌گیری model_mismatch در 9Router؛ توقف مدار شکن دقیقاً پیش از patch #2 روی مصرف واقعی؛ ثبت unreconciled_estimated_cost روی Timeout؛ ثابت ماندن prefixHash در ۳ زیربخش متوالی و نمایش «گزارش‌نشده» در نبود آمار کش.
+تست‌های بسته C: جلوگیری از اجرای تکراری با stepRunId؛ آزادسازی قفل پس از انقضای lockExpiresAt؛ ذخیره drafted_unverified پس از Author و ازسرگیری بدون فراخوانی مجدد Author؛ تشخیص finishReason: length بدون ورود به Patch؛ بازاجرای اجباری لایه ۱ و ۲ پس از Splice اصلاح جراحی؛ و رد پاسخ طوطیوار قاضی لایه ۲ (low_effort_judge_audit).
+تست‌های بسته D: رد نوشتن هم‌زمان با 409 Conflict روی stateVersion قدیمی؛ مهاجرت موفق schemaVersion قدیمی؛ عدم ذخیره متن خام در checkpointJson؛ و پاس شدن کامل مسیر مهمان با ۰ خطای 401/404.
+تست‌های بسته E: تولید XML معتبر .docx از ورودی آلوده به \x0B/\x00؛ رندر سالم figure_ref و جدول 16x16 افقی؛ حفظ ایزولاسیون -5.5° BTDC؛ و تأیید نهایی در مرورگر واقعی Chromium (1440×900) با ۰ خطای کنسول و ۰ خطای شبکه.
+اکنون فقط با اجرای کامل «بسته A» شروع کن، تست‌ها + compile_applet + lint_applet را پاس کن، جدول گزارش Red-Team بسته A را ارائه بده و متوقف شو.

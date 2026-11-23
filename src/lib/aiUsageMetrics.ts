@@ -1,6 +1,7 @@
 import type { AiModelId, GoogleSearchMode, ProjectAiUsageLedger } from './bookTypes.ts';
 import { getGoogleModelMeta, normalizeGoogleModelId } from './aiProviderConfig.ts';
 import { toPersianDigits } from './formatParsers.ts';
+import { computeCallCostUsd, formatUsdClean } from './tokenOptimizer.ts';
 
 export const EMPTY_AI_USAGE: ProjectAiUsageLedger = {
   promptTokens: 0,
@@ -11,6 +12,9 @@ export const EMPTY_AI_USAGE: ProjectAiUsageLedger = {
   groundingCallCount: 0,
   deepReviewCount: 0,
   chatCallCount: 0,
+  estimatedCostUsdAccumulated: 0,
+  savedTokensByOptimization: 0,
+  cachedCallsCount: 0,
 };
 
 export const TOKENS_PER_PERSIAN_WORD = 2;
@@ -23,6 +27,9 @@ export interface AiUsageDelta {
   outputTokens?: number;
   thinkingTokens?: number;
   totalTokens?: number;
+  cachedInputTokens?: number;
+  savedTokensByOptimization?: number;
+  cachedCallHit?: boolean;
   requestCount?: number;
   groundingCallCount?: number;
   deepReviewCount?: number;
@@ -63,6 +70,14 @@ export function extractAiUsageFromCheckpoint(
     chatCallCount: safeNonNegInt(raw.chatCallCount),
     lastModelUsed: typeof raw.lastModelUsed === 'string' ? raw.lastModelUsed : undefined,
     lastUpdatedAt: typeof raw.lastUpdatedAt === 'string' ? raw.lastUpdatedAt : undefined,
+    estimatedCostUsdAccumulated:
+      typeof raw.estimatedCostUsdAccumulated === 'number' &&
+      Number.isFinite(raw.estimatedCostUsdAccumulated) &&
+      raw.estimatedCostUsdAccumulated >= 0
+        ? raw.estimatedCostUsdAccumulated
+        : undefined,
+    savedTokensByOptimization: safeNonNegInt(raw.savedTokensByOptimization),
+    cachedCallsCount: safeNonNegInt(raw.cachedCallsCount),
   };
 }
 
@@ -74,6 +89,24 @@ export function mergeAiUsageDelta(
   const addOutput = safeNonNegInt(delta.outputTokens);
   const addThinking = safeNonNegInt(delta.thinkingTokens);
   const addTotal = Math.max(safeNonNegInt(delta.totalTokens), addPrompt + addOutput + addThinking);
+  const addCostUsd = computeCallCostUsd({
+    modelId: delta.modelUsed || existing.lastModelUsed || 'gemini-4-hydrogen',
+    promptTokens: addPrompt,
+    outputTokens: addOutput,
+    thinkingTokens: addThinking,
+    cachedInputTokens: delta.cachedInputTokens,
+  });
+
+  const prevAccumCost =
+    typeof existing.estimatedCostUsdAccumulated === 'number' &&
+    Number.isFinite(existing.estimatedCostUsdAccumulated)
+      ? existing.estimatedCostUsdAccumulated
+      : computeCallCostUsd({
+          modelId: existing.lastModelUsed || 'gemini-4-hydrogen',
+          promptTokens: existing.promptTokens,
+          outputTokens: existing.outputTokens,
+          thinkingTokens: existing.thinkingTokens,
+        });
 
   return {
     promptTokens: existing.promptTokens + addPrompt,
@@ -86,6 +119,10 @@ export function mergeAiUsageDelta(
     chatCallCount: existing.chatCallCount + safeNonNegInt(delta.chatCallCount),
     lastModelUsed: delta.modelUsed || existing.lastModelUsed,
     lastUpdatedAt: new Date().toISOString(),
+    estimatedCostUsdAccumulated: Number((prevAccumCost + addCostUsd).toFixed(6)),
+    savedTokensByOptimization:
+      (existing.savedTokensByOptimization || 0) + safeNonNegInt(delta.savedTokensByOptimization),
+    cachedCallsCount: (existing.cachedCallsCount || 0) + (delta.cachedCallHit ? 1 : 0),
   };
 }
 
@@ -205,16 +242,18 @@ export function computeProjectQuotaSnapshot(params: {
   }
 
   const estimatedPaidCostUsd =
-    (usage.promptTokens / 1_000_000) * modelMeta.inputRatePerMillionUsd +
-    ((usage.outputTokens + usage.thinkingTokens) / 1_000_000) *
-      modelMeta.outputRatePerMillionUsd;
+    typeof usage.estimatedCostUsdAccumulated === 'number' &&
+    Number.isFinite(usage.estimatedCostUsdAccumulated) &&
+    usage.estimatedCostUsdAccumulated > 0
+      ? usage.estimatedCostUsdAccumulated
+      : computeCallCostUsd({
+          modelId: usage.lastModelUsed || aiModel,
+          promptTokens: usage.promptTokens,
+          outputTokens: usage.outputTokens,
+          thinkingTokens: usage.thinkingTokens,
+        });
 
-  const formattedCostUsd =
-    estimatedPaidCostUsd === 0
-      ? '$0.00'
-      : estimatedPaidCostUsd < 0.01
-        ? '< $0.01'
-        : `$${estimatedPaidCostUsd.toFixed(2)}`;
+  const formattedCostUsd = formatUsdClean(estimatedPaidCostUsd);
 
   return {
     consumedTokens,

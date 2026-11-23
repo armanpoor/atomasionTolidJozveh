@@ -8,6 +8,7 @@ import {
   EyeOff,
   Globe,
   KeyRound,
+  Layers,
   Loader2,
   Mic,
   RefreshCw,
@@ -29,6 +30,7 @@ import {
   AudioTranscribeProviderType,
   getActiveProviderCredentials,
   getEffectiveAudioRoute,
+  getEffectiveTierRouting,
   getEffectiveWebSearchRoute,
   GOOGLE_MODEL_OPTIONS,
   normalizeKeyAuthMode,
@@ -40,6 +42,7 @@ import {
   WebSearchProviderType,
 } from '../lib/aiProviderConfig';
 import { toPersianDigits } from '../lib/formatParsers';
+import { MultiTierRoutingPanel } from './MultiTierRoutingPanel';
 
 interface AiProviderModalProps {
   open: boolean;
@@ -52,7 +55,7 @@ interface AiProviderModalProps {
   onRunLiveProbe: (overrideConfig?: AiProviderConfig, overrideModel?: AiModelId) => Promise<void>;
 }
 
-type ModalCapabilityTab = 'primary' | 'search' | 'audio';
+type ModalCapabilityTab = 'primary' | 'tiers' | 'search' | 'audio';
 
 function syncLegacyConfigFields(cfg: AiProviderConfig): AiProviderConfig {
   const active = cfg.providers[cfg.provider];
@@ -251,12 +254,29 @@ export const AiProviderModal: React.FC<AiProviderModalProps> = ({
       return 'شناسه مدل انتخابی در تب تبدیل ویس به متن معتبر نیست.';
     }
 
+    // Validate Multi-Tier Routing slots when enabled
+    const tierRouting = getEffectiveTierRouting(draft);
+    if (tierRouting.enabled) {
+      for (const tierKey of ['economy', 'balanced', 'flagship'] as const) {
+        const slot = tierRouting.tiers[tierKey];
+        const slotMeta = AI_PROVIDER_METADATA[slot.provider];
+        const slotUrlCheck = validateCustomBaseUrl(slot.baseUrl || slotMeta.defaultBaseUrl);
+        if (!slotUrlCheck.valid) {
+          return `آدرس Base URL سطح ${tierKey} نامعتبر است: ${slotUrlCheck.error}`;
+        }
+        if (!sanitizeCustomModelId(slot.modelId)) {
+          return `شناسه مدل در سطح ${tierKey} معتبر نیست.`;
+        }
+      }
+    }
+
     return null;
   };
 
   const buildNormalizedDraft = (): AiProviderConfig => {
     const creds = getActiveProviderCredentials(draft);
     const cleanedUrl = (creds.baseUrl.trim() || activeMeta.defaultBaseUrl).replace(/\/+$/, '');
+    const tierRouting = getEffectiveTierRouting(draft);
     return syncLegacyConfigFields({
       ...draft,
       googleKeyMode: authMode,
@@ -283,6 +303,7 @@ export const AiProviderModal: React.FC<AiProviderModalProps> = ({
         apiKey: audioRoute.apiKey.trim(),
         modelId: audioRoute.modelId.trim() || audioMeta.defaultModelId,
       },
+      tierRouting,
     });
   };
 
@@ -346,53 +367,79 @@ export const AiProviderModal: React.FC<AiProviderModalProps> = ({
           </button>
         </header>
 
-        {/* 3-Slot Capability Navigation Tabs */}
+        {/* 4-Slot Capability Navigation Tabs */}
         <nav
           aria-label="مسیریابی بر اساس وظیفه هوش مصنوعی"
-          className="grid grid-cols-3 gap-1.5 border-b border-[#E7E2D8] bg-[#F5F2EB] px-5 py-2.5 sm:px-6"
+          className="grid grid-cols-2 sm:grid-cols-4 gap-1.5 border-b border-[#E7E2D8] bg-[#F5F2EB] px-5 py-2.5 sm:px-6"
         >
           <button
             type="button"
             onClick={() => setActiveTab('primary')}
-            className={`flex min-h-[40px] items-center justify-center gap-1.5 rounded-xl border px-3 py-2 text-xs font-bold transition-colors cursor-pointer ${
+            className={`flex min-h-[40px] items-center justify-center gap-1.5 rounded-xl border px-2.5 py-2 text-xs font-bold transition-colors cursor-pointer ${
               activeTab === 'primary'
                 ? 'border-[#1E3A5F] bg-white text-[#1E3A5F] shadow-xs'
                 : 'border-transparent text-[#57534E] hover:bg-white/60 hover:text-[#1A1816]'
             }`}
           >
             <Cpu className="h-3.5 w-3.5 shrink-0" />
-            <span className="truncate">۱. مدل اصلی (نگارش و تحلیل)</span>
+            <span className="truncate">۱. مدل اصلی</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setActiveTab('tiers')}
+            className={`flex min-h-[40px] items-center justify-center gap-1.5 rounded-xl border px-2.5 py-2 text-xs font-bold transition-colors cursor-pointer ${
+              activeTab === 'tiers'
+                ? 'border-[#1E3A5F] bg-white text-[#1E3A5F] shadow-xs'
+                : 'border-transparent text-[#57534E] hover:bg-white/60 hover:text-[#1A1816]'
+            }`}
+          >
+            <Layers className="h-3.5 w-3.5 shrink-0" />
+            <span className="truncate">۲. سطوح مدل و توکن</span>
           </button>
 
           <button
             type="button"
             onClick={() => setActiveTab('search')}
-            className={`flex min-h-[40px] items-center justify-center gap-1.5 rounded-xl border px-3 py-2 text-xs font-bold transition-colors cursor-pointer ${
+            className={`flex min-h-[40px] items-center justify-center gap-1.5 rounded-xl border px-2.5 py-2 text-xs font-bold transition-colors cursor-pointer ${
               activeTab === 'search'
                 ? 'border-[#1E3A5F] bg-white text-[#1E3A5F] shadow-xs'
                 : 'border-transparent text-[#57534E] hover:bg-white/60 hover:text-[#1A1816]'
             }`}
           >
             <Search className="h-3.5 w-3.5 shrink-0" />
-            <span className="truncate">۲. جستجوی زنده اینترنت</span>
+            <span className="truncate">۳. جستجوی وب</span>
           </button>
 
           <button
             type="button"
             onClick={() => setActiveTab('audio')}
-            className={`flex min-h-[40px] items-center justify-center gap-1.5 rounded-xl border px-3 py-2 text-xs font-bold transition-colors cursor-pointer ${
+            className={`flex min-h-[40px] items-center justify-center gap-1.5 rounded-xl border px-2.5 py-2 text-xs font-bold transition-colors cursor-pointer ${
               activeTab === 'audio'
                 ? 'border-[#1E3A5F] bg-white text-[#1E3A5F] shadow-xs'
                 : 'border-transparent text-[#57534E] hover:bg-white/60 hover:text-[#1A1816]'
             }`}
           >
             <Mic className="h-3.5 w-3.5 shrink-0" />
-            <span className="truncate">۳. تبدیل ویس به متن (STT)</span>
+            <span className="truncate">۴. تبدیل ویس</span>
           </button>
         </nav>
 
         {/* Body */}
         <div className="flex-1 overflow-y-auto px-5 py-5 sm:px-6 space-y-5 text-xs">
+          {/* =============================================================== */}
+          {/* TAB 2: MULTI-TIER MODEL ROUTING & TOKEN OPTIMIZATION ENGINE     */}
+          {/* =============================================================== */}
+          {activeTab === 'tiers' && (
+            <MultiTierRoutingPanel
+              draft={draft}
+              onChangeDraft={(updater) => {
+                setDraft((prev) => syncLegacyConfigFields(updater(prev)));
+                setFormError(null);
+              }}
+            />
+          )}
+
           {/* =============================================================== */}
           {/* TAB 1: PRIMARY REASONING / WRITING / DEEP REVIEW / CHAT ENGINE  */}
           {/* =============================================================== */}
@@ -1008,15 +1055,19 @@ export const AiProviderModal: React.FC<AiProviderModalProps> = ({
             </div>
           )}
 
-          {/* Active 3-Slot Capability Summary Strip */}
+          {/* Active Multi-Route Capability Summary Strip */}
           <div className="rounded-xl border border-[#D8E2EE] bg-[#F4F7FB] px-3.5 py-2.5 space-y-1.5">
             <div className="flex items-center justify-between gap-2 text-[11px] font-extrabold text-[#1E3A5F]">
-              <span>خلاصه معماری فعال ۳ مسیره شما</span>
-              {routingPlan.isHybrid && (
+              <span>خلاصه معماری فعال هوش مصنوعی شما</span>
+              {routingPlan.tierRoutingEnabled ? (
+                <span className="text-[10.5px] font-bold text-[#14532D]">
+                  مسیریابی هوشمند ۳ سطحی فعال
+                </span>
+              ) : routingPlan.isHybrid ? (
                 <span className="text-[10.5px] font-bold text-[#14532D]">
                   ترکیبی چندارائه‌دهنده‌ای (Hybrid)
                 </span>
-              )}
+              ) : null}
             </div>
             <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 text-[11px] text-[#334155]">
               <div className="rounded-lg border border-[#DCE5F0] bg-white px-2.5 py-1.5">
@@ -1038,6 +1089,11 @@ export const AiProviderModal: React.FC<AiProviderModalProps> = ({
                 </div>
               </div>
             </div>
+            {routingPlan.tierRoutingEnabled && (
+              <div className="rounded-lg border border-[#CBE0D2] bg-[#F2F7F4] px-2.5 py-1.5 text-[10.5px] font-semibold text-[#14532D] truncate">
+                {routingPlan.tierSummaryFa}
+              </div>
+            )}
           </div>
 
           {/* Security Reassurance */}

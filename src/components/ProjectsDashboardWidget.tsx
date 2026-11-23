@@ -9,7 +9,12 @@ import {
   Plus,
   Settings2,
 } from 'lucide-react';
-import type { AiModelId, ProjectSummaryDto, WorkflowMode } from '../lib/bookTypes';
+import type {
+  AiModelId,
+  ProjectBundleDto,
+  ProjectSummaryDto,
+  WorkflowMode,
+} from '../lib/bookTypes';
 import {
   AI_PROVIDER_METADATA,
   AiQuotaProbeResponse,
@@ -21,10 +26,12 @@ import {
   PortfolioStatusBucket,
 } from '../lib/dashboardMetrics';
 import { toPersianDigits } from '../lib/formatParsers';
+import { ChapterCoverageChartWidget } from './ChapterCoverageChartWidget';
 
 interface ProjectsDashboardWidgetProps {
   projects: ProjectSummaryDto[];
   activeProjectId: string | null;
+  activeBundle?: ProjectBundleDto | null;
   activeAiModel: AiModelId;
   probeData: AiQuotaProbeResponse | null;
   onSelectProject: (projectId: string) => void;
@@ -48,6 +55,7 @@ const DONUT_CIRCUMFERENCE = 2 * Math.PI * DONUT_RADIUS;
 export const ProjectsDashboardWidget: React.FC<ProjectsDashboardWidgetProps> = ({
   projects,
   activeProjectId,
+  activeBundle = null,
   activeAiModel,
   probeData,
   onSelectProject,
@@ -409,6 +417,9 @@ export const ProjectsDashboardWidget: React.FC<ProjectsDashboardWidgetProps> = (
               </div>
             </div>
           </div>
+
+          {/* Active Project Recharts Chapter Volume & Word Coverage Analytics */}
+          <ChapterCoverageChartWidget bundle={activeBundle} />
 
           {/* Compact Recent/Active Projects Quick Jump Strip */}
           {metrics.topProjects.length > 0 && (

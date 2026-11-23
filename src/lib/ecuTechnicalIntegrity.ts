@@ -81,19 +81,34 @@ export function segmentBidiTechnicalRuns(text: string): BidiRunSegment[] {
     segments.push({ kind: 'rtl_text', text: text.slice(cursor) });
   }
 
-  // Merge adjacent segments of identical kind
-  const merged: BidiRunSegment[] = [];
-  for (const seg of segments) {
+  // Coalesce multi-word English technical phrases (e.g., "Knock Retard", "Target Engine Load", "Rev Limiter / Cut-Off")
+  // so an RTL space separator between two LTR words never reverses their visual reading order.
+  const coalesced: BidiRunSegment[] = [];
+  for (let i = 0; i < segments.length; i++) {
+    const seg = segments[i];
     if (!seg.text) continue;
-    const prev = merged[merged.length - 1];
+    const prev = coalesced[coalesced.length - 1];
+    const next = segments[i + 1];
+    if (
+      seg.kind === 'rtl_text' &&
+      /^[\s/\-–]+$/.test(seg.text) &&
+      prev &&
+      prev.kind === 'ltr_tech' &&
+      next &&
+      next.kind === 'ltr_tech'
+    ) {
+      prev.text += seg.text + next.text;
+      i += 1;
+      continue;
+    }
     if (prev && prev.kind === seg.kind) {
       prev.text += seg.text;
     } else {
-      merged.push({ ...seg });
+      coalesced.push({ ...seg });
     }
   }
 
-  return merged;
+  return coalesced;
 }
 
 // ============================================================================

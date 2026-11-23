@@ -188,6 +188,26 @@ export const DeepReviewPanel: React.FC<DeepReviewPanelProps> = ({
                     امتیاز کیفیت: {toPersianDigits(overallScore)} از ۱۰۰
                   </span>
                 )}
+                {hasValidReport && typeof report?.antiDriftIntegrityScore === 'number' && (
+                  <span className="rounded-md border border-[#C7DDD0] bg-white px-2 py-0.5 text-[11px] font-bold text-[#14532D] tabular-nums">
+                    سلامت ضدتوهم: {toPersianDigits(report.antiDriftIntegrityScore)}٪
+                  </span>
+                )}
+                {hasValidReport && typeof report?.tokenSavingsPercent === 'number' && report.tokenSavingsPercent > 0 && (
+                  <span className="rounded-md border border-[#DFC690] bg-[#FFFDF6] px-2 py-0.5 text-[11px] font-bold text-[#744005] tabular-nums">
+                    فشرده‌سازی توکن: {toPersianDigits(report.tokenSavingsPercent)}٪-
+                  </span>
+                )}
+                {hasValidReport && report?.tierUsed && (
+                  <span className="rounded-md border border-[#DDE6F0] bg-white px-2 py-0.5 text-[10.5px] font-semibold text-[#1E3A5F]">
+                    سطح مدل:{' '}
+                    {report.tierUsed === 'flagship'
+                      ? 'پرچمدار (Flagship)'
+                      : report.tierUsed === 'balanced'
+                        ? 'متعادل (Balanced)'
+                        : 'اقتصادی (Economy)'}
+                  </span>
+                )}
                 <span className="rounded-md border border-[#DDE6F0] bg-white px-2 py-0.5 text-[11px] font-semibold text-[#3B5578] tabular-nums">
                   {toPersianDigits(totalApplied)} بهبود اعمال‌شده
                 </span>
@@ -273,6 +293,19 @@ export const DeepReviewPanel: React.FC<DeepReviewPanelProps> = ({
                 </div>
               </div>
             </div>
+
+            {report?.antiDriftWarnings && report.antiDriftWarnings.length > 0 && (
+              <div className="rounded-lg border border-[#EBD5A7] bg-[#FEF9EE] px-3 py-2.5 space-y-1 text-[11px] text-[#92400E]">
+                <div className="font-extrabold">
+                  گزارش گیت محافظ ضدتوهم (موارد اصلاح‌شده پیش از ذخیره):
+                </div>
+                <ul className="list-disc pr-4 space-y-0.5">
+                  {report.antiDriftWarnings.slice(0, 6).map((w, i) => (
+                    <li key={i}>{w}</li>
+                  ))}
+                </ul>
+              </div>
+            )}
 
             {/* Findings List */}
             {findings.length > 0 && (

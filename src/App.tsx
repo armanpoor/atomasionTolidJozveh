@@ -40,6 +40,7 @@ import { ProjectChangeLogModal } from './components/ProjectChangeLogModal';
 import { PrintPreviewModal } from './components/PrintPreviewModal';
 import { ChapterSidebar, SelectedChapterKey } from './components/ChapterSidebar';
 import { QueuedUploadFile } from './components/FileDropzone';
+import { useHarnessRunner } from './hooks/useHarnessRunner';
 import { ApiClient } from './lib/apiClient';
 import {
   extractWinolsMapGuides,
@@ -153,14 +154,33 @@ export default function App() {
   const [loadingRevisions, setLoadingRevisions] = useState(false);
   const [revisionsError, setRevisionsError] = useState<string | null>(null);
   const [rollingBackId, setRollingBackId] = useState<string | null>(null);
+  const [savingCheckpoint, setSavingCheckpoint] = useState(false);
   const [printPreviewOpen, setPrintPreviewOpen] = useState(false);
   const [showDashboardOverview, setShowDashboardOverview] = useState(false);
+  const [highlightedOutlineNodeId, setHighlightedOutlineNodeId] = useState<string | null>(null);
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
   const [mobileChaptersOpen, setMobileChaptersOpen] = useState(false);
 
   const [queuedFiles, setQueuedFiles] = useState<QueuedUploadFile[]>([]);
   const [workflowMode, setWorkflowMode] = useState<WorkflowMode>('multi_merge');
   const [config, setConfig] = useState<DocxExportConfig>(DEFAULT_DOCX_CONFIG);
+
+  const handleHarnessBundleUpdated = useCallback(
+    (nextBundle: ProjectBundleDto, nextRevisions?: ProjectRevisionDto[]) => {
+      setBundle(nextBundle);
+      if (Array.isArray(nextRevisions)) {
+        setRevisions(nextRevisions);
+      }
+    },
+    []
+  );
+
+  const harnessRunner = useHarnessRunner({
+    api,
+    bundle,
+    onBundleUpdated: handleHarnessBundleUpdated,
+    onSyncCompleteNavigateStage4: () => setActiveStage(4),
+  });
 
   const [quotaProbe, setQuotaProbe] = useState<AiQuotaProbeResponse | null>(null);
   const [probingQuota, setProbingQuota] = useState(false);
@@ -290,6 +310,64 @@ export default function App() {
     [user, api, activeProjectId, config.aiModel]
   );
 
+  const handleLogProjectActivity = useCallback(
+    (payload: {
+      actionType: ProjectRevisionDto['actionType'];
+      title: string;
+      summary: string;
+      captureSnapshot?: boolean;
+      extraDetails?: Record<string, unknown>;
+    }) => {
+      if (!activeProjectId) return;
+      void api
+        .logProjectActivity(activeProjectId, payload)
+        .then((res) => {
+          if (res.revisions) {
+            setRevisions(res.revisions);
+          }
+        })
+        .catch(() => {
+          // Non-blocking audit trail write
+        });
+    },
+    [activeProjectId, api]
+  );
+
+  const handleCreateManualCheckpoint = useCallback(
+    async (note: string) => {
+      if (!activeProjectId) return;
+      const trimmed = note.trim();
+      setSavingCheckpoint(true);
+      setRevisionsError(null);
+      try {
+        const res = await api.logProjectActivity(activeProjectId, {
+          actionType: 'manual_checkpoint',
+          title: trimmed
+            ? `نقطه بازیابی دستی: ${trimmed}`
+            : 'نقطه بازیابی دستی کاربر',
+          summary:
+            trimmed ||
+            'ذخیره دستی اسنپ‌شات کامل سرفصل‌ها، واحدهای محتوا و خروجی سند برای بازگشت سریع در آینده.',
+          captureSnapshot: true,
+          extraDetails: {
+            note: trimmed || null,
+          },
+        });
+        if (res.revisions) {
+          setRevisions(res.revisions);
+        }
+        setBannerToast('نقطه بازیابی دستی (اسنپ‌شات کامل پروژه) در تاریخچه ثبت شد.');
+      } catch (err) {
+        const msg =
+          err instanceof Error ? err.message : 'خطا در ثبت نقطه بازیابی دستی.';
+        setRevisionsError(msg);
+      } finally {
+        setSavingCheckpoint(false);
+      }
+    },
+    [activeProjectId, api]
+  );
+
   const handleSaveProviderConfig = useCallback(
     (nextConfig: AiProviderConfig, nextGoogleModel?: AiModelId) => {
       providerConfigRef.current = nextConfig;
@@ -317,9 +395,19 @@ export default function App() {
       setBannerToast(
         `${providerSummary.providerLabel} (${providerSummary.modelLabel} · ${providerSummary.keySourceLabel}) برای این نشست فعال شد.`
       );
+      handleLogProjectActivity({
+        actionType: 'ai_provider_changed',
+        title: `تغییر ارائه‌دهنده هوش مصنوعی به ${providerSummary.providerLabel}`,
+        summary: `مدل فعال: ${providerSummary.modelLabel} · منبع کلید: ${providerSummary.keySourceLabel}`,
+        extraDetails: {
+          provider: nextConfig.provider,
+          model: providerSummary.modelLabel,
+          keySource: providerSummary.keySourceLabel,
+        },
+      });
       void handleRunLiveProbe(nextConfig, nextGoogleModel);
     },
-    [activeProjectId, api, config.aiModel, handleRunLiveProbe]
+    [activeProjectId, api, config.aiModel, handleLogProjectActivity, handleRunLiveProbe]
   );
 
   // Automatic live quota probe once per active project
@@ -1167,21 +1255,55 @@ export default function App() {
       const fileName = makeSafeFileName(book.title, 'docx');
       triggerBlobDownload(blob, fileName);
       setBannerToast(`فایل ورد با فونت ${config.fontFamily} و راست‌چین کامل دانلود شد.`);
+      handleLogProjectActivity({
+        actionType: 'docx_exported',
+        title: `خروجی فایل ورد (.docx) — ${fileName}`,
+        summary: `فایل ورد راست‌چین با فونت ${config.fontFamily} (${book.chapters.length} فصل) ساخته و دانلود شد.`,
+        extraDetails: {
+          format: 'docx',
+          fileName,
+          fontFamily: config.fontFamily,
+          chaptersCount: book.chapters.length,
+        },
+      });
     } catch (err) {
       setBannerError(err instanceof Error ? err.message : 'خطا در ساخت فایل ورد (.docx).');
     } finally {
       setExportingDocx(false);
     }
-  }, [bundle?.project.bookSnapshotJson, config]);
+  }, [bundle?.project.bookSnapshotJson, config, handleLogProjectActivity]);
 
   const handleDownloadMarkdown = useCallback(() => {
     const book = bundle?.project.bookSnapshotJson;
     if (!book) return;
     const md = exportBookToMarkdown(book);
+    const fileName = makeSafeFileName(book.title, 'md');
     const blob = new Blob([md], { type: 'text/markdown;charset=utf-8' });
-    triggerBlobDownload(blob, makeSafeFileName(book.title, 'md'));
+    triggerBlobDownload(blob, fileName);
     setBannerToast('نسخه Markdown تمیز سند دانلود شد.');
-  }, [bundle?.project.bookSnapshotJson]);
+    handleLogProjectActivity({
+      actionType: 'markdown_exported',
+      title: `خروجی Markdown تمیز — ${fileName}`,
+      summary: `نسخه Markdown کامل شامل ${book.chapters.length} فصل ذخیره شد.`,
+      extraDetails: {
+        format: 'markdown',
+        fileName,
+        chaptersCount: book.chapters.length,
+      },
+    });
+  }, [bundle?.project.bookSnapshotJson, handleLogProjectActivity]);
+
+  const handleOpenPrintPreview = useCallback(() => {
+    setPrintPreviewOpen(true);
+    handleLogProjectActivity({
+      actionType: 'print_preview_opened',
+      title: 'باز کردن پیش‌نمایش چاپ A4 / خروجی PDF',
+      summary: 'کاربر پیش‌نمایش صفحه‌بندی استاندارد A4 برای چاپ یا ذخیره PDF را باز کرد.',
+      extraDetails: {
+        format: 'pdf_print_preview',
+      },
+    });
+  }, [handleLogProjectActivity]);
 
   const unitCountsByNode = useMemo(() => {
     const counts: Record<string, number> = {};
@@ -1237,6 +1359,21 @@ export default function App() {
   const capabilityPlan = useMemo(
     () => resolveCapabilityRoutingPlan(providerConfig, config.aiModel),
     [providerConfig, config.aiModel]
+  );
+
+  const handleJumpToSearchResult = useCallback(
+    (params: { unitId: string; outlineNodeId: string | null; sourceFileId: string }) => {
+      setMobileSidebarOpen(false);
+      if (params.outlineNodeId && workflowProgress.unlockedStages[3]) {
+        setHighlightedOutlineNodeId(params.outlineNodeId);
+        setActiveStage(3);
+        setShowDashboardOverview(false);
+      } else {
+        setActiveStage(1);
+        setShowDashboardOverview(false);
+      }
+    },
+    [workflowProgress.unlockedStages]
   );
 
   if (authLoading) {
@@ -1445,6 +1582,9 @@ export default function App() {
             activeProjectId={activeProjectId}
             activeWorkflowMode={workflowMode}
             queuedFiles={queuedFiles}
+            sourceFiles={bundle?.sourceFiles ?? []}
+            contentUnits={bundle?.contentUnits ?? []}
+            outlineNodes={bundle?.outlineNodes ?? []}
             ingestedFilesCount={bundle?.sourceFiles.length ?? 0}
             ingestedWordCount={ingestedWordCount}
             chapterCount={bundle?.outlineNodes.length ?? 0}
@@ -1484,6 +1624,7 @@ export default function App() {
               }))
             }
             onStartPipeline={handleRunStage1Ingest}
+            onJumpToSearchResult={handleJumpToSearchResult}
           />
         </div>
 
@@ -1506,6 +1647,9 @@ export default function App() {
                 activeProjectId={activeProjectId}
                 activeWorkflowMode={workflowMode}
                 queuedFiles={queuedFiles}
+                sourceFiles={bundle?.sourceFiles ?? []}
+                contentUnits={bundle?.contentUnits ?? []}
+                outlineNodes={bundle?.outlineNodes ?? []}
                 ingestedFilesCount={bundle?.sourceFiles.length ?? 0}
                 ingestedWordCount={ingestedWordCount}
                 chapterCount={bundle?.outlineNodes.length ?? 0}
@@ -1551,6 +1695,7 @@ export default function App() {
                   }))
                 }
                 onStartPipeline={handleRunStage1Ingest}
+                onJumpToSearchResult={handleJumpToSearchResult}
               />
             </div>
             <div
@@ -1600,6 +1745,7 @@ export default function App() {
                 <ProjectsDashboardWidget
                   projects={projects}
                   activeProjectId={activeProjectId}
+                  activeBundle={bundle}
                   activeAiModel={config.aiModel}
                   probeData={quotaProbe}
                   onSelectProject={(pid) => {
@@ -1623,6 +1769,7 @@ export default function App() {
               <StageIngestView
                 projects={projects}
                 activeProjectId={activeProjectId}
+                activeBundle={bundle}
                 activeAiModel={config.aiModel}
                 audioEngineLabel={capabilityPlan.audioLabelFa}
                 probeData={quotaProbe}
@@ -1663,8 +1810,12 @@ export default function App() {
             ) : activeStage === 3 && bundle ? (
               <OutlineEditorView
                 projectId={bundle.project.id}
+                projectTitle={bundle.project.title}
                 nodes={bundle.outlineNodes}
+                contentUnits={bundle.contentUnits}
+                sourceFiles={bundle.sourceFiles}
                 unitCountsByNode={unitCountsByNode}
+                highlightedNodeId={highlightedOutlineNodeId}
                 saving={savingOutline}
                 finalizing={finalizing}
                 groundingNodeId={groundingNodeId}
@@ -1676,6 +1827,8 @@ export default function App() {
                 onEnrichNodeWithGoogle={handleEnrichNodeWithGoogle}
                 onEnrichAllWithGoogle={handleEnrichFullDocumentWithGoogle}
                 onRunDeepReview={handleRunDeepAiReview}
+                harness={harnessRunner}
+                onOpenProviderSettings={() => setProviderModalOpen(true)}
               />
             ) : activeStage === 5 && activeBook ? (
               <StageExportView
@@ -1686,7 +1839,7 @@ export default function App() {
                 exportingDocx={exportingDocx}
                 onDownloadDocx={handleDownloadDocx}
                 onDownloadMarkdown={handleDownloadMarkdown}
-                onPrintPdf={() => setPrintPreviewOpen(true)}
+                onPrintPdf={handleOpenPrintPreview}
                 onGoToStage4Preview={() => setActiveStage(4)}
                 onGoToStage2Audit={() => setActiveStage(2)}
               />
@@ -1777,7 +1930,7 @@ export default function App() {
 
                     <button
                       type="button"
-                      onClick={() => setPrintPreviewOpen(true)}
+                      onClick={handleOpenPrintPreview}
                       title="نمایش صفحه‌بندی دقیق A4 با حاشیه‌های استاندارد و ذخیره PDF"
                       className="inline-flex min-h-[36px] items-center gap-1.5 rounded-md border border-[#C8C1B4] bg-white px-3 py-1.5 text-xs font-bold text-[#1A1816] hover:bg-[#FAF9F6] cursor-pointer"
                     >
@@ -1799,12 +1952,14 @@ export default function App() {
 
                 {winolsWorkbenchOpen && (
                   <WinolsMapWorkbench
+                    projectTitle={bundle?.project.title || activeBook.title}
                     report={winolsGuideReport}
                     auditReport={bundle?.auditReport ?? null}
                     book={activeBook}
                     outlineNodes={bundle?.outlineNodes ?? []}
                     enrichingGoogle={enrichingFullGoogle}
                     onEnrichAllWithGoogle={handleEnrichFullDocumentWithGoogle}
+                    onLogActivity={handleLogProjectActivity}
                     onClose={() => setWinolsWorkbenchOpen(false)}
                     hasWinolsAppendixChapter={activeBook.chapters.some(
                       (c) => c.id === 'ch_winols_quick_guide'
@@ -1936,9 +2091,11 @@ export default function App() {
         loading={loadingRevisions}
         error={revisionsError}
         rollingBackId={rollingBackId}
+        savingCheckpoint={savingCheckpoint}
         onClose={() => setChangeLogOpen(false)}
         onRefresh={() => void refreshProjectRevisions(activeProjectId)}
         onRollback={handleRollbackRevision}
+        onCreateCheckpoint={handleCreateManualCheckpoint}
       />
       </div>
 

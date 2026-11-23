@@ -667,6 +667,12 @@ export interface ProjectAiUsageLedger {
   chatCallCount: number;
   lastModelUsed?: string;
   lastUpdatedAt?: string;
+  /** Cumulative estimated USD cost computed using actual per-model rates (Anthropic/OpenAI/Gemini/DeepSeek) */
+  estimatedCostUsdAccumulated?: number;
+  /** Cumulative prompt tokens saved via compact wire compression & prompt caching */
+  savedTokensByOptimization?: number;
+  /** Number of repeat deterministic LLM calls satisfied from server cache at 0 tokens */
+  cachedCallsCount?: number;
 }
 
 export interface AssistantChatResponse {
@@ -674,6 +680,7 @@ export interface AssistantChatResponse {
   proposals: ChatProposal[];
   groundingSources?: WebGroundingSource[];
   modelUsed: string;
+  tierUsed?: string;
   aiUsage?: ProjectAiUsageLedger;
 }
 
@@ -698,6 +705,10 @@ export interface DeepReviewReportDto {
     paragraphsAdded: number;
   };
   findings: DeepReviewFinding[];
+  tierUsed?: string;
+  tokenSavingsPercent?: number;
+  antiDriftIntegrityScore?: number;
+  antiDriftWarnings?: string[];
 }
 
 export interface DeepReviewResponse {

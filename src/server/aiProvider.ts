@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import dns from 'node:dns/promises';
 import net from 'node:net';
 import type { Request } from 'express';
@@ -5,25 +6,51 @@ import { GoogleGenAI, ThinkingLevel, type GenerateContentResponse } from '@googl
 import {
   AI_PROVIDER_METADATA,
   type AiProviderType,
+  type AiTaskType,
   AUDIO_TRANSCRIBE_PROVIDER_METADATA,
   type AudioTranscribeProviderType,
   type AuthStrategyDecision,
+  DEFAULT_MULTI_TIER_ROUTING,
+  DEFAULT_TASK_TIER_MAP,
   formatFriendlyProviderErrorFa,
   type KeyAuthMode,
+  type ModelTierId,
+  type MultiTierRoutingConfig,
   normalizeAudioProviderType,
   normalizeGoogleModelId,
   normalizeKeyAuthMode,
+  normalizeModelTierId,
   normalizeProviderType,
+  normalizeTokenOptimizationMode,
   normalizeWebSearchProviderType,
   type ProviderProbeSnapshot,
   resolveEffectiveAuthStrategy,
   sanitizeCustomModelId,
+  type TokenOptimizationMode,
   validateCustomBaseUrl,
   WEB_SEARCH_PROVIDER_METADATA,
   type WebSearchProviderType,
 } from '../lib/aiProviderConfig.ts';
 import type { AiUsageDelta } from '../lib/aiUsageMetrics.ts';
-import type { WebGroundingSource } from '../lib/bookTypes.ts';
+import type { ProjectAiUsageLedger, WebGroundingSource } from '../lib/bookTypes.ts';
+import {
+  classifyProviderHttpResponse,
+  computeRetryBackoffDelayMs,
+  evaluateModelMismatch,
+  extractRealCacheTelemetry,
+  extractRealReasoningTokens,
+  isHtmlErrorPayload,
+  type ModelMismatchEvaluation,
+  ProviderGatewayError,
+  resolveProviderCapabilityProfile,
+  resolveRoleReasoningCap,
+  sanitizeOpenAiCompatiblePayload,
+} from '../lib/harness/providerGuard.ts';
+import {
+  computeCallCostUsd,
+  estimatePersianTokensConservative,
+  formatUsdClean,
+} from '../lib/tokenOptimizer.ts';
 
 export interface ResolvedServerAiProvider {
   provider: AiProviderType;
@@ -212,6 +239,314 @@ export function resolveAiProviderFromRequest(req: Request): ResolvedServerAiProv
           validationError: `سهمیه سازنده برای ${meta.shortName} تنظیم نشده است. لطفاً کلید API اختصاصی خود را در بخش «تنظیمات ارائه‌دهنده» وارد کنید.`,
         }),
   };
+}
+
+// ============================================================================
+// MULTI-TIER TASK ROUTER, PROMPT-HASH LRU CACHE & HARD COST CAP GUARD
+// ============================================================================
+
+export function parseTierRoutingFromRequest(req: Request): MultiTierRoutingConfig {
+  const raw = readHeaderString(req, 'x-ai-tier-routing');
+  if (!raw || raw.length > 8192) {
+    return {
+      ...DEFAULT_MULTI_TIER_ROUTING,
+      tiers: {
+        economy: { ...DEFAULT_MULTI_TIER_ROUTING.tiers.economy },
+        balanced: { ...DEFAULT_MULTI_TIER_ROUTING.tiers.balanced },
+        flagship: { ...DEFAULT_MULTI_TIER_ROUTING.tiers.flagship },
+      },
+      taskTierMap: { ...DEFAULT_TASK_TIER_MAP },
+    };
+  }
+
+  try {
+    const jsonStr = Buffer.from(raw, 'base64').toString('utf8');
+    const parsed = JSON.parse(jsonStr) as Partial<MultiTierRoutingConfig>;
+    const normalizeSlot = (tier: ModelTierId) => {
+      const slot = parsed.tiers?.[tier];
+      const fallback = DEFAULT_MULTI_TIER_ROUTING.tiers[tier];
+      const provider = normalizeProviderType(slot?.provider || fallback.provider);
+      const meta = AI_PROVIDER_METADATA[provider];
+      return {
+        provider,
+        baseUrl: String(slot?.baseUrl || '').trim() || meta.defaultBaseUrl,
+        apiKey: String(slot?.apiKey || '').trim(),
+        modelId: sanitizeCustomModelId(String(slot?.modelId || '')) || fallback.modelId || meta.defaultModelId,
+      };
+    };
+
+    const rawCap = parsed.hardCostCapUsd;
+    const hardCostCapUsd =
+      rawCap === null
+        ? null
+        : typeof rawCap === 'number' && Number.isFinite(rawCap) && rawCap > 0
+          ? Math.min(500, Math.max(0.05, rawCap))
+          : DEFAULT_MULTI_TIER_ROUTING.hardCostCapUsd;
+
+    return {
+      enabled: Boolean(parsed.enabled),
+      optimizationMode: normalizeTokenOptimizationMode(parsed.optimizationMode),
+      hardCostCapUsd,
+      enablePromptCaching: parsed.enablePromptCaching !== false,
+      enableResponseCache: parsed.enableResponseCache !== false,
+      enableAntiDriftGuard: parsed.enableAntiDriftGuard !== false,
+      tiers: {
+        economy: normalizeSlot('economy'),
+        balanced: normalizeSlot('balanced'),
+        flagship: normalizeSlot('flagship'),
+      },
+      taskTierMap: {
+        conflict_triage: normalizeModelTierId(parsed.taskTierMap?.conflict_triage || DEFAULT_TASK_TIER_MAP.conflict_triage),
+        outline_polish: normalizeModelTierId(parsed.taskTierMap?.outline_polish || DEFAULT_TASK_TIER_MAP.outline_polish),
+        semantic_reorder: normalizeModelTierId(parsed.taskTierMap?.semantic_reorder || DEFAULT_TASK_TIER_MAP.semantic_reorder),
+        web_grounding: normalizeModelTierId(parsed.taskTierMap?.web_grounding || DEFAULT_TASK_TIER_MAP.web_grounding),
+        editor_chat: normalizeModelTierId(parsed.taskTierMap?.editor_chat || DEFAULT_TASK_TIER_MAP.editor_chat),
+        deep_review: normalizeModelTierId(parsed.taskTierMap?.deep_review || DEFAULT_TASK_TIER_MAP.deep_review),
+        harness_author: normalizeModelTierId(parsed.taskTierMap?.harness_author || DEFAULT_TASK_TIER_MAP.harness_author),
+        harness_patch: normalizeModelTierId(parsed.taskTierMap?.harness_patch || DEFAULT_TASK_TIER_MAP.harness_patch),
+        harness_utility: normalizeModelTierId(parsed.taskTierMap?.harness_utility || DEFAULT_TASK_TIER_MAP.harness_utility),
+        harness_judge: normalizeModelTierId(parsed.taskTierMap?.harness_judge || DEFAULT_TASK_TIER_MAP.harness_judge),
+      },
+    };
+  } catch {
+    return {
+      ...DEFAULT_MULTI_TIER_ROUTING,
+      tiers: {
+        economy: { ...DEFAULT_MULTI_TIER_ROUTING.tiers.economy },
+        balanced: { ...DEFAULT_MULTI_TIER_ROUTING.tiers.balanced },
+        flagship: { ...DEFAULT_MULTI_TIER_ROUTING.tiers.flagship },
+      },
+      taskTierMap: { ...DEFAULT_TASK_TIER_MAP },
+    };
+  }
+}
+
+export interface TaskResolvedAiContext {
+  provider: ResolvedServerAiProvider;
+  googleModel: string;
+  tierUsed: ModelTierId | 'primary';
+  tierLabelFa: string;
+  optimizationMode: TokenOptimizationMode;
+  hardCostCapUsd: number | null;
+  enablePromptCaching: boolean;
+  enableResponseCache: boolean;
+  enableAntiDriftGuard: boolean;
+}
+
+const TIER_LABELS_FA: Record<ModelTierId | 'primary', string> = {
+  economy: 'سطح اقتصادی (Economy)',
+  balanced: 'سطح متعادل (Balanced)',
+  flagship: 'سطح پرچمدار (Flagship)',
+  primary: 'مدل اصلی',
+};
+
+/**
+ * Resolves the exact provider + model for a pipeline task using the user's Multi-Tier Routing
+ * configuration when enabled, or falling back seamlessly to the primary provider while preserving
+ * all token optimization, prompt caching, response caching, and anti-drift settings.
+ */
+export function resolveProviderForTaskFromRequest(
+  req: Request,
+  taskType: AiTaskType,
+  fallbackGoogleModel = 'gemini-4-hydrogen',
+  overrideTier?: ModelTierId
+): TaskResolvedAiContext {
+  const primary = resolveAiProviderFromRequest(req);
+  const routing = parseTierRoutingFromRequest(req);
+
+  if (!routing.enabled) {
+    return {
+      provider: primary,
+      googleModel: normalizeGoogleModelId(fallbackGoogleModel),
+      tierUsed: 'primary',
+      tierLabelFa: TIER_LABELS_FA.primary,
+      optimizationMode: routing.optimizationMode,
+      hardCostCapUsd: routing.hardCostCapUsd,
+      enablePromptCaching: routing.enablePromptCaching,
+      enableResponseCache: routing.enableResponseCache,
+      enableAntiDriftGuard: routing.enableAntiDriftGuard,
+    };
+  }
+
+  const tierId: ModelTierId = overrideTier || routing.taskTierMap[taskType] || DEFAULT_TASK_TIER_MAP[taskType];
+  const slot = routing.tiers[tierId];
+  const meta = AI_PROVIDER_METADATA[slot.provider];
+  const keyMode = primary.googleKeyMode;
+  const creatorApiKey = getCreatorKeyForProvider(slot.provider);
+  const personalApiKey =
+    slot.apiKey.trim() ||
+    (slot.provider === primary.provider ? primary.personalApiKey : '');
+
+  const urlCheck = validateCustomBaseUrl(slot.baseUrl || meta.defaultBaseUrl);
+  if (!urlCheck.valid || !urlCheck.normalizedUrl) {
+    return {
+      provider: {
+        provider: slot.provider,
+        googleKeyMode: keyMode,
+        apiKey: '',
+        creatorApiKey,
+        personalApiKey,
+        keySource: keyMode === 'personal' ? 'personal' : 'creator',
+        baseUrl: '',
+        hasCustomGeminiBaseUrl: false,
+        customModelId: slot.modelId || meta.defaultModelId,
+        validationError: `آدرس Base URL برای ${TIER_LABELS_FA[tierId]} نامعتبر است: ${urlCheck.error}`,
+      },
+      googleModel: slot.provider === 'google_aistudio' ? slot.modelId : normalizeGoogleModelId(fallbackGoogleModel),
+      tierUsed: tierId,
+      tierLabelFa: TIER_LABELS_FA[tierId],
+      optimizationMode: routing.optimizationMode,
+      hardCostCapUsd: routing.hardCostCapUsd,
+      enablePromptCaching: routing.enablePromptCaching,
+      enableResponseCache: routing.enableResponseCache,
+      enableAntiDriftGuard: routing.enableAntiDriftGuard,
+    };
+  }
+
+  const normalizedBaseUrl = urlCheck.normalizedUrl;
+  const defaultNorm = meta.defaultBaseUrl.replace(/\/+$/, '');
+  const hasCustomGeminiBaseUrl =
+    slot.provider === 'google_aistudio' && normalizedBaseUrl !== defaultNorm;
+
+  const resolvedGoogleModel =
+    slot.provider === 'google_aistudio'
+      ? (slot.modelId || normalizeGoogleModelId(fallbackGoogleModel))
+      : normalizeGoogleModelId(fallbackGoogleModel);
+
+  const customModelId =
+    slot.provider === 'google_aistudio' ? '' : (slot.modelId || meta.defaultModelId);
+
+  let effectiveKey = '';
+  let keySource: 'creator' | 'personal' | 'custom' = 'creator';
+  let validationError: string | undefined;
+
+  if (keyMode === 'personal') {
+    if (personalApiKey) {
+      effectiveKey = personalApiKey;
+      keySource = slot.provider === 'custom_openai' ? 'custom' : 'personal';
+    } else {
+      keySource = slot.provider === 'custom_openai' ? 'custom' : 'personal';
+      validationError = `کلید API برای ${TIER_LABELS_FA[tierId]} (${meta.shortName}) وارد نشده است.`;
+    }
+  } else {
+    const cachedHealthy = getCachedCreatorHealth(slot.provider);
+    if (creatorApiKey && cachedHealthy !== false) {
+      effectiveKey = creatorApiKey;
+      keySource = 'creator';
+    } else if (personalApiKey) {
+      effectiveKey = personalApiKey;
+      keySource = slot.provider === 'custom_openai' ? 'custom' : 'personal';
+    } else if (creatorApiKey) {
+      effectiveKey = creatorApiKey;
+      keySource = 'creator';
+    } else {
+      validationError = `کلید API برای ${TIER_LABELS_FA[tierId]} (${meta.shortName}) تنظیم نشده است. لطفاً کلید ${meta.shortName} را در تنظیمات وارد کنید.`;
+    }
+  }
+
+  return {
+    provider: {
+      provider: slot.provider,
+      googleKeyMode: keyMode,
+      apiKey: effectiveKey,
+      creatorApiKey,
+      personalApiKey,
+      keySource,
+      baseUrl: normalizedBaseUrl,
+      hasCustomGeminiBaseUrl,
+      customModelId,
+      ...(validationError ? { validationError } : {}),
+    },
+    googleModel: resolvedGoogleModel,
+    tierUsed: tierId,
+    tierLabelFa: TIER_LABELS_FA[tierId],
+    optimizationMode: routing.optimizationMode,
+    hardCostCapUsd: routing.hardCostCapUsd,
+    enablePromptCaching: routing.enablePromptCaching,
+    enableResponseCache: routing.enableResponseCache,
+    enableAntiDriftGuard: routing.enableAntiDriftGuard,
+  };
+}
+
+/**
+ * Hard Cost Cap safety gate: prevents expensive paid API keys from exceeding
+ * the user's configured per-project USD ceiling.
+ */
+export function checkHardCostCap(
+  usage: ProjectAiUsageLedger,
+  hardCostCapUsd: number | null
+): { allowed: boolean; spentUsd: number; errorMessageFa?: string } {
+  const spentUsd =
+    typeof usage.estimatedCostUsdAccumulated === 'number' &&
+    Number.isFinite(usage.estimatedCostUsdAccumulated)
+      ? usage.estimatedCostUsdAccumulated
+      : computeCallCostUsd({
+          modelId: usage.lastModelUsed || 'gemini-4-hydrogen',
+          promptTokens: usage.promptTokens,
+          outputTokens: usage.outputTokens,
+          thinkingTokens: usage.thinkingTokens,
+        });
+
+  if (hardCostCapUsd === null || !Number.isFinite(hardCostCapUsd) || hardCostCapUsd <= 0) {
+    return { allowed: true, spentUsd };
+  }
+
+  if (spentUsd >= hardCostCapUsd) {
+    return {
+      allowed: false,
+      spentUsd,
+      errorMessageFa: `سقف ایمنی هزینه این پروژه (${formatUsdClean(hardCostCapUsd)}) با مصرف تخمینی فعلی (${formatUsdClean(spentUsd)}) پر شده است. برای ادامه می‌توانید از «تنظیمات ارائه‌دهنده ← سطوح مدل و توکن» سقف هزینه را افزایش دهید یا از پردازش محلی (۰ توکن) استفاده کنید.`,
+    };
+  }
+
+  return { allowed: true, spentUsd };
+}
+
+// Bounded in-memory Prompt-Hash LRU Cache (128 entries, 30 min TTL) for idempotent tasks
+interface CachedTaskEntry {
+  text: string;
+  modelUsed: string;
+  savedPromptTokens: number;
+  expiresAtMs: number;
+}
+const AI_TASK_CACHE_MAX = 128;
+const AI_TASK_CACHE_TTL_MS = 30 * 60 * 1000;
+const aiTaskResponseCache = new Map<string, CachedTaskEntry>();
+
+export function buildAiTaskCacheKey(parts: string[]): string {
+  const hash = crypto.createHash('sha256');
+  for (const p of parts) {
+    hash.update(p);
+    hash.update('\x1f');
+  }
+  return hash.digest('hex');
+}
+
+export function getCachedAiTaskResult(key: string): CachedTaskEntry | null {
+  const entry = aiTaskResponseCache.get(key);
+  if (!entry) return null;
+  if (Date.now() > entry.expiresAtMs) {
+    aiTaskResponseCache.delete(key);
+    return null;
+  }
+  // Refresh LRU recency
+  aiTaskResponseCache.delete(key);
+  aiTaskResponseCache.set(key, entry);
+  return entry;
+}
+
+export function setCachedAiTaskResult(
+  key: string,
+  entry: Omit<CachedTaskEntry, 'expiresAtMs'>
+): void {
+  if (aiTaskResponseCache.size >= AI_TASK_CACHE_MAX) {
+    const oldestKey = aiTaskResponseCache.keys().next().value;
+    if (oldestKey) aiTaskResponseCache.delete(oldestKey);
+  }
+  aiTaskResponseCache.set(key, {
+    ...entry,
+    expiresAtMs: Date.now() + AI_TASK_CACHE_TTL_MS,
+  });
 }
 
 export function createCreatorProviderFor(provider: AiProviderType): ResolvedServerAiProvider {
@@ -443,6 +778,13 @@ export async function generateGoogleContentResilient(params: {
 export interface UnifiedGenerationResult {
   text: string;
   modelUsed: string;
+  requestedModel?: string;
+  finishReason?: string | null;
+  isTruncated?: boolean;
+  modelMismatch?: ModelMismatchEvaluation;
+  cacheTelemetryReported?: boolean;
+  cacheCreationInputTokens?: number;
+  reasoningTokens?: number;
   usageDelta: AiUsageDelta;
   rawGoogleResponse?: GenerateContentResponse;
   keySourceUsed?: 'creator' | 'personal' | 'custom';
@@ -451,12 +793,57 @@ export interface UnifiedGenerationResult {
 interface DirectChatResponse {
   text: string;
   modelUsed: string;
-  usage: { promptTokens: number; outputTokens: number; totalTokens: number };
+  requestedModel: string;
+  finishReason: string | null;
+  isTruncated: boolean;
+  modelMismatch?: ModelMismatchEvaluation;
+  cacheTelemetryReported: boolean;
+  cacheCreationInputTokens: number;
+  reasoningTokens: number;
+  usage: {
+    promptTokens: number;
+    outputTokens: number;
+    totalTokens: number;
+    cachedInputTokens?: number;
+    reasoningTokens?: number;
+  };
   headers: Headers;
 }
 
+function isTruncatedFinishReason(reason?: string | null): boolean {
+  const norm = String(reason || '').trim().toLowerCase();
+  return (
+    norm === 'length' ||
+    norm === 'max_tokens' ||
+    norm === 'max_output_tokens' ||
+    norm === 'model_context_window_exceeded'
+  );
+}
+
+function sleepMs(ms: number, abortSignal?: AbortSignal): Promise<void> {
+  if (abortSignal?.aborted) {
+    return Promise.reject(new DOMException('Aborted', 'AbortError'));
+  }
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      abortSignal?.removeEventListener('abort', onAbort);
+      resolve();
+    }, Math.max(0, ms));
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(new DOMException('Aborted', 'AbortError'));
+    };
+    abortSignal?.addEventListener('abort', onAbort, { once: true });
+  });
+}
+
 /**
- * Executes an OpenAI-compatible /chat/completions request against OpenAI or Custom providers.
+ * Executes an OpenAI-compatible /chat/completions request against OpenAI, OpenRouter, 9Router, or Custom providers.
+ * Package B Hardening:
+ * - ProviderCapabilityProfile sanitization & safe json_schema -> json_object fallback
+ * - HTML/Cloudflare upstream_gateway_error detection
+ * - Retryable (429/502/503/529 + Retry-After + Exponential Backoff + Jitter) vs Fatal (400/401/402/403)
+ * - Silent model_mismatch detection & factual cache/reasoning token extraction
  */
 export async function callCustomOpenAiChat(params: {
   provider: ResolvedServerAiProvider;
@@ -465,8 +852,14 @@ export async function callCustomOpenAiChat(params: {
   systemInstruction?: string;
   messages: Array<{ role: 'user' | 'assistant'; content: string }>;
   expectJson?: boolean;
+  jsonSchema?: Record<string, unknown> | null;
+  taskRole?: AiTaskType;
+  temperature?: number;
+  haltOnAuthorDowngrade?: boolean;
   maxTokens?: number;
   timeoutMs?: number;
+  maxRetries?: number;
+  abortSignal?: AbortSignal;
 }): Promise<DirectChatResponse> {
   const effectiveApiKey = (params.apiKeyOverride ?? params.provider.apiKey).trim();
   const effectiveBaseUrl = (params.baseUrlOverride ?? params.provider.baseUrl).trim();
@@ -488,6 +881,13 @@ export async function callCustomOpenAiChat(params: {
     ? urlCheck.normalizedUrl
     : `${urlCheck.normalizedUrl}/chat/completions`;
 
+  const requestedModel = params.provider.customModelId || 'gpt-4o-mini';
+  const profile = resolveProviderCapabilityProfile({
+    provider: params.provider.provider,
+    baseUrl: urlCheck.normalizedUrl,
+    modelId: requestedModel,
+  });
+
   const chatMessages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }> = [];
   if (params.systemInstruction) {
     chatMessages.push({ role: 'system', content: params.systemInstruction });
@@ -496,89 +896,243 @@ export async function callCustomOpenAiChat(params: {
     chatMessages.push({ role: m.role, content: m.content });
   }
 
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), params.timeoutMs ?? 90_000);
+  const maxRetries = Math.max(0, Math.min(3, params.maxRetries ?? 2));
+  const providerLabelFa =
+    profile.flavor === '9router'
+      ? '9Router'
+      : profile.flavor === 'openrouter'
+        ? 'OpenRouter'
+        : AI_PROVIDER_METADATA[params.provider.provider].shortName;
 
-  try {
-    const bodyPayload: Record<string, unknown> = {
-      model: params.provider.customModelId || 'gpt-4o-mini',
+  const executeAttempt = async (forceDowngradeJsonFormat: boolean) => {
+    const rawPayload: Record<string, unknown> = {
+      model: requestedModel,
       messages: chatMessages,
     };
-    if (params.expectJson) {
-      bodyPayload.response_format = { type: 'json_object' };
+    if (typeof params.temperature === 'number') {
+      rawPayload.temperature = params.temperature;
     }
     if (typeof params.maxTokens === 'number' && params.maxTokens > 0) {
-      bodyPayload.max_tokens = params.maxTokens;
+      if (profile.isReasoningModel && profile.flavor === 'openai') {
+        rawPayload.max_completion_tokens = params.maxTokens;
+      } else {
+        rawPayload.max_tokens = params.maxTokens;
+      }
     }
 
-    const res = await fetch(endpoint, {
-      method: 'POST',
-      redirect: 'error',
-      signal: controller.signal,
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${effectiveApiKey}`,
-      },
-      body: JSON.stringify(bodyPayload),
+    const sanitized = sanitizeOpenAiCompatiblePayload({
+      profile,
+      rawPayload,
+      expectJson: params.expectJson,
+      jsonSchema: params.jsonSchema,
+      taskRole: params.taskRole,
+      forceDowngradeJsonFormat,
     });
 
-    const rawText = await res.text();
-    let parsed: Record<string, unknown> | null = null;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), params.timeoutMs ?? 90_000);
+    const onExternalAbort = () => controller.abort();
+    if (params.abortSignal?.aborted) {
+      clearTimeout(timer);
+      throw new DOMException('Aborted', 'AbortError');
+    }
+    params.abortSignal?.addEventListener('abort', onExternalAbort, { once: true });
     try {
-      parsed = JSON.parse(rawText) as Record<string, unknown>;
-    } catch {
-      parsed = null;
+      const res = await fetch(endpoint, {
+        method: 'POST',
+        redirect: 'error',
+        signal: controller.signal,
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${effectiveApiKey}`,
+        },
+        body: JSON.stringify(sanitized.payload),
+      });
+      const rawText = await res.text();
+      const contentType = res.headers.get('content-type') || '';
+      const retryAfterHeader = res.headers.get('retry-after');
+      return { res, rawText, contentType, retryAfterHeader, responseFormatMode: sanitized.responseFormatMode };
+    } finally {
+      clearTimeout(timer);
+      params.abortSignal?.removeEventListener('abort', onExternalAbort);
     }
+  };
 
-    if (!res.ok) {
-      const apiErrObj = parsed?.error as { message?: string } | string | undefined;
-      const apiErrMsg =
-        typeof apiErrObj === 'string'
-          ? apiErrObj
-          : typeof apiErrObj?.message === 'string'
-            ? apiErrObj.message
-            : rawText.slice(0, 220);
-      const err = new Error(
-        `خطای سرویس OpenAI/سفارشی (کد ${res.status}): ${apiErrMsg || res.statusText}`
-      ) as Error & { status?: number };
-      err.status = res.status;
-      throw err;
+  let downgradeJsonFormat = false;
+  let lastError: unknown = null;
+
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    if (params.abortSignal?.aborted) {
+      throw new DOMException('Aborted', 'AbortError');
     }
+    try {
+      const { res, rawText, contentType, retryAfterHeader, responseFormatMode } =
+        await executeAttempt(downgradeJsonFormat);
 
-    const choices = Array.isArray(parsed?.choices) ? parsed.choices : [];
-    const firstChoice = choices[0] as
-      | { message?: { content?: string | Array<{ text?: string }> } }
-      | undefined;
-    const rawContent = firstChoice?.message?.content;
-    const text =
-      typeof rawContent === 'string'
-        ? rawContent
-        : Array.isArray(rawContent)
-          ? rawContent.map((p) => p?.text || '').join('')
-          : '';
+      // HTML gateway page detection (even if status is 200 or 502/504 Cloudflare error page)
+      if (isHtmlErrorPayload(contentType, rawText)) {
+        const classified = classifyProviderHttpResponse({
+          status: res.ok ? 502 : res.status,
+          contentType,
+          bodyText: rawText,
+          retryAfterHeader,
+          providerLabelFa,
+        });
+        const gwErr = new ProviderGatewayError(classified);
+        if (classified.retryable && attempt < maxRetries) {
+          await sleepMs(
+            computeRetryBackoffDelayMs({
+              attempt,
+              retryAfterMs: classified.retryAfterMs,
+            }),
+            params.abortSignal
+          );
+          lastError = gwErr;
+          continue;
+        }
+        throw gwErr;
+      }
 
-    const usageObj = (parsed?.usage || {}) as {
-      prompt_tokens?: number;
-      completion_tokens?: number;
-      total_tokens?: number;
-    };
-    const promptTokens = Number(usageObj.prompt_tokens) || 0;
-    const outputTokens = Number(usageObj.completion_tokens) || 0;
-    const totalTokens = Number(usageObj.total_tokens) || promptTokens + outputTokens;
+      let parsed: Record<string, unknown> | null = null;
+      try {
+        parsed = JSON.parse(rawText) as Record<string, unknown>;
+      } catch {
+        parsed = null;
+      }
 
-    return {
-      text: text.trim(),
-      modelUsed: String(parsed?.model || params.provider.customModelId || 'gpt-4o-mini'),
-      usage: { promptTokens, outputTokens, totalTokens },
-      headers: res.headers,
-    };
-  } finally {
-    clearTimeout(timer);
+      if (!res.ok) {
+        // Automatic safe fallback if custom router (9Router/OpenRouter) rejects response_format with 400
+        if (
+          res.status === 400 &&
+          params.expectJson &&
+          responseFormatMode !== 'none' &&
+          !downgradeJsonFormat &&
+          /response_format|json_schema|json_object|unsupported/i.test(rawText)
+        ) {
+          downgradeJsonFormat = true;
+          continue;
+        }
+
+        const classified = classifyProviderHttpResponse({
+          status: res.status,
+          contentType,
+          bodyText: rawText,
+          retryAfterHeader,
+          providerLabelFa,
+        });
+        const gwErr = new ProviderGatewayError(classified);
+        if (classified.retryable && attempt < maxRetries) {
+          await sleepMs(
+            computeRetryBackoffDelayMs({
+              attempt,
+              retryAfterMs: classified.retryAfterMs,
+            }),
+            params.abortSignal
+          );
+          lastError = gwErr;
+          continue;
+        }
+        throw gwErr;
+      }
+
+      if (!parsed) {
+        throw new ProviderGatewayError({
+          category: 'upstream_gateway_error',
+          code: 'upstream_gateway_error',
+          status: 502,
+          retryable: false,
+          retryAfterMs: null,
+          neverEnterPatchLoop: true,
+          messageFa: `[upstream_gateway_error] پاسخ درگاه ${providerLabelFa} قالب JSON معتبر نداشت و متوقف شد.`,
+        });
+      }
+
+      const choices = Array.isArray(parsed.choices) ? parsed.choices : [];
+      const firstChoice = choices[0] as
+        | { finish_reason?: string | null; message?: { content?: string | Array<{ text?: string }> } }
+        | undefined;
+      const finishReason =
+        typeof firstChoice?.finish_reason === 'string' ? firstChoice.finish_reason : null;
+      const rawContent = firstChoice?.message?.content;
+      const text =
+        typeof rawContent === 'string'
+          ? rawContent
+          : Array.isArray(rawContent)
+            ? rawContent.map((p) => p?.text || '').join('')
+            : '';
+
+      const usageObj = (parsed.usage || {}) as Record<string, unknown>;
+      const promptTokens = Number(usageObj.prompt_tokens) || 0;
+      const outputTokens = Number(usageObj.completion_tokens) || 0;
+      const totalTokens = Number(usageObj.total_tokens) || promptTokens + outputTokens;
+
+      const cacheTelemetry = extractRealCacheTelemetry(usageObj);
+      const reasoningTokens = extractRealReasoningTokens(usageObj);
+      const actualModel = String(parsed.model || requestedModel).trim() || requestedModel;
+
+      const modelMismatch = evaluateModelMismatch({
+        requestedModel,
+        actualModel,
+        taskRole: params.taskRole,
+        haltOnAuthorDowngrade: params.haltOnAuthorDowngrade,
+      });
+
+      if (modelMismatch.shouldHalt) {
+        throw new ProviderGatewayError({
+          category: 'fatal',
+          code: 'model_mismatch_downgrade',
+          status: 409,
+          retryable: false,
+          retryAfterMs: null,
+          neverEnterPatchLoop: true,
+          messageFa:
+            modelMismatch.warningFa ||
+            `[model_mismatch] افت رده غیرمجاز مدل در نقش harness_author (${requestedModel} -> ${actualModel}).`,
+        });
+      }
+
+      return {
+        text: text.trim(),
+        modelUsed: actualModel,
+        requestedModel,
+        finishReason,
+        isTruncated: isTruncatedFinishReason(finishReason),
+        modelMismatch,
+        cacheTelemetryReported: cacheTelemetry.cacheTelemetryReported,
+        cacheCreationInputTokens: cacheTelemetry.cacheCreationInputTokens,
+        reasoningTokens,
+        usage: {
+          promptTokens,
+          outputTokens,
+          totalTokens,
+          cachedInputTokens: cacheTelemetry.cachedInputTokens,
+          reasoningTokens,
+        },
+        headers: res.headers,
+      };
+    } catch (err) {
+      if (params.abortSignal?.aborted) {
+        throw err;
+      }
+      if (err instanceof ProviderGatewayError && !err.retryable) {
+        throw err;
+      }
+      lastError = err;
+      if (attempt >= maxRetries) {
+        throw err;
+      }
+    }
   }
+
+  throw lastError instanceof Error ? lastError : new Error('خطا در ارتباط با ارائه‌دهنده OpenAI/سفارشی.');
 }
 
 /**
  * Executes a native Anthropic Claude Messages API request (/messages) with editable HTTPS Base URL.
+ * Package B Hardening:
+ * - Honors ProviderCapabilityProfile minCachePrefixTokens (1024 / 2048) before sending cache_control
+ * - HTML/Cloudflare upstream_gateway_error detection & Retryable vs Fatal classification
+ * - Silent model_mismatch detection & factual cache/reasoning telemetry
  */
 export async function callAnthropicMessages(params: {
   provider: ResolvedServerAiProvider;
@@ -587,8 +1141,13 @@ export async function callAnthropicMessages(params: {
   systemInstruction?: string;
   messages: Array<{ role: 'user' | 'assistant'; content: string }>;
   expectJson?: boolean;
+  taskRole?: AiTaskType;
+  haltOnAuthorDowngrade?: boolean;
   maxTokens?: number;
   timeoutMs?: number;
+  enablePromptCaching?: boolean;
+  maxRetries?: number;
+  abortSignal?: AbortSignal;
 }): Promise<DirectChatResponse> {
   const effectiveApiKey = (params.apiKeyOverride ?? params.provider.apiKey).trim();
   const effectiveBaseUrl = (params.baseUrlOverride ?? params.provider.baseUrl).trim();
@@ -610,91 +1169,226 @@ export async function callAnthropicMessages(params: {
     ? urlCheck.normalizedUrl
     : `${urlCheck.normalizedUrl}/messages`;
 
+  const requestedModel =
+    params.provider.customModelId || AI_PROVIDER_METADATA.anthropic.defaultModelId;
+  const profile = resolveProviderCapabilityProfile({
+    provider: params.provider.provider,
+    baseUrl: urlCheck.normalizedUrl,
+    modelId: requestedModel,
+  });
+
   const systemParts: string[] = [];
   if (params.systemInstruction) systemParts.push(params.systemInstruction);
   if (params.expectJson) {
     systemParts.push('پاسخ را منحصراً به صورت JSON معتبر بدون توضیح اضافه برگردان.');
   }
+  const combinedSystem = systemParts.join('\n\n');
+  const estimatedSystemTokens = estimatePersianTokensConservative(combinedSystem);
+  const shouldUseCacheControl =
+    params.enablePromptCaching !== false &&
+    profile.supportsAnthropicCacheControl &&
+    estimatedSystemTokens >= profile.minCachePrefixTokens;
 
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), params.timeoutMs ?? 90_000);
+  const maxRetries = Math.max(0, Math.min(3, params.maxRetries ?? 2));
+  let useStructuredCacheSystem = shouldUseCacheControl;
+  let lastError: unknown = null;
 
-  try {
+  const sendRequest = async (withCacheControl: boolean) => {
     const bodyPayload: Record<string, unknown> = {
-      model: params.provider.customModelId || AI_PROVIDER_METADATA.anthropic.defaultModelId,
+      model: requestedModel,
       max_tokens: params.maxTokens && params.maxTokens > 0 ? params.maxTokens : 4096,
       messages: params.messages.map((m) => ({
         role: m.role,
         content: m.content,
       })),
     };
-    if (systemParts.length > 0) {
-      bodyPayload.system = systemParts.join('\n\n');
+    if (combinedSystem) {
+      bodyPayload.system = withCacheControl
+        ? [{ type: 'text', text: combinedSystem, cache_control: { type: 'ephemeral' } }]
+        : combinedSystem;
     }
 
-    const res = await fetch(endpoint, {
-      method: 'POST',
-      redirect: 'error',
-      signal: controller.signal,
-      headers: {
-        'Content-Type': 'application/json',
-        'x-api-key': effectiveApiKey,
-        'anthropic-version': '2023-06-01',
-      },
-      body: JSON.stringify(bodyPayload),
-    });
-
-    const rawText = await res.text();
-    let parsed: Record<string, unknown> | null = null;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), params.timeoutMs ?? 90_000);
+    const onExternalAbort = () => controller.abort();
+    if (params.abortSignal?.aborted) {
+      clearTimeout(timer);
+      throw new DOMException('Aborted', 'AbortError');
+    }
+    params.abortSignal?.addEventListener('abort', onExternalAbort, { once: true });
     try {
-      parsed = JSON.parse(rawText) as Record<string, unknown>;
-    } catch {
-      parsed = null;
+      const res = await fetch(endpoint, {
+        method: 'POST',
+        redirect: 'error',
+        signal: controller.signal,
+        headers: {
+          'Content-Type': 'application/json',
+          'x-api-key': effectiveApiKey,
+          'anthropic-version': '2023-06-01',
+        },
+        body: JSON.stringify(bodyPayload),
+      });
+
+      const rawText = await res.text();
+      const contentType = res.headers.get('content-type') || '';
+      const retryAfterHeader = res.headers.get('retry-after');
+      return { res, rawText, contentType, retryAfterHeader };
+    } finally {
+      clearTimeout(timer);
+      params.abortSignal?.removeEventListener('abort', onExternalAbort);
     }
+  };
 
-    if (!res.ok) {
-      const apiErrObj = parsed?.error as { message?: string } | string | undefined;
-      const apiErrMsg =
-        typeof apiErrObj === 'string'
-          ? apiErrObj
-          : typeof apiErrObj?.message === 'string'
-            ? apiErrObj.message
-            : rawText.slice(0, 220);
-      const err = new Error(
-        `خطای سرویس Anthropic (کد ${res.status}): ${apiErrMsg || res.statusText}`
-      ) as Error & { status?: number };
-      err.status = res.status;
-      throw err;
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    if (params.abortSignal?.aborted) {
+      throw new DOMException('Aborted', 'AbortError');
     }
+    try {
+      const { res, rawText, contentType, retryAfterHeader } = await sendRequest(
+        useStructuredCacheSystem
+      );
 
-    const contentBlocks = Array.isArray(parsed?.content)
-      ? (parsed.content as Array<{ type?: string; text?: string }>)
-      : [];
-    const text = contentBlocks
-      .filter((b) => b.type === 'text' && typeof b.text === 'string')
-      .map((b) => b.text)
-      .join('');
+      if (isHtmlErrorPayload(contentType, rawText)) {
+        const classified = classifyProviderHttpResponse({
+          status: res.ok ? 502 : res.status,
+          contentType,
+          bodyText: rawText,
+          retryAfterHeader,
+          providerLabelFa: 'Anthropic Claude',
+        });
+        const gwErr = new ProviderGatewayError(classified);
+        if (classified.retryable && attempt < maxRetries) {
+          await sleepMs(
+            computeRetryBackoffDelayMs({ attempt, retryAfterMs: classified.retryAfterMs }),
+            params.abortSignal
+          );
+          lastError = gwErr;
+          continue;
+        }
+        throw gwErr;
+      }
 
-    const usageObj = (parsed?.usage || {}) as {
-      input_tokens?: number;
-      output_tokens?: number;
-    };
-    const promptTokens = Number(usageObj.input_tokens) || 0;
-    const outputTokens = Number(usageObj.output_tokens) || 0;
+      let parsed: Record<string, unknown> | null = null;
+      try {
+        parsed = JSON.parse(rawText) as Record<string, unknown>;
+      } catch {
+        parsed = null;
+      }
 
-    return {
-      text: text.trim(),
-      modelUsed: String(parsed?.model || params.provider.customModelId || 'claude-3-7-sonnet'),
-      usage: {
-        promptTokens,
-        outputTokens,
-        totalTokens: promptTokens + outputTokens,
-      },
-      headers: res.headers,
-    };
-  } finally {
-    clearTimeout(timer);
+      // Graceful automatic fallback if a third-party Anthropic proxy rejects array system blocks
+      if (!res.ok && res.status === 400 && useStructuredCacheSystem) {
+        useStructuredCacheSystem = false;
+        continue;
+      }
+
+      if (!res.ok) {
+        const classified = classifyProviderHttpResponse({
+          status: res.status,
+          contentType,
+          bodyText: rawText,
+          retryAfterHeader,
+          providerLabelFa: 'Anthropic Claude',
+        });
+        const gwErr = new ProviderGatewayError(classified);
+        if (classified.retryable && attempt < maxRetries) {
+          await sleepMs(
+            computeRetryBackoffDelayMs({ attempt, retryAfterMs: classified.retryAfterMs }),
+            params.abortSignal
+          );
+          lastError = gwErr;
+          continue;
+        }
+        throw gwErr;
+      }
+
+      if (!parsed) {
+        throw new ProviderGatewayError({
+          category: 'upstream_gateway_error',
+          code: 'upstream_gateway_error',
+          status: 502,
+          retryable: false,
+          retryAfterMs: null,
+          neverEnterPatchLoop: true,
+          messageFa: '[upstream_gateway_error] پاسخ درگاه Anthropic قالب JSON معتبر نداشت.',
+        });
+      }
+
+      const contentBlocks = Array.isArray(parsed.content)
+        ? (parsed.content as Array<{ type?: string; text?: string }>)
+        : [];
+      const text = contentBlocks
+        .filter((b) => b.type === 'text' && typeof b.text === 'string')
+        .map((b) => b.text)
+        .join('');
+
+      const usageObj = (parsed.usage || {}) as Record<string, unknown>;
+      const cacheTelemetry = extractRealCacheTelemetry(usageObj);
+      const reasoningTokens = extractRealReasoningTokens(usageObj);
+      const promptTokens =
+        (Number(usageObj.input_tokens) || 0) +
+        cacheTelemetry.cachedInputTokens +
+        cacheTelemetry.cacheCreationInputTokens;
+      const outputTokens = Number(usageObj.output_tokens) || 0;
+      const actualModel = String(parsed.model || requestedModel).trim() || requestedModel;
+
+      const modelMismatch = evaluateModelMismatch({
+        requestedModel,
+        actualModel,
+        taskRole: params.taskRole,
+        haltOnAuthorDowngrade: params.haltOnAuthorDowngrade,
+      });
+
+      if (modelMismatch.shouldHalt) {
+        throw new ProviderGatewayError({
+          category: 'fatal',
+          code: 'model_mismatch_downgrade',
+          status: 409,
+          retryable: false,
+          retryAfterMs: null,
+          neverEnterPatchLoop: true,
+          messageFa:
+            modelMismatch.warningFa ||
+            `[model_mismatch] افت رده غیرمجاز مدل در نقش harness_author (${requestedModel} -> ${actualModel}).`,
+        });
+      }
+
+      const finishReason =
+        typeof parsed.stop_reason === 'string' ? parsed.stop_reason : null;
+
+      return {
+        text: text.trim(),
+        modelUsed: actualModel,
+        requestedModel,
+        finishReason,
+        isTruncated: isTruncatedFinishReason(finishReason),
+        modelMismatch,
+        cacheTelemetryReported: cacheTelemetry.cacheTelemetryReported,
+        cacheCreationInputTokens: cacheTelemetry.cacheCreationInputTokens,
+        reasoningTokens,
+        usage: {
+          promptTokens,
+          outputTokens,
+          totalTokens: promptTokens + outputTokens,
+          cachedInputTokens: cacheTelemetry.cachedInputTokens,
+          reasoningTokens,
+        },
+        headers: res.headers,
+      };
+    } catch (err) {
+      if (params.abortSignal?.aborted) {
+        throw err;
+      }
+      if (err instanceof ProviderGatewayError && !err.retryable) {
+        throw err;
+      }
+      lastError = err;
+      if (attempt >= maxRetries) {
+        throw err;
+      }
+    }
   }
+
+  throw lastError instanceof Error ? lastError : new Error('خطا در ارتباط با سرویس Anthropic.');
 }
 
 /**
@@ -706,8 +1400,14 @@ export async function callNonGoogleChatWithFallback(params: {
   systemInstruction?: string;
   messages: Array<{ role: 'user' | 'assistant'; content: string }>;
   expectJson?: boolean;
+  jsonSchema?: Record<string, unknown> | null;
+  taskRole?: AiTaskType;
+  temperature?: number;
+  haltOnAuthorDowngrade?: boolean;
   maxTokens?: number;
   timeoutMs?: number;
+  enablePromptCaching?: boolean;
+  abortSignal?: AbortSignal;
 }): Promise<DirectChatResponse & { keySourceUsed: 'creator' | 'personal' | 'custom' }> {
   const invoke = (apiKeyOverride?: string, baseUrlOverride?: string) =>
     params.provider.provider === 'anthropic'
@@ -718,8 +1418,12 @@ export async function callNonGoogleChatWithFallback(params: {
           systemInstruction: params.systemInstruction,
           messages: params.messages,
           expectJson: params.expectJson,
+          taskRole: params.taskRole,
+          haltOnAuthorDowngrade: params.haltOnAuthorDowngrade,
           maxTokens: params.maxTokens,
           timeoutMs: params.timeoutMs,
+          enablePromptCaching: params.enablePromptCaching,
+          abortSignal: params.abortSignal,
         })
       : callCustomOpenAiChat({
           provider: params.provider,
@@ -728,8 +1432,13 @@ export async function callNonGoogleChatWithFallback(params: {
           systemInstruction: params.systemInstruction,
           messages: params.messages,
           expectJson: params.expectJson,
+          jsonSchema: params.jsonSchema,
+          taskRole: params.taskRole,
+          temperature: params.temperature,
+          haltOnAuthorDowngrade: params.haltOnAuthorDowngrade,
           maxTokens: params.maxTokens,
           timeoutMs: params.timeoutMs,
+          abortSignal: params.abortSignal,
         });
 
   if (
@@ -841,34 +1550,60 @@ export async function generateUnifiedTextOrJson(params: {
   provider: ResolvedServerAiProvider;
   googleModel: string;
   thinkingLevel?: ThinkingLevel;
+  taskRole?: AiTaskType;
+  haltOnAuthorDowngrade?: boolean;
   systemInstruction?: string;
   prompt: string;
   expectJson?: boolean;
   googleResponseSchema?: unknown;
+  jsonSchema?: Record<string, unknown> | null;
+  enablePromptCaching?: boolean;
+  abortSignal?: AbortSignal;
+  savedTokensByOptimization?: number;
   usageFlags?: { isGrounding?: boolean; isDeepReview?: boolean; isChat?: boolean };
 }): Promise<UnifiedGenerationResult> {
+  if (params.abortSignal?.aborted) {
+    throw new DOMException('Aborted', 'AbortError');
+  }
+
   if (isNonGoogleProvider(params.provider)) {
     const out = await callNonGoogleChatWithFallback({
       provider: params.provider,
       systemInstruction: params.systemInstruction,
       messages: [{ role: 'user', content: params.prompt }],
       expectJson: params.expectJson,
+      jsonSchema: params.jsonSchema,
+      taskRole: params.taskRole,
+      haltOnAuthorDowngrade: params.haltOnAuthorDowngrade,
+      enablePromptCaching: params.enablePromptCaching,
+      abortSignal: params.abortSignal,
     });
-    const fallbackPrompt = Math.ceil(
-      ((params.systemInstruction?.length || 0) + params.prompt.length) / 3
+    const fallbackPrompt = estimatePersianTokensConservative(
+      `${params.systemInstruction || ''}\n${params.prompt}`
     );
-    const fallbackOutput = Math.ceil(out.text.length / 3);
+    const fallbackOutput = estimatePersianTokensConservative(out.text);
     const promptTokens = out.usage.promptTokens > 0 ? out.usage.promptTokens : fallbackPrompt;
     const outputTokens = out.usage.outputTokens > 0 ? out.usage.outputTokens : fallbackOutput;
+    const reasoningTokens = out.reasoningTokens || 0;
+    const cachedTokens = out.cacheTelemetryReported ? out.usage.cachedInputTokens || 0 : 0;
     return {
       text: out.text,
       modelUsed: out.modelUsed,
+      requestedModel: out.requestedModel,
+      finishReason: out.finishReason,
+      isTruncated: out.isTruncated,
+      modelMismatch: out.modelMismatch,
+      cacheTelemetryReported: out.cacheTelemetryReported,
+      cacheCreationInputTokens: out.cacheCreationInputTokens,
+      reasoningTokens,
       keySourceUsed: out.keySourceUsed,
       usageDelta: {
         promptTokens,
         outputTokens,
-        thinkingTokens: 0,
+        thinkingTokens: reasoningTokens,
         totalTokens: out.usage.totalTokens > 0 ? out.usage.totalTokens : promptTokens + outputTokens,
+        cachedInputTokens: cachedTokens,
+        savedTokensByOptimization: (params.savedTokensByOptimization || 0) + cachedTokens,
         requestCount: 1,
         groundingCallCount: params.usageFlags?.isGrounding ? 1 : 0,
         deepReviewCount: params.usageFlags?.isDeepReview ? 1 : 0,
@@ -882,18 +1617,25 @@ export async function generateUnifiedTextOrJson(params: {
   if (params.systemInstruction) config.systemInstruction = params.systemInstruction;
   if (params.expectJson) config.responseMimeType = 'application/json';
   if (params.googleResponseSchema) config.responseSchema = params.googleResponseSchema;
-  if (params.thinkingLevel) {
+
+  // Enforce per-role thinking cap so utility/judge never burn excessive reasoning tokens
+  const roleCap = resolveRoleReasoningCap(params.taskRole);
+  const requestedLevel = params.taskRole
+    ? roleCap.googleThinkingLevel
+    : params.thinkingLevel;
+  if (requestedLevel) {
     config.thinkingConfig = {
-      thinkingLevel: resolveThinkingLevelForGoogleModel(params.googleModel, params.thinkingLevel),
+      thinkingLevel: resolveThinkingLevelForGoogleModel(params.googleModel, requestedLevel),
     };
   }
 
+  const requestedGoogleModel = normalizeGoogleModelId(params.googleModel);
   const { result, keySourceUsed } = await executeWithGoogleClientFallback(
     params.provider,
     async (ai) =>
       generateGoogleContentResilient({
         ai,
-        model: params.googleModel,
+        model: requestedGoogleModel,
         contents: params.prompt,
         config,
       })
@@ -901,34 +1643,56 @@ export async function generateUnifiedTextOrJson(params: {
 
   const { response, resolvedModel } = result;
   const text = (response.text || '').trim();
-  const meta = response.usageMetadata;
+  const googleFinishReason =
+    typeof response.candidates?.[0]?.finishReason === 'string'
+      ? response.candidates[0].finishReason
+      : null;
+  const meta = (response.usageMetadata || {}) as Record<string, unknown>;
+  const cacheTelemetry = extractRealCacheTelemetry(meta);
+  const reasoningTokens = extractRealReasoningTokens(meta);
+
   const promptTokens =
-    typeof meta?.promptTokenCount === 'number' && meta.promptTokenCount > 0
+    typeof meta.promptTokenCount === 'number' && meta.promptTokenCount > 0
       ? meta.promptTokenCount
-      : Math.ceil(((params.systemInstruction?.length || 0) + params.prompt.length) / 3);
+      : estimatePersianTokensConservative(`${params.systemInstruction || ''}\n${params.prompt}`);
   const outputTokens =
-    typeof meta?.candidatesTokenCount === 'number' && meta.candidatesTokenCount > 0
+    typeof meta.candidatesTokenCount === 'number' && meta.candidatesTokenCount > 0
       ? meta.candidatesTokenCount
-      : Math.ceil(text.length / 3);
-  const thinkingTokens =
-    typeof meta?.thoughtsTokenCount === 'number' && meta.thoughtsTokenCount > 0
-      ? meta.thoughtsTokenCount
-      : 0;
+      : estimatePersianTokensConservative(text);
+  const cachedInputTokens = cacheTelemetry.cacheTelemetryReported
+    ? cacheTelemetry.cachedInputTokens
+    : 0;
   const totalTokens =
-    typeof meta?.totalTokenCount === 'number' && meta.totalTokenCount > 0
+    typeof meta.totalTokenCount === 'number' && meta.totalTokenCount > 0
       ? meta.totalTokenCount
-      : promptTokens + outputTokens + thinkingTokens;
+      : promptTokens + outputTokens + reasoningTokens;
+
+  const modelMismatch = evaluateModelMismatch({
+    requestedModel: requestedGoogleModel,
+    actualModel: resolvedModel,
+    taskRole: params.taskRole,
+    haltOnAuthorDowngrade: params.haltOnAuthorDowngrade,
+  });
 
   return {
     text,
     modelUsed: resolvedModel,
+    requestedModel: requestedGoogleModel,
+    finishReason: googleFinishReason,
+    isTruncated: isTruncatedFinishReason(googleFinishReason),
+    modelMismatch,
+    cacheTelemetryReported: cacheTelemetry.cacheTelemetryReported,
+    cacheCreationInputTokens: 0,
+    reasoningTokens,
     rawGoogleResponse: response,
     keySourceUsed,
     usageDelta: {
       promptTokens,
       outputTokens,
-      thinkingTokens,
+      thinkingTokens: reasoningTokens,
       totalTokens,
+      cachedInputTokens,
+      savedTokensByOptimization: (params.savedTokensByOptimization || 0) + cachedInputTokens,
       requestCount: 1,
       groundingCallCount: params.usageFlags?.isGrounding ? 1 : 0,
       deepReviewCount: params.usageFlags?.isDeepReview ? 1 : 0,

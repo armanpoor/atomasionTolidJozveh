@@ -5,6 +5,8 @@ import {
   CheckCircle2,
   Cloud,
   CloudOff,
+  Eye,
+  EyeOff,
   Globe,
   GripVertical,
   History,
@@ -15,7 +17,11 @@ import {
   Sparkles,
   Trash2,
 } from 'lucide-react';
-import { OutlineNodeDto } from '../lib/bookTypes';
+import {
+  ContentUnitDto,
+  OutlineNodeDto,
+  SourceFileDto,
+} from '../lib/bookTypes';
 import { toPersianDigits } from '../lib/formatParsers';
 import {
   clearOutlineDraft,
@@ -27,6 +33,9 @@ import {
   saveOutlineDraft,
 } from '../lib/outlineAutoSave';
 import { DeepReviewProgressBanner, DeepReviewProgressState } from './DeepReviewPanel';
+import { Stage3LiveTextPreviewPanel } from './Stage3LiveTextPreviewPanel';
+import { HarnessControlPanel } from './HarnessControlPanel';
+import type { UseHarnessRunnerResult } from '../hooks/useHarnessRunner';
 
 type AutoSaveStatus =
   | 'idle'
@@ -37,8 +46,12 @@ type AutoSaveStatus =
 
 interface OutlineEditorViewProps {
   projectId: string;
+  projectTitle: string;
   nodes: OutlineNodeDto[];
+  contentUnits: ContentUnitDto[];
+  sourceFiles: SourceFileDto[];
   unitCountsByNode: Record<string, number>;
+  highlightedNodeId?: string | null;
   saving: boolean;
   finalizing: boolean;
   groundingNodeId: string | null;
@@ -54,12 +67,18 @@ interface OutlineEditorViewProps {
   onEnrichNodeWithGoogle: (nodeId: string) => Promise<void>;
   onEnrichAllWithGoogle: () => Promise<void>;
   onRunDeepReview: () => Promise<void>;
+  harness?: UseHarnessRunnerResult;
+  onOpenProviderSettings?: () => void;
 }
 
 export const OutlineEditorView: React.FC<OutlineEditorViewProps> = ({
   projectId,
+  projectTitle,
   nodes,
+  contentUnits,
+  sourceFiles,
   unitCountsByNode,
+  highlightedNodeId = null,
   saving,
   finalizing,
   groundingNodeId,
@@ -71,6 +90,8 @@ export const OutlineEditorView: React.FC<OutlineEditorViewProps> = ({
   onEnrichNodeWithGoogle,
   onEnrichAllWithGoogle: _onEnrichAllWithGoogle,
   onRunDeepReview: _onRunDeepReview,
+  harness,
+  onOpenProviderSettings,
 }) => {
   const [draft, setDraft] = useState<OutlineNodeDto[]>(() =>
     [...nodes].sort((a, b) => a.nodeOrder - b.nodeOrder)
@@ -78,6 +99,14 @@ export const OutlineEditorView: React.FC<OutlineEditorViewProps> = ({
   const [dragIdx, setDragIdx] = useState<number | null>(null);
   const [pendingReassignments, setPendingReassignments] = useState<OutlineReassignment[]>([]);
   const [dirty, setDirty] = useState(false);
+  const [showLivePreview, setShowLivePreview] = useState(true);
+  const [focusedNodeId, setFocusedNodeId] = useState<string | null>(highlightedNodeId);
+
+  useEffect(() => {
+    if (highlightedNodeId) {
+      setFocusedNodeId(highlightedNodeId);
+    }
+  }, [highlightedNodeId]);
 
   // Auto-Save & Crash/Offline Recovery state
   const [autoSaveStatus, setAutoSaveStatus] = useState<AutoSaveStatus>('idle');
@@ -324,7 +353,11 @@ export const OutlineEditorView: React.FC<OutlineEditorViewProps> = ({
   const formattedTime = lastSavedAt ? formatTimeFa(lastSavedAt) : '';
 
   return (
-    <div className="mx-auto max-w-4xl px-4 py-6 sm:px-8 space-y-6">
+    <div
+      className={`mx-auto px-4 py-6 sm:px-8 space-y-6 ${
+        showLivePreview ? 'max-w-7xl' : 'max-w-4xl'
+      }`}
+    >
       <div className="flex flex-wrap items-start justify-between gap-4 border-b border-[#E2DDD3] pb-4">
         <div className="space-y-1">
           <p className="text-xs font-bold text-[#1E3A5F]">
@@ -380,8 +413,26 @@ export const OutlineEditorView: React.FC<OutlineEditorViewProps> = ({
         <div className="flex flex-wrap items-center gap-2">
           <button
             type="button"
+            onClick={() => setShowLivePreview((v) => !v)}
+            aria-pressed={showLivePreview}
+            className={`inline-flex min-h-[40px] items-center gap-1.5 rounded-lg border px-3.5 py-2 text-xs font-bold transition-colors cursor-pointer whitespace-nowrap ${
+              showLivePreview
+                ? 'border-[#1E3A5F] bg-[#EEF3F8] text-[#1E3A5F]'
+                : 'border-[#D6D0C4] bg-white text-[#44403C] hover:bg-[#F5F3EE]'
+            }`}
+          >
+            {showLivePreview ? (
+              <EyeOff className="h-4 w-4" />
+            ) : (
+              <Eye className="h-4 w-4 text-[#1E3A5F]" />
+            )}
+            <span>{showLivePreview ? 'بستن پیش‌نمایش آنی' : 'نمایش پیش‌نمایش آنی'}</span>
+          </button>
+
+          <button
+            type="button"
             onClick={handleAddChapter}
-            className="inline-flex min-h-[40px] items-center gap-1.5 rounded-lg border border-[#D6D0C4] bg-white px-3.5 py-2 text-xs font-semibold text-[#1A1816] hover:bg-[#F5F3EE] cursor-pointer"
+            className="inline-flex min-h-[40px] items-center gap-1.5 rounded-lg border border-[#D6D0C4] bg-white px-3.5 py-2 text-xs font-semibold text-[#1A1816] hover:bg-[#F5F3EE] cursor-pointer whitespace-nowrap"
           >
             <Plus className="h-4 w-4 text-[#1E3A5F]" />
             افزودن فصل جدید
@@ -392,7 +443,7 @@ export const OutlineEditorView: React.FC<OutlineEditorViewProps> = ({
               type="button"
               onClick={handleManualSave}
               disabled={saving || autoSaveStatus === 'syncing_cloud'}
-              className="inline-flex min-h-[40px] items-center gap-1.5 rounded-lg border border-[#1E3A5F] bg-[#EEF3F8] px-3.5 py-2 text-xs font-semibold text-[#1E3A5F] hover:bg-[#E1EBF5] disabled:opacity-60 cursor-pointer"
+              className="inline-flex min-h-[40px] items-center gap-1.5 rounded-lg border border-[#1E3A5F] bg-[#EEF3F8] px-3.5 py-2 text-xs font-semibold text-[#1E3A5F] hover:bg-[#E1EBF5] disabled:opacity-60 cursor-pointer whitespace-nowrap"
             >
               {saving || autoSaveStatus === 'syncing_cloud' ? (
                 <Loader2 className="h-3.5 w-3.5 animate-spin" />
@@ -447,32 +498,55 @@ export const OutlineEditorView: React.FC<OutlineEditorViewProps> = ({
         <DeepReviewProgressBanner progress={deepReviewProgress} variant="card" />
       )}
 
-      {/* Draggable Outline List */}
-      <ul className="space-y-2.5">
-        {draft.map((node, idx) => {
-          const unitCount = unitCountsByNode[node.id] ?? 0;
-          const isGrounding = groundingNodeId === node.id;
+      {/* Domain-Specific AI Harness: Stage 3 HITL Gate, Cost Preview, Live Stepper & Quarantine Queue */}
+      {harness && (
+        <HarnessControlPanel
+          harness={harness}
+          onOpenProviderSettings={onOpenProviderSettings}
+        />
+      )}
 
-          return (
-            <li
-              key={node.id}
-              draggable
-              onDragStart={() => setDragIdx(idx)}
-              onDragOver={(e) => {
-                e.preventDefault();
-              }}
-              onDrop={() => {
-                if (dragIdx !== null) {
-                  reorder(dragIdx, idx);
-                }
-                setDragIdx(null);
-              }}
-              className={`rounded-xl border bg-white p-3.5 sm:p-4 transition-colors ${
-                dragIdx === idx
-                  ? 'border-[#1E3A5F] bg-[#F2F6FA] opacity-80'
-                  : 'border-[#E2DDD3] hover:border-[#C5BEB0]'
-              }`}
-            >
+      {/* Main 2-Column Split: Chapter Organizer + Instant Live Text Preview */}
+      <div
+        className={
+          showLivePreview
+            ? 'grid grid-cols-1 xl:grid-cols-12 gap-6 items-start'
+            : 'space-y-6'
+        }
+      >
+        <div className={showLivePreview ? 'xl:col-span-7 space-y-6 min-w-0' : 'space-y-6'}>
+          {/* Draggable Outline List */}
+          <ul className="space-y-2.5">
+            {draft.map((node, idx) => {
+              const unitCount = unitCountsByNode[node.id] ?? 0;
+              const isGrounding = groundingNodeId === node.id;
+              const isFocused = focusedNodeId === node.id;
+
+              return (
+                <li
+                  key={node.id}
+                  draggable
+                  onDragStart={() => {
+                    setDragIdx(idx);
+                    setFocusedNodeId(node.id);
+                  }}
+                  onDragOver={(e) => {
+                    e.preventDefault();
+                  }}
+                  onDrop={() => {
+                    if (dragIdx !== null) {
+                      reorder(dragIdx, idx);
+                    }
+                    setDragIdx(null);
+                  }}
+                  className={`rounded-xl border bg-white p-3.5 sm:p-4 transition-colors ${
+                    dragIdx === idx
+                      ? 'border-[#1E3A5F] bg-[#F2F6FA] opacity-80'
+                      : isFocused
+                        ? 'border-[#1E3A5F] bg-[#FCFDFE]'
+                        : 'border-[#E2DDD3] hover:border-[#C5BEB0]'
+                  }`}
+                >
               <div className="flex flex-col sm:flex-row sm:items-center gap-3">
                 <div className="flex items-center gap-2.5 flex-1 min-w-0">
                   <span
@@ -490,6 +564,7 @@ export const OutlineEditorView: React.FC<OutlineEditorViewProps> = ({
                     <input
                       type="text"
                       value={node.title}
+                      onFocus={() => setFocusedNodeId(node.id)}
                       onChange={(e) => handleRename(node.id, e.target.value)}
                       aria-label={`عنوان فصل ${idx + 1}`}
                       className="w-full rounded-md border border-transparent bg-transparent px-1.5 py-1 text-sm font-bold text-[#1A1816] hover:border-[#E2DDD3] focus:border-[#1E3A5F] focus:bg-[#FAF9F6] focus:outline-none"
@@ -598,6 +673,22 @@ export const OutlineEditorView: React.FC<OutlineEditorViewProps> = ({
             </>
           )}
         </button>
+      </div>
+        </div>
+
+        {showLivePreview && (
+          <div className="xl:col-span-5 min-w-0">
+            <Stage3LiveTextPreviewPanel
+              projectTitle={projectTitle}
+              draftNodes={draft}
+              contentUnits={contentUnits}
+              sourceFiles={sourceFiles}
+              pendingReassignments={pendingReassignments}
+              highlightedNodeId={focusedNodeId}
+              harnessState={harness?.harnessState ?? null}
+            />
+          </div>
+        )}
       </div>
     </div>
   );

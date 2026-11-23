@@ -1,4 +1,11 @@
 import type { AiModelId, DeepReviewReportDto } from './bookTypes.ts';
+import type {
+  AiTaskType,
+  ModelTierId,
+  TokenOptimizationMode,
+} from './tokenOptimizer.ts';
+
+export type { AiTaskType, ModelTierId, TokenOptimizationMode };
 
 export type AiProviderType = 'google_aistudio' | 'openai' | 'anthropic' | 'custom_openai';
 
@@ -50,6 +57,33 @@ export interface AudioTranscribeRouteConfig {
   modelId: string;
 }
 
+export interface TierModelSlotConfig {
+  provider: AiProviderType;
+  baseUrl: string;
+  /** Optional session-only key override. When blank, inherits the main key configured for `provider`. */
+  apiKey: string;
+  modelId: string;
+}
+
+export interface MultiTierRoutingConfig {
+  /** When true, pipeline tasks automatically route across Economy / Balanced / Flagship tiers */
+  enabled: boolean;
+  /** Context wire compression intensity */
+  optimizationMode: TokenOptimizationMode;
+  /** Optional hard safety ceiling in USD per project (null = unlimited) */
+  hardCostCapUsd: number | null;
+  /** Enable native Anthropic ephemeral prompt caching on system blocks (-90% cached input cost) */
+  enablePromptCaching: boolean;
+  /** Enable deterministic server-side prompt-hash response cache (0 tokens on repeated checks) */
+  enableResponseCache: boolean;
+  /** Enable Anti-Drift & Anti-Hallucination technical fact ledger verification */
+  enableAntiDriftGuard: boolean;
+  /** 3-tier model definitions: Economy (fast/cheap), Balanced (workhorse), Flagship (expert) */
+  tiers: Record<ModelTierId, TierModelSlotConfig>;
+  /** Editable mapping of each pipeline task to its assigned tier */
+  taskTierMap: Record<AiTaskType, ModelTierId>;
+}
+
 export interface AiProviderConfig {
   provider: AiProviderType;
   /**
@@ -64,6 +98,8 @@ export interface AiProviderConfig {
   webSearchRoute?: WebSearchRouteConfig;
   /** Slot 3: Independent Audio/Voice-to-Text Transcription provider (Gemini Transcribe, OpenAI Whisper, Groq Whisper, Custom) */
   audioRoute?: AudioTranscribeRouteConfig;
+  /** Multi-Tier Cost-Smart Routing (Economy / Balanced / Flagship) + Anti-Drift & Token Optimization */
+  tierRouting?: MultiTierRoutingConfig;
   /** Legacy mirrors kept synced for backwards compatibility */
   personalGoogleApiKey: string;
   customBaseUrl: string;
@@ -393,6 +429,305 @@ export const DEFAULT_AUDIO_ROUTE: AudioTranscribeRouteConfig = {
   modelId: AUDIO_TRANSCRIBE_PROVIDER_METADATA.google_gemini_audio.defaultModelId,
 };
 
+export interface ModelTierMetadata {
+  id: ModelTierId;
+  titleFa: string;
+  badgeFa: string;
+  descriptionFa: string;
+  accentHex: string;
+  recommendedModels: Array<{ provider: AiProviderType; modelId: string; baseUrl: string; label: string }>;
+}
+
+export const MODEL_TIER_METADATA: Record<ModelTierId, ModelTierMetadata> = {
+  economy: {
+    id: 'economy',
+    titleFa: 'سطح ۱ · اقتصادی و سریع (Economy)',
+    badgeFa: 'اقتصادی',
+    descriptionFa: 'برای غربالگری تناقض‌ها، یکدست‌سازی عنوان فصل‌ها و پرسش‌های کوتاه — تا ۱۵ برابر ارزان‌تر از مدل پرچمدار',
+    accentHex: '#14532D',
+    recommendedModels: [
+      { provider: 'google_aistudio', modelId: 'gemini-3.8-flash', baseUrl: 'https://generativelanguage.googleapis.com', label: 'Gemini 3.8 Flash' },
+      { provider: 'anthropic', modelId: 'claude-3-5-haiku-latest', baseUrl: 'https://api.anthropic.com/v1', label: 'Claude 3.5 Haiku' },
+      { provider: 'openai', modelId: 'gpt-4o-mini', baseUrl: 'https://api.openai.com/v1', label: 'GPT-4o Mini' },
+      { provider: 'custom_openai', modelId: 'deepseek-chat', baseUrl: 'https://api.deepseek.com/v1', label: 'DeepSeek Chat (V3)' },
+    ],
+  },
+  balanced: {
+    id: 'balanced',
+    titleFa: 'سطح ۲ · متعادل و مهندسی (Balanced)',
+    badgeFa: 'متعادل',
+    descriptionFa: 'برای ادغام معنایی چندفایلی، بازچینی فهرست، جستجوی وب و چت سردبیر — بهترین تعادل دقت فنی و هزینه',
+    accentHex: '#1E3A5F',
+    recommendedModels: [
+      { provider: 'google_aistudio', modelId: 'gemini-4-hydrogen', baseUrl: 'https://generativelanguage.googleapis.com', label: 'Gemini 4 Hydrogen' },
+      { provider: 'anthropic', modelId: 'claude-sonnet-4-20250514', baseUrl: 'https://api.anthropic.com/v1', label: 'Claude Sonnet 4' },
+      { provider: 'openai', modelId: 'gpt-4.1', baseUrl: 'https://api.openai.com/v1', label: 'GPT-4.1' },
+      { provider: 'custom_openai', modelId: 'anthropic/claude-sonnet-4', baseUrl: 'https://openrouter.ai/api/v1', label: 'OpenRouter · Sonnet 4' },
+    ],
+  },
+  flagship: {
+    id: 'flagship',
+    titleFa: 'سطح ۳ · پرچمدار و استدلال عمیق (Flagship)',
+    badgeFa: 'پرچمدار',
+    descriptionFa: 'فقط برای بازبینی عمیق نهایی، تحلیل جداول پیچیده WinOLS و کشف شکاف‌های تخصصی — تا حداکثر کیفیت بدون هدررفت توکن',
+    accentHex: '#7C2D12',
+    recommendedModels: [
+      { provider: 'anthropic', modelId: 'claude-opus-4-1-20250805', baseUrl: 'https://api.anthropic.com/v1', label: 'Claude Opus 4.1' },
+      { provider: 'openai', modelId: 'o4-mini', baseUrl: 'https://api.openai.com/v1', label: 'OpenAI o4-mini' },
+      { provider: 'custom_openai', modelId: 'anthropic/claude-opus-4', baseUrl: 'https://openrouter.ai/api/v1', label: 'OpenRouter · Opus 4' },
+      { provider: 'custom_openai', modelId: 'deepseek-reasoner', baseUrl: 'https://api.deepseek.com/v1', label: 'DeepSeek R1' },
+      { provider: 'google_aistudio', modelId: 'gemini-4-hydrogen', baseUrl: 'https://generativelanguage.googleapis.com', label: 'Gemini 4 Hydrogen' },
+    ],
+  },
+};
+
+export interface AiTaskMetadata {
+  id: AiTaskType;
+  titleFa: string;
+  descriptionFa: string;
+  defaultTier: ModelTierId;
+  tokenWeightFa: string;
+}
+
+export const AI_TASK_METADATA: readonly AiTaskMetadata[] = [
+  {
+    id: 'conflict_triage',
+    titleFa: 'غربالگری تناقض‌های بین فایل‌ها',
+    descriptionFa: 'تشخیص تناقض واقعی در برابر جملات مکمل/موازی',
+    defaultTier: 'economy',
+    tokenWeightFa: 'کم‌مصرف + کش ۰ توکن',
+  },
+  {
+    id: 'outline_polish',
+    titleFa: 'یکدست‌سازی عناوین فهرست فصل‌ها',
+    descriptionFa: 'اصلاح نگارشی عناوین با حفظ کدهای ECU و WinOLS',
+    defaultTier: 'economy',
+    tokenWeightFa: 'بسیار کم‌مصرف',
+  },
+  {
+    id: 'semantic_reorder',
+    titleFa: 'چیدمان و ادغام معنایی چند فایل',
+    descriptionFa: 'ترکیب منطقی چند جزوه نامنظم به یک ساختار منسجم',
+    defaultTier: 'balanced',
+    tokenWeightFa: 'متوسط',
+  },
+  {
+    id: 'web_grounding',
+    titleFa: 'راستی‌آزمایی و جستجوی زنده وب',
+    descriptionFa: 'تکمیل پارامترهای فنی و رفع تناقض با منابع آنلاین',
+    defaultTier: 'balanced',
+    tokenWeightFa: 'متوسط',
+  },
+  {
+    id: 'editor_chat',
+    titleFa: 'چت‌بات سردبیر و پیشنهاد ویرایش',
+    descriptionFa: 'پرسش‌های کوتاه روی اقتصادی و ویرایش ساختار روی متعادل',
+    defaultTier: 'balanced',
+    tokenWeightFa: 'پویا',
+  },
+  {
+    id: 'deep_review',
+    titleFa: 'بازبینی عمیق نهایی و تولید جدول WinOLS',
+    descriptionFa: 'ممیزی جامع سند، کشف شکاف‌ها، ساخت جدول و کادر هشدار',
+    defaultTier: 'flagship',
+    tokenWeightFa: 'حساس (پرمصرف)',
+  },
+  {
+    id: 'harness_author',
+    titleFa: 'نگارش ساختاری زیربخش (هارنس Author)',
+    descriptionFa: 'تولید Semantic IR ایزوله با پیشوند کش‌شده و بدون توهم فنی',
+    defaultTier: 'flagship',
+    tokenWeightFa: 'مرجع (کش‌پذیر)',
+  },
+  {
+    id: 'harness_patch',
+    titleFa: 'ترمیم جراحی بلوک معیوب (هارنس Patch)',
+    descriptionFa: 'اصلاح دقیق فقط بلوک‌های ردشده بدون بازتولید کل فصل',
+    defaultTier: 'balanced',
+    tokenWeightFa: 'متوسط (محدود)',
+  },
+  {
+    id: 'harness_utility',
+    titleFa: 'خلاصه غلتان و واژه‌نامه زنده (هارنس Utility)',
+    descriptionFa: 'فشرده‌سازی RollingSummary و یکدست‌سازی اصطلاحات ECU',
+    defaultTier: 'economy',
+    tokenWeightFa: 'بسیار کم‌مصرف',
+  },
+  {
+    id: 'harness_judge',
+    titleFa: 'ممیز معنایی مستقل لایه ۲ (هارنس Judge)',
+    descriptionFa: 'بررسی بی‌حافظه توهم معنایی و افت مفهوم پس از گارد لایه ۱',
+    defaultTier: 'economy',
+    tokenWeightFa: 'کم‌مصرف',
+  },
+] as const;
+
+export const DEFAULT_TASK_TIER_MAP: Record<AiTaskType, ModelTierId> = {
+  conflict_triage: 'economy',
+  outline_polish: 'economy',
+  semantic_reorder: 'balanced',
+  web_grounding: 'balanced',
+  editor_chat: 'balanced',
+  deep_review: 'flagship',
+  harness_author: 'flagship',
+  harness_patch: 'balanced',
+  harness_utility: 'economy',
+  harness_judge: 'economy',
+};
+
+export interface MultiTierRecipe {
+  id: string;
+  titleFa: string;
+  subtitleFa: string;
+  badgeFa: string;
+  primaryProvider: AiProviderType;
+  tiers: Record<ModelTierId, Omit<TierModelSlotConfig, 'apiKey'>>;
+  taskTierMap: Record<AiTaskType, ModelTierId>;
+  optimizationMode: TokenOptimizationMode;
+  enablePromptCaching: boolean;
+}
+
+export const MULTI_TIER_RECIPES: readonly MultiTierRecipe[] = [
+  {
+    id: 'anthropic_golden_trio',
+    titleFa: 'ترکیب طلایی Anthropic (Opus + Sonnet + Haiku)',
+    subtitleFa: 'کیفیت نگارش Opus 4.1 در بازبینی نهایی + صرفه‌جویی تا ۷۵٪ روی مراحل سبک با Haiku 3.5 و Sonnet 4',
+    badgeFa: 'بهترین برای کلید پولی کلاد',
+    primaryProvider: 'anthropic',
+    tiers: {
+      economy: {
+        provider: 'anthropic',
+        baseUrl: 'https://api.anthropic.com/v1',
+        modelId: 'claude-3-5-haiku-latest',
+      },
+      balanced: {
+        provider: 'anthropic',
+        baseUrl: 'https://api.anthropic.com/v1',
+        modelId: 'claude-sonnet-4-20250514',
+      },
+      flagship: {
+        provider: 'anthropic',
+        baseUrl: 'https://api.anthropic.com/v1',
+        modelId: 'claude-opus-4-1-20250805',
+      },
+    },
+    taskTierMap: { ...DEFAULT_TASK_TIER_MAP },
+    optimizationMode: 'balanced_pro',
+    enablePromptCaching: true,
+  },
+  {
+    id: 'openai_pro_trio',
+    titleFa: 'ترکیب حرفه‌ای OpenAI (o4-mini + GPT-4.1 + 4o-mini)',
+    subtitleFa: 'استدلال عمیق o4-mini برای ممیزی نهایی + GPT-4.1 برای چیدمان و GPT-4o Mini برای غربالگری ارزان',
+    badgeFa: 'اقتصادی و سریع',
+    primaryProvider: 'openai',
+    tiers: {
+      economy: {
+        provider: 'openai',
+        baseUrl: 'https://api.openai.com/v1',
+        modelId: 'gpt-4o-mini',
+      },
+      balanced: {
+        provider: 'openai',
+        baseUrl: 'https://api.openai.com/v1',
+        modelId: 'gpt-4.1',
+      },
+      flagship: {
+        provider: 'openai',
+        baseUrl: 'https://api.openai.com/v1',
+        modelId: 'o4-mini',
+      },
+    },
+    taskTierMap: { ...DEFAULT_TASK_TIER_MAP },
+    optimizationMode: 'balanced_pro',
+    enablePromptCaching: true,
+  },
+  {
+    id: 'openrouter_mixed_elite',
+    titleFa: 'ترکیب نخبه OpenRouter (Opus 4 + Sonnet 4 + DeepSeek V3)',
+    subtitleFa: 'فقط با یک کلید OpenRouter: کارهای سنگین روی Claude Opus 4 و کارهای سریع روی DeepSeek V3 فوق‌ارزان',
+    badgeFa: 'یک کلید · چند برند',
+    primaryProvider: 'custom_openai',
+    tiers: {
+      economy: {
+        provider: 'custom_openai',
+        baseUrl: 'https://openrouter.ai/api/v1',
+        modelId: 'deepseek/deepseek-chat',
+      },
+      balanced: {
+        provider: 'custom_openai',
+        baseUrl: 'https://openrouter.ai/api/v1',
+        modelId: 'anthropic/claude-sonnet-4',
+      },
+      flagship: {
+        provider: 'custom_openai',
+        baseUrl: 'https://openrouter.ai/api/v1',
+        modelId: 'anthropic/claude-opus-4',
+      },
+    },
+    taskTierMap: { ...DEFAULT_TASK_TIER_MAP },
+    optimizationMode: 'balanced_pro',
+    enablePromptCaching: true,
+  },
+  {
+    id: 'gemini_optimal_duo',
+    titleFa: 'ترکیب بهینه Gemini (Hydrogen 4 + Flash 3.8)',
+    subtitleFa: 'کاملاً سازگار با سهمیه سازنده (App Owner): کارهای سریع با Flash 3.8 و بازبینی عمیق با Hydrogen 4',
+    badgeFa: 'سازگار با سهمیه رایگان',
+    primaryProvider: 'google_aistudio',
+    tiers: {
+      economy: {
+        provider: 'google_aistudio',
+        baseUrl: 'https://generativelanguage.googleapis.com',
+        modelId: 'gemini-3.8-flash',
+      },
+      balanced: {
+        provider: 'google_aistudio',
+        baseUrl: 'https://generativelanguage.googleapis.com',
+        modelId: 'gemini-4-hydrogen',
+      },
+      flagship: {
+        provider: 'google_aistudio',
+        baseUrl: 'https://generativelanguage.googleapis.com',
+        modelId: 'gemini-4-hydrogen',
+      },
+    },
+    taskTierMap: { ...DEFAULT_TASK_TIER_MAP },
+    optimizationMode: 'balanced_pro',
+    enablePromptCaching: false,
+  },
+] as const;
+
+export const DEFAULT_MULTI_TIER_ROUTING: MultiTierRoutingConfig = {
+  enabled: false,
+  optimizationMode: 'balanced_pro',
+  hardCostCapUsd: 2.0,
+  enablePromptCaching: true,
+  enableResponseCache: true,
+  enableAntiDriftGuard: true,
+  tiers: {
+    economy: {
+      provider: 'google_aistudio',
+      baseUrl: 'https://generativelanguage.googleapis.com',
+      apiKey: '',
+      modelId: 'gemini-3.8-flash',
+    },
+    balanced: {
+      provider: 'google_aistudio',
+      baseUrl: 'https://generativelanguage.googleapis.com',
+      apiKey: '',
+      modelId: 'gemini-4-hydrogen',
+    },
+    flagship: {
+      provider: 'google_aistudio',
+      baseUrl: 'https://generativelanguage.googleapis.com',
+      apiKey: '',
+      modelId: 'gemini-4-hydrogen',
+    },
+  },
+  taskTierMap: { ...DEFAULT_TASK_TIER_MAP },
+};
+
 export const DEFAULT_AI_PROVIDER_CONFIG: AiProviderConfig = {
   provider: 'google_aistudio',
   googleKeyMode: 'auto_creator_first',
@@ -420,6 +755,15 @@ export const DEFAULT_AI_PROVIDER_CONFIG: AiProviderConfig = {
   },
   webSearchRoute: { ...DEFAULT_WEB_SEARCH_ROUTE },
   audioRoute: { ...DEFAULT_AUDIO_ROUTE },
+  tierRouting: {
+    ...DEFAULT_MULTI_TIER_ROUTING,
+    tiers: {
+      economy: { ...DEFAULT_MULTI_TIER_ROUTING.tiers.economy },
+      balanced: { ...DEFAULT_MULTI_TIER_ROUTING.tiers.balanced },
+      flagship: { ...DEFAULT_MULTI_TIER_ROUTING.tiers.flagship },
+    },
+    taskTierMap: { ...DEFAULT_TASK_TIER_MAP },
+  },
   personalGoogleApiKey: '',
   customBaseUrl: AI_PROVIDER_METADATA.custom_openai.defaultBaseUrl,
   customApiKey: '',
@@ -480,11 +824,154 @@ export function getEffectiveAudioRoute(config: AiProviderConfig): AudioTranscrib
   };
 }
 
+export function normalizeTokenOptimizationMode(raw?: string | null): TokenOptimizationMode {
+  if (raw === 'aggressive_saver' || raw === 'max_quality') return raw;
+  return 'balanced_pro';
+}
+
+export function normalizeModelTierId(raw?: string | null): ModelTierId {
+  if (raw === 'economy' || raw === 'flagship') return raw;
+  return 'balanced';
+}
+
+export function getEffectiveTierRouting(config: AiProviderConfig): MultiTierRoutingConfig {
+  const tr = config.tierRouting;
+  const normalizeSlot = (tier: ModelTierId): TierModelSlotConfig => {
+    const rawSlot = tr?.tiers?.[tier];
+    const fallbackSlot = DEFAULT_MULTI_TIER_ROUTING.tiers[tier];
+    const provider = normalizeProviderType(rawSlot?.provider || fallbackSlot.provider);
+    const meta = AI_PROVIDER_METADATA[provider];
+    return {
+      provider,
+      baseUrl: (rawSlot?.baseUrl || '').trim() || meta.defaultBaseUrl,
+      apiKey: (rawSlot?.apiKey || '').trim(),
+      modelId: (rawSlot?.modelId || '').trim() || fallbackSlot.modelId || meta.defaultModelId,
+    };
+  };
+
+  const hardCapRaw = tr?.hardCostCapUsd;
+  const hardCostCapUsd =
+    hardCapRaw === null
+      ? null
+      : typeof hardCapRaw === 'number' && Number.isFinite(hardCapRaw) && hardCapRaw > 0
+        ? Math.min(500, Math.max(0.05, hardCapRaw))
+        : DEFAULT_MULTI_TIER_ROUTING.hardCostCapUsd;
+
+  return {
+    enabled: Boolean(tr?.enabled),
+    optimizationMode: normalizeTokenOptimizationMode(tr?.optimizationMode),
+    hardCostCapUsd,
+    enablePromptCaching: tr?.enablePromptCaching !== false,
+    enableResponseCache: tr?.enableResponseCache !== false,
+    enableAntiDriftGuard: tr?.enableAntiDriftGuard !== false,
+    tiers: {
+      economy: normalizeSlot('economy'),
+      balanced: normalizeSlot('balanced'),
+      flagship: normalizeSlot('flagship'),
+    },
+    taskTierMap: {
+      conflict_triage: normalizeModelTierId(tr?.taskTierMap?.conflict_triage || DEFAULT_TASK_TIER_MAP.conflict_triage),
+      outline_polish: normalizeModelTierId(tr?.taskTierMap?.outline_polish || DEFAULT_TASK_TIER_MAP.outline_polish),
+      semantic_reorder: normalizeModelTierId(tr?.taskTierMap?.semantic_reorder || DEFAULT_TASK_TIER_MAP.semantic_reorder),
+      web_grounding: normalizeModelTierId(tr?.taskTierMap?.web_grounding || DEFAULT_TASK_TIER_MAP.web_grounding),
+      editor_chat: normalizeModelTierId(tr?.taskTierMap?.editor_chat || DEFAULT_TASK_TIER_MAP.editor_chat),
+      deep_review: normalizeModelTierId(tr?.taskTierMap?.deep_review || DEFAULT_TASK_TIER_MAP.deep_review),
+      harness_author: normalizeModelTierId(tr?.taskTierMap?.harness_author || DEFAULT_TASK_TIER_MAP.harness_author),
+      harness_patch: normalizeModelTierId(tr?.taskTierMap?.harness_patch || DEFAULT_TASK_TIER_MAP.harness_patch),
+      harness_utility: normalizeModelTierId(tr?.taskTierMap?.harness_utility || DEFAULT_TASK_TIER_MAP.harness_utility),
+      harness_judge: normalizeModelTierId(tr?.taskTierMap?.harness_judge || DEFAULT_TASK_TIER_MAP.harness_judge),
+    },
+  };
+}
+
+export function applyMultiTierRecipe(
+  config: AiProviderConfig,
+  recipeId: string
+): AiProviderConfig {
+  const recipe = MULTI_TIER_RECIPES.find((r) => r.id === recipeId);
+  if (!recipe) return config;
+  const prev = getEffectiveTierRouting(config);
+  const mkSlot = (tier: ModelTierId): TierModelSlotConfig => {
+    const target = recipe.tiers[tier];
+    const existingSameProviderKey =
+      prev.tiers[tier].provider === target.provider ? prev.tiers[tier].apiKey : '';
+    return {
+      provider: target.provider,
+      baseUrl: target.baseUrl,
+      apiKey: existingSameProviderKey,
+      modelId: target.modelId,
+    };
+  };
+  return {
+    ...config,
+    tierRouting: {
+      ...prev,
+      enabled: true,
+      optimizationMode: recipe.optimizationMode,
+      enablePromptCaching: recipe.enablePromptCaching,
+      tiers: {
+        economy: mkSlot('economy'),
+        balanced: mkSlot('balanced'),
+        flagship: mkSlot('flagship'),
+      },
+      taskTierMap: { ...recipe.taskTierMap },
+    },
+  };
+}
+
+export interface ResolvedTaskTierTarget {
+  tierUsed: ModelTierId | 'primary';
+  provider: AiProviderType;
+  baseUrl: string;
+  apiKey: string;
+  modelId: string;
+}
+
+/**
+ * Resolves the concrete provider/model/key for a given pipeline task.
+ * If Multi-Tier Routing is disabled, returns the primary provider configuration.
+ * When a tier's own `apiKey` is left blank, seamlessly inherits `config.providers[tier.provider].apiKey`
+ * so the user never has to paste the same Anthropic/OpenAI/OpenRouter key three times.
+ */
+export function resolveTierSlotForTask(
+  config: AiProviderConfig,
+  taskType: AiTaskType,
+  fallbackGoogleModel: AiModelId = 'gemini-4-hydrogen'
+): ResolvedTaskTierTarget {
+  const tr = getEffectiveTierRouting(config);
+  if (!tr.enabled) {
+    const active = getActiveProviderCredentials(config);
+    return {
+      tierUsed: 'primary',
+      provider: config.provider,
+      baseUrl: active.baseUrl,
+      apiKey: active.apiKey,
+      modelId: config.provider === 'google_aistudio' ? fallbackGoogleModel : active.modelId,
+    };
+  }
+
+  const tierId = tr.taskTierMap[taskType] || DEFAULT_TASK_TIER_MAP[taskType];
+  const slot = tr.tiers[tierId];
+  const inheritedKey = config.providers?.[slot.provider]?.apiKey?.trim() || '';
+  const inheritedBaseUrl = config.providers?.[slot.provider]?.baseUrl?.trim() || '';
+  const meta = AI_PROVIDER_METADATA[slot.provider];
+
+  return {
+    tierUsed: tierId,
+    provider: slot.provider,
+    baseUrl: slot.baseUrl.trim() || inheritedBaseUrl || meta.defaultBaseUrl,
+    apiKey: slot.apiKey.trim() || inheritedKey,
+    modelId: slot.modelId.trim() || meta.defaultModelId,
+  };
+}
+
 export interface CapabilityRoutingPlan {
   primaryLabelFa: string;
   webSearchLabelFa: string;
   audioLabelFa: string;
   isHybrid: boolean;
+  tierRoutingEnabled: boolean;
+  tierSummaryFa: string;
 }
 
 export function resolveCapabilityRoutingPlan(
@@ -494,6 +981,7 @@ export function resolveCapabilityRoutingPlan(
   const primary = getProviderDisplaySummary(config, googleModelId);
   const searchRoute = getEffectiveWebSearchRoute(config);
   const audioRoute = getEffectiveAudioRoute(config);
+  const tr = getEffectiveTierRouting(config);
 
   let webSearchLabelFa: string;
   if (searchRoute.provider === 'same_as_primary') {
@@ -513,15 +1001,22 @@ export function resolveCapabilityRoutingPlan(
   const audioLabelFa = `${am.shortName} (${audioRoute.modelId})`;
 
   const isHybrid =
+    tr.enabled ||
     config.provider !== 'google_aistudio' ||
     (searchRoute.provider !== 'same_as_primary' && searchRoute.provider !== 'google_gemini_search') ||
     audioRoute.provider !== 'google_gemini_audio';
+
+  const tierSummaryFa = tr.enabled
+    ? `اقتصادی: ${tr.tiers.economy.modelId} · متعادل: ${tr.tiers.balanced.modelId} · پرچمدار: ${tr.tiers.flagship.modelId}`
+    : 'تک‌مدله (همه مراحل روی مدل اصلی)';
 
   return {
     primaryLabelFa: `${primary.providerLabel} · ${primary.modelLabel}`,
     webSearchLabelFa,
     audioLabelFa,
     isHybrid,
+    tierRoutingEnabled: tr.enabled,
+    tierSummaryFa,
   };
 }
 

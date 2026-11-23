@@ -14,6 +14,7 @@ import { AiModelId, GoogleSearchMode, ProjectAiUsageLedger } from '../lib/bookTy
 import {
   AiProviderConfig,
   AiQuotaProbeResponse,
+  getEffectiveTierRouting,
   getProviderDisplaySummary,
 } from '../lib/aiProviderConfig';
 import {
@@ -22,6 +23,7 @@ import {
   QuotaStatusLevel,
 } from '../lib/aiUsageMetrics';
 import { toPersianDigits } from '../lib/formatParsers';
+import { formatUsdClean } from '../lib/tokenOptimizer';
 import { AiQuotaInfoModal } from './AiQuotaInfoModal';
 
 interface AiQuotaGaugeProps {
@@ -124,14 +126,19 @@ export const AiQuotaGauge: React.FC<AiQuotaGaugeProps> = ({
   const projectedOffset = arcLength * (1 - projectedPct / 100);
 
   const providerSummary = getProviderDisplaySummary(providerConfig, aiModel);
-  const activeModelLabel = providerSummary.modelLabel;
+  const tierRouting = getEffectiveTierRouting(providerConfig);
+  const activeModelLabel = tierRouting.enabled
+    ? 'مسیریابی ۳ سطحی فعال'
+    : providerSummary.modelLabel;
 
   const keySourceBadge =
-    activeProbe?.switchedFromCreator
-      ? `${providerSummary.providerLabel} · سوئیچ به کلید شما`
-      : activeProbe?.keySource === 'creator'
-        ? `${providerSummary.providerLabel} · سهمیه سازنده`
-        : `${providerSummary.providerLabel} · ${providerSummary.keySourceLabel}`;
+    tierRouting.enabled
+      ? `${tierRouting.tiers.flagship.modelId.split('/').pop()} / ${tierRouting.tiers.economy.modelId.split('/').pop()}`
+      : activeProbe?.switchedFromCreator
+        ? `${providerSummary.providerLabel} · سوئیچ به کلید شما`
+        : activeProbe?.keySource === 'creator'
+          ? `${providerSummary.providerLabel} · سهمیه سازنده`
+          : `${providerSummary.providerLabel} · ${providerSummary.keySourceLabel}`;
 
   return (
     <section
@@ -318,12 +325,23 @@ export const AiQuotaGauge: React.FC<AiQuotaGaugeProps> = ({
             </div>
 
             <div>
-              <div className="text-[10px] text-[#78716C]">معادل هزینه پلن پولی</div>
+              <div className="text-[10px] text-[#78716C]">
+                هزینه تخمینی {tierRouting.hardCostCapUsd ? `(سقف ${formatUsdClean(tierRouting.hardCostCapUsd)})` : ''}
+              </div>
               <div className="font-bold text-[#1A1816] mt-0.5 font-mono" dir="ltr">
                 <span className="block text-right">{snapshot.formattedCostUsd}</span>
               </div>
             </div>
           </div>
+
+          {((usage.savedTokensByOptimization || 0) > 0 || (usage.cachedCallsCount || 0) > 0) && (
+            <div className="rounded-lg border border-[#CBE0D2] bg-[#F2F7F4] px-2.5 py-1.5 text-[10.5px] font-semibold text-[#14532D] tabular-nums">
+              صرفه‌جویی بهینه‌ساز توکن: {formatCompactTokensFa(usage.savedTokensByOptimization || 0)} توکن
+              {(usage.cachedCallsCount || 0) > 0
+                ? ` · ${toPersianDigits(usage.cachedCallsCount || 0)} پاسخ کش ۰ توکن`
+                : ''}
+            </div>
+          )}
 
           <div className="flex items-center justify-between gap-2 border-t border-[#F2EFE8] pt-2">
             <button

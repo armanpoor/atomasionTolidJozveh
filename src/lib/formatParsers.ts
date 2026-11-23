@@ -163,8 +163,82 @@ export function extractFootnoteTermKey(rawText: string): string {
   return normalized.slice(0, 48) || clean.slice(0, 32).toLowerCase();
 }
 
+/**
+ * Cleans messy/unstructured Persian ECU remap notes (copied from Telegram, rough Word drafts,
+ * raw OCR/voice transcripts) without altering a single hex address, calibration number, or table cell.
+ * Also promotes standalone Persian lesson/chapter headings ("درس ۱:", "فصل ۲ -", "جلسه 82:")
+ * into structured Markdown headings when the input file has few or no explicit `#` headings.
+ */
+export function preprocessMessyRemapText(rawContent: string): string {
+  const normalized = rawContent
+    .replace(/^\uFEFF/, '')
+    .replace(/\r\n/g, '\n')
+    .replace(/\r/g, '\n')
+    // Strip invisible directional junk while strictly keeping Persian ZWNJ (\u200c)
+    .replace(/[\u200e\u200f\u202a-\u202e\u2066-\u2069]/g, '')
+    // Collapse 4+ blank lines into 2
+    .replace(/\n{4,}/g, '\n\n\n');
+
+  const lines = normalized.split('\n');
+  let explicitH1Count = 0;
+  for (const l of lines) {
+    if (/^#\s+/.test(l.trim())) {
+      explicitH1Count++;
+      if (explicitH1Count >= 2) break;
+    }
+  }
+
+  // If the file already uses real Markdown # headings, preserve structure as-is (only fix "### درس X" promotion if zero H1)
+  if (explicitH1Count >= 2) {
+    return normalized;
+  }
+
+  const out: string[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    const raw = lines[i];
+    const trimmed = raw.trim();
+
+    // Promote "### درس 8 (فصل هشتم ...)" to H1 when file has zero H1 headings (like real multi-part split notebooks)
+    if (
+      explicitH1Count === 0 &&
+      /^#{2,4}\s+(?:درس|فصل|جلسه)\s+[۰-۹0-9]+/.test(trimmed) &&
+      trimmed.length <= 220
+    ) {
+      out.push(`# ${trimmed.replace(/^#{2,4}\s+/, '')}`);
+      continue;
+    }
+
+    // Promote plain unstructured chapter/lesson lines in messy TXT/Word notes (not inside tables or bullet lists)
+    if (
+      explicitH1Count === 0 &&
+      !trimmed.startsWith('|') &&
+      !trimmed.startsWith('#') &&
+      !trimmed.startsWith('-') &&
+      !trimmed.startsWith('*') &&
+      trimmed.length >= 6 &&
+      trimmed.length <= 140 &&
+      /^(?:\*\*)?(?:درس|فصل|جلسه|بخش)\s+[۰-۹0-9]+(?:\s*[:：\-—–(]|\s+[\u0600-\u06FFA-Za-z])/.test(trimmed) &&
+      !/[.؟!]$/.test(trimmed)
+    ) {
+      const prevEmpty =
+        i === 0 ||
+        lines[i - 1].trim() === '' ||
+        /^(?:\*\*)?(?:درس|فصل|جلسه)\s+[۰-۹0-9]+\s*[:：\-—–]/.test(trimmed);
+      if (prevEmpty) {
+        out.push(`# ${trimmed.replace(/^\*\*|\*\*$/g, '').trim()}`);
+        continue;
+      }
+    }
+
+    out.push(raw);
+  }
+
+  return out.join('\n');
+}
+
 export function parseMarkdownDocument(rawContent: string, fileName: string): ParsedBook {
-  const lines = rawContent.replace(/\r\n/g, '\n').split('\n');
+  const prepared = preprocessMessyRemapText(rawContent);
+  const lines = prepared.split('\n');
 
   let bookTitle = fileName.replace(/\.(md|txt|docx|json)$/i, '');
   let bookSubtitle = 'نسخه مهندسی، ساختاریافته و یکپارچه برای نشر حرفه‌ای در مایکروسافت ورد';

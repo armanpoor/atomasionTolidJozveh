@@ -932,9 +932,12 @@ export function runDeterministicLosslessDedup(params: {
   });
 
   interface CanonicalSlot {
+    slotIndex: number;
     unit: ContentUnitDto;
     text: string;
     tokens: string[];
+    tokenSet: Set<string>;
+    normSentences: Set<string>;
     nums: string[];
     fileName: string;
     mergedIds: string[];
@@ -945,6 +948,68 @@ export function runDeterministicLosslessDedup(params: {
 
   const hashIndex = new Map<string, CanonicalSlot>();
   const activeSlots: CanonicalSlot[] = [];
+  const tableSlotIndices: number[] = [];
+  // Inverted candidate indices per unitType -> token/sentence -> slot indices for sub-quadratic scaling
+  const typeTokenIndex = new Map<string, Map<string, number[]>>();
+  const typeSentenceIndex = new Map<string, Map<string, number[]>>();
+
+  const getNormLongSentences = (text: string): Set<string> => {
+    const set = new Set<string>();
+    for (const s of splitPersianSentences(text)) {
+      const n = normalizePersianForComparison(s);
+      if (n.length >= 20) set.add(n);
+    }
+    return set;
+  };
+
+  const computeJaccardFromSets = (setA: Set<string>, setB: Set<string>): number => {
+    if (setA.size === 0 || setB.size === 0) return 0;
+    const [smaller, larger] = setA.size <= setB.size ? [setA, setB] : [setB, setA];
+    let intersection = 0;
+    for (const t of smaller) {
+      if (larger.has(t)) intersection++;
+    }
+    const union = setA.size + setB.size - intersection;
+    return union === 0 ? 0 : intersection / union;
+  };
+
+  const indexSlot = (slot: CanonicalSlot) => {
+    const uType = slot.unit.unitType;
+    if (uType === 'table') {
+      tableSlotIndices.push(slot.slotIndex);
+      return;
+    }
+    if (uType !== 'paragraph' && uType !== 'callout' && uType !== 'list') return;
+
+    let tokMap = typeTokenIndex.get(uType);
+    if (!tokMap) {
+      tokMap = new Map<string, number[]>();
+      typeTokenIndex.set(uType, tokMap);
+    }
+    for (const tok of slot.tokenSet) {
+      let arr = tokMap.get(tok);
+      if (!arr) {
+        arr = [];
+        tokMap.set(tok, arr);
+      }
+      arr.push(slot.slotIndex);
+    }
+
+    let sentMap = typeSentenceIndex.get(uType);
+    if (!sentMap) {
+      sentMap = new Map<string, number[]>();
+      typeSentenceIndex.set(uType, sentMap);
+    }
+    for (const sent of slot.normSentences) {
+      let arr = sentMap.get(sent);
+      if (!arr) {
+        arr = [];
+        sentMap.set(sent, arr);
+      }
+      arr.push(slot.slotIndex);
+    }
+  };
+
   const unitStatusMap = new Map<
     string,
     {
@@ -975,6 +1040,8 @@ export function runDeterministicLosslessDedup(params: {
     }
 
     const tokens = tokenizeContent(unit.rawText);
+    const tokenSet = new Set(tokens);
+    const normSentences = getNormLongSentences(unit.rawText);
     const nums = extractNumericFacts(unit.rawText);
 
     let matchedSlot: CanonicalSlot | null = null;
@@ -985,8 +1052,9 @@ export function runDeterministicLosslessDedup(params: {
       const incomingBlock = unit.metadataJson?.block as TableBlock | undefined;
       if (incomingBlock && incomingBlock.type === 'table') {
         let mergedIntoTableSlot = false;
-        for (const slot of activeSlots) {
-          if (slot.unit.unitType !== 'table' || slot.unit.sourceFileId === unit.sourceFileId) continue;
+        for (const sIdx of tableSlotIndices) {
+          const slot = activeSlots[sIdx];
+          if (slot.unit.sourceFileId === unit.sourceFileId) continue;
           const slotBlock = slot.unit.metadataJson?.block as TableBlock | undefined;
           if (!slotBlock || slotBlock.type !== 'table') continue;
 
@@ -1008,6 +1076,7 @@ export function runDeterministicLosslessDedup(params: {
           };
           slot.text = blockToPlainText(tableMerge.mergedTable);
           slot.tokens = tokenizeContent(slot.text);
+          slot.tokenSet = new Set(slot.tokens);
           slot.nums = extractNumericFacts(slot.text);
           slot.mergedIds.push(unit.id);
           slot.matchType = 'lossless_union';
@@ -1056,14 +1125,48 @@ export function runDeterministicLosslessDedup(params: {
       }
     }
 
-    // Compare against existing canonical slots of compatible types
+    // Sub-quadratic candidate retrieval via inverted token + verbatim sentence index
     if (unit.unitType === 'paragraph' || unit.unitType === 'callout' || unit.unitType === 'list') {
-      for (const slot of activeSlots) {
-        if (slot.unit.unitType !== unit.unitType) continue;
-        const sim = computeJaccardSimilarity(slot.tokens, tokens);
+      const candidateSharedCounts = new Map<number, number>();
+      const verbatimCandidateSet = new Set<number>();
+
+      const sentMap = typeSentenceIndex.get(unit.unitType);
+      if (sentMap && normSentences.size > 0) {
+        for (const s of normSentences) {
+          const hits = sentMap.get(s);
+          if (hits) {
+            for (const idx of hits) {
+              verbatimCandidateSet.add(idx);
+              candidateSharedCounts.set(idx, (candidateSharedCounts.get(idx) || 0) + 10);
+            }
+          }
+        }
+      }
+
+      const tokMap = typeTokenIndex.get(unit.unitType);
+      if (tokMap && tokenSet.size > 0) {
+        // Upper bound on posting-list size to skip hyper-frequent boilerplate words on giant books
+        const maxPosting = Math.max(48, Math.floor(activeSlots.length * 0.35));
+        for (const tok of tokenSet) {
+          const hits = tokMap.get(tok);
+          if (!hits || hits.length > maxPosting) continue;
+          for (const idx of hits) {
+            candidateSharedCounts.set(idx, (candidateSharedCounts.get(idx) || 0) + 1);
+          }
+        }
+      }
+
+      // Minimum shared tokens mathematically needed for Jaccard >= 0.35 (with safety floor of 1 for tiny units)
+      const minSharedForOverlap = tokenSet.size <= 3 ? 1 : Math.max(2, Math.floor(tokenSet.size * 0.25));
+
+      for (const [slotIdx, sharedHits] of candidateSharedCounts.entries()) {
+        const hasSharedSentence = verbatimCandidateSet.has(slotIdx);
+        if (!hasSharedSentence && sharedHits < minSharedForOverlap) continue;
+
+        const slot = activeSlots[slotIdx];
+        const sim = computeJaccardFromSets(slot.tokenSet, tokenSet);
 
         // Check cross-file GENUINE factual/numeric contradiction BEFORE merging!
-        // Complementary rows, parallel key-value mappings, different conditions, or elaborations are NEVER flagged.
         if (
           sim >= 0.35 &&
           slot.unit.sourceFileId !== unit.sourceFileId &&
@@ -1095,42 +1198,65 @@ export function runDeterministicLosslessDedup(params: {
           break;
         }
 
-        // High overlap without contradiction -> Lossless Union candidate
-        // Detect either high token Jaccard (>= 0.48) OR shared verbatim sentence (>= 20 chars) for (X+Y) U (X+Z)
-        const sentsA = splitPersianSentences(slot.text)
-          .map((s) => normalizePersianForComparison(s))
-          .filter((s) => s.length >= 20);
-        const sentsB = splitPersianSentences(unit.rawText)
-          .map((s) => normalizePersianForComparison(s))
-          .filter((s) => s.length >= 20);
-        const hasSharedSentence =
-          sentsA.length > 0 &&
-          sentsB.length > 0 &&
-          sentsB.some((sb) => sentsA.includes(sb));
+        // Fast skip if neither verbatim sentence nor high Jaccard overlap
+        const effectiveScore = hasSharedSentence ? Math.max(sim, 0.72) : sim;
+        if (effectiveScore < 0.48 || effectiveScore <= matchedScore) {
+          continue;
+        }
 
-        // Do NOT merge distinct parallel items (e.g. "عدد 11 = حرف B" vs "عدد 14 = حرف E", or "P0135" vs "P0141")
-        // unless they literally share an identical 20+ char verbatim sentence!
+        // Do NOT merge distinct parallel items unless they literally share an identical 20+ char verbatim sentence
         if (!hasSharedSentence && hasDistinctParallelIdentifiers(slot.text, unit.rawText)) {
           continue;
         }
 
-        // Also do NOT merge two distinct-condition quantitative statements (e.g. idle 1.5 bar vs full-throttle 4 bar)
-        if (!hasSharedSentence && hasOpposingCondition(new Set(slot.tokens), new Set(tokens))) {
+        // Also do NOT merge two distinct-condition quantitative statements
+        if (!hasSharedSentence && hasOpposingCondition(slot.tokenSet, tokenSet)) {
           continue;
         }
 
-        const effectiveScore = hasSharedSentence ? Math.max(sim, 0.72) : sim;
-        if (effectiveScore >= 0.48 && effectiveScore > matchedScore) {
-          matchedSlot = slot;
-          matchedScore = effectiveScore;
-        }
+        matchedSlot = slot;
+        matchedScore = effectiveScore;
       }
     }
 
     if (matchedSlot) {
       const union = losslessUnionTexts(matchedSlot.text, unit.rawText);
       matchedSlot.text = union.mergedText;
-      matchedSlot.tokens = tokenizeContent(matchedSlot.text);
+      const newTokens = tokenizeContent(matchedSlot.text);
+      const newTokenSet = new Set(newTokens);
+      const newNormSents = getNormLongSentences(matchedSlot.text);
+
+      // Incrementally index any newly added tokens/sentences from the lossless union
+      const tokMap = typeTokenIndex.get(matchedSlot.unit.unitType);
+      if (tokMap) {
+        for (const t of newTokenSet) {
+          if (!matchedSlot.tokenSet.has(t)) {
+            let arr = tokMap.get(t);
+            if (!arr) {
+              arr = [];
+              tokMap.set(t, arr);
+            }
+            arr.push(matchedSlot.slotIndex);
+          }
+        }
+      }
+      const sentMap = typeSentenceIndex.get(matchedSlot.unit.unitType);
+      if (sentMap) {
+        for (const s of newNormSents) {
+          if (!matchedSlot.normSentences.has(s)) {
+            let arr = sentMap.get(s);
+            if (!arr) {
+              arr = [];
+              sentMap.set(s, arr);
+            }
+            arr.push(matchedSlot.slotIndex);
+          }
+        }
+      }
+
+      matchedSlot.tokens = newTokens;
+      matchedSlot.tokenSet = newTokenSet;
+      matchedSlot.normSentences = newNormSents;
       matchedSlot.nums = extractNumericFacts(matchedSlot.text);
       matchedSlot.mergedIds.push(unit.id);
       if (union.addedSentences.length > 0) {
@@ -1153,9 +1279,12 @@ export function runDeterministicLosslessDedup(params: {
       });
     } else {
       const slot: CanonicalSlot = {
+        slotIndex: activeSlots.length,
         unit,
         text: unit.rawText,
         tokens,
+        tokenSet,
+        normSentences,
         nums,
         fileName,
         mergedIds: [],
@@ -1165,6 +1294,7 @@ export function runDeterministicLosslessDedup(params: {
       };
       hashIndex.set(unit.normalizedHash, slot);
       activeSlots.push(slot);
+      indexSlot(slot);
       unitStatusMap.set(unit.id, {
         status: 'active',
         canonicalUnitId: null,
@@ -1375,16 +1505,56 @@ export function buildInitialOutline(params: {
       }
     }
   } else {
-    // single_polish & multi_merge: unify chapters by normalized heading or high heading token overlap
+    // single_polish & multi_merge: unify chapters by normalized heading, token overlap, or domain topic signature
+    interface DomainTopicRule {
+      key: string;
+      pedagogicalRank: number;
+      pattern: RegExp;
+    }
+
+    const REMAP_DOMAIN_TOPICS: readonly DomainTopicRule[] = [
+      { key: 'ecu_basics', pedagogicalRank: 10, pattern: /(?:مقدمه|مبانی|ساختار\s*ایسیو|سخت.?افزار|پین.?اوت|بایوس|پروگرامر|بک.?آپ|کپچر|تبدیل\s*(?:هگز|دسیمال|باینری)|مفاهیم\s*پایه)/i },
+      { key: 'winols_axes', pedagogicalRank: 20, pattern: /(?:وینولز|winols|آدرس.?یابی|داموس|damos|a2l|محور|axis|fce6|ضریب|factor|offset|آفست|هیگزا|16.?bit|8.?bit|تبدیل\s*داده)/i },
+      { key: 'airflow_load', pedagogicalRank: 30, pattern: /(?:هوا|بار\s*موتور|load|دریچه\s*گاز|پدال|kfped|kfmiop|kfmirl|ve|راندمان\s*حجمی|مپ\s*سنسور|ماف|maf|توربو|بوست|ldrxn)/i },
+      { key: 'fuel_lambda', pedagogicalRank: 40, pattern: /(?:سوخت|پاشش|انژکتور|لامبدا|lamfa|afr|استوکیومتری|غنی.?سازی|سرد\s*کردن|cold\s*start|stft|ltft|اکسیژن)/i },
+      { key: 'ignition_spark', pedagogicalRank: 50, pattern: /(?:جرقه|آوانس|ریتارد|kfzw|شمع|کویل|ناک|کوبش|knock|dwell|زمان\s*شارژ|زاویه\s*جرقه)/i },
+      { key: 'vvt_valve', pedagogicalRank: 60, pattern: /(?:vvt|cvvt|میل.?سوپاپ|همپوشانی|سوپاپ|تایمینگ\s*سوپاپ|وانوس)/i },
+      { key: 'limits_idle_fan', pedagogicalRank: 70, pattern: /(?:کات.?آف|cutoff|nmax|دور\s*آرام|idle|فن|دمای\s*آب|ترموستات|محدودکننده|vmax|سرعت|پاپ.?اند.?بنگ|بک.?فایر|لانچ)/i },
+      { key: 'dtc_immo_safety', pedagogicalRank: 80, pattern: /(?:خطا|dtc|کد\s*خطا|حذف\s*سنسور|کاتالیست|ایموبلایزر|immo|چک.?سام|checksum|عیب.?یابی|ایمنی|محافظت)/i },
+    ];
+
+    const detectDomainTopic = (text: string): DomainTopicRule | null => {
+      for (const rule of REMAP_DOMAIN_TOPICS) {
+        if (rule.pattern.test(text)) return rule;
+      }
+      return null;
+    };
+
+    const bucketTopicKey = new Map<string, string | null>();
+    const bucketRank = new Map<string, number>();
+
     for (const u of activeUnits) {
       const heading = getTopHeading(u);
       const norm = normalizePersianForComparison(heading);
       const hTokens = tokenizeContent(heading);
+      const topicRule =
+        params.workflowMode === 'multi_merge'
+          ? detectDomainTopic(`${heading} ${u.rawText.slice(0, 140)}`)
+          : null;
 
       let bucket = buckets.find((b) => {
         if (normalizePersianForComparison(b.title) === norm) return true;
-        if (params.workflowMode === 'multi_merge' && hTokens.length >= 2 && b.tokens.length >= 2) {
-          return computeJaccardSimilarity(b.tokens, hTokens) >= 0.55;
+        if (params.workflowMode === 'multi_merge') {
+          if (hTokens.length >= 2 && b.tokens.length >= 2) {
+            if (computeJaccardSimilarity(b.tokens, hTokens) >= 0.45) return true;
+          }
+          // Cross-file semantic domain unification when headings use different wording for the same remap subsystem
+          if (topicRule && bucketTopicKey.get(b.id) === topicRule.key) {
+            const bHasDifferentFile = b.units.some((bu) => bu.sourceFileId !== u.sourceFileId);
+            if (bHasDifferentFile || hTokens.length <= 4) {
+              return true;
+            }
+          }
         }
         return false;
       });
@@ -1398,8 +1568,54 @@ export function buildInitialOutline(params: {
           units: [],
         };
         buckets.push(bucket);
+        bucketTopicKey.set(bucket.id, topicRule?.key ?? null);
+        bucketRank.set(bucket.id, topicRule?.pedagogicalRank ?? 55);
+      } else if (heading.length > bucket.title.length && heading.length <= 72 && bucket.title.length < 18) {
+        // Prefer the more descriptive chapter heading when merging cross-file buckets
+        bucket.title = heading;
+        bucket.tokens = Array.from(new Set([...bucket.tokens, ...hTokens]));
       }
       bucket.units.push(u);
+    }
+
+    // In multi_merge with many fragmented tiny 1-unit stub buckets from messy files,
+    // fold single-unit stubs into their closest semantic chapter (100% zero-loss: every unit is kept!)
+    if (params.workflowMode === 'multi_merge' && buckets.length > 8) {
+      for (let i = buckets.length - 1; i >= 0; i--) {
+        const stub = buckets[i];
+        if (stub.units.length !== 1 || buckets.length <= 6) continue;
+        const stubTokens = tokenizeContent(`${stub.title} ${stub.units[0].rawText.slice(0, 180)}`);
+        let bestTargetIdx = -1;
+        let bestSim = 0;
+        for (let j = 0; j < buckets.length; j++) {
+          if (j === i || buckets[j].units.length < 2) continue;
+          const targetTokens = buckets[j].tokens.concat(
+            buckets[j].units.slice(0, 3).flatMap((bu) => tokenizeContent(bu.rawText.slice(0, 120)))
+          );
+          const sim = computeJaccardSimilarity(stubTokens, targetTokens);
+          if (sim > bestSim) {
+            bestSim = sim;
+            bestTargetIdx = j;
+          }
+        }
+        if (bestTargetIdx !== -1 && bestSim >= 0.14) {
+          buckets[bestTargetIdx].units.push(...stub.units);
+          buckets.splice(i, 1);
+        }
+      }
+    }
+
+    // Pedagogical curriculum ordering for multi_merge across >=2 distinct source files
+    // (keeps original order within the same domain rank so numbered lessons stay chronological!)
+    const distinctSourceFileCount = new Set(activeUnits.map((u) => u.sourceFileId)).size;
+    if (params.workflowMode === 'multi_merge' && distinctSourceFileCount >= 2 && buckets.length >= 3) {
+      const originalIndex = new Map(buckets.map((b, idx) => [b.id, idx]));
+      buckets.sort((a, b) => {
+        const ra = bucketRank.get(a.id) ?? 55;
+        const rb = bucketRank.get(b.id) ?? 55;
+        if (ra !== rb) return ra - rb;
+        return (originalIndex.get(a.id) ?? 0) - (originalIndex.get(b.id) ?? 0);
+      });
     }
   }
 

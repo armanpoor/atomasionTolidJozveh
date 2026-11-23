@@ -13,6 +13,7 @@ import {
   AiQuotaProbeResponse,
   getActiveProviderCredentials,
   getEffectiveAudioRoute,
+  getEffectiveTierRouting,
   getEffectiveWebSearchRoute,
   normalizeKeyAuthMode,
 } from './aiProviderConfig';
@@ -22,6 +23,26 @@ import {
   parseNdjsonBuffer,
 } from './deepReviewStream';
 import type { ProjectRevisionDto } from './changeLogUtils';
+import type {
+  GlossaryTermEntry,
+  HarnessState,
+  Layer1AuditResult,
+  Layer2AuditResult,
+  SemanticBlock,
+} from './harness/types';
+
+function encodeUtf8Base64(input: string): string {
+  try {
+    const bytes = new TextEncoder().encode(input);
+    let binary = '';
+    for (let i = 0; i < bytes.length; i++) {
+      binary += String.fromCharCode(bytes[i]);
+    }
+    return btoa(binary);
+  } catch {
+    return '';
+  }
+}
 
 function buildProviderHeaders(config?: AiProviderConfig | null): Record<string, string> {
   if (!config) return {};
@@ -55,6 +76,39 @@ function buildProviderHeaders(config?: AiProviderConfig | null): Record<string, 
   if (audioRoute.baseUrl) headers['X-AI-Audio-Base-Url'] = audioRoute.baseUrl;
   if (audioRoute.apiKey) headers['X-AI-Audio-Api-Key'] = audioRoute.apiKey;
   if (audioRoute.modelId) headers['X-AI-Audio-Model'] = audioRoute.modelId;
+
+  // Forward Multi-Tier Routing + Token Optimization + Hard Cost Cap (strictly session memory, never persisted)
+  const tierRouting = getEffectiveTierRouting(config);
+  const resolveTierPayload = (tierId: 'economy' | 'balanced' | 'flagship') => {
+    const slot = tierRouting.tiers[tierId];
+    const inheritedKey = config.providers?.[slot.provider]?.apiKey?.trim() || '';
+    const inheritedUrl = config.providers?.[slot.provider]?.baseUrl?.trim() || '';
+    return {
+      provider: slot.provider,
+      baseUrl: slot.baseUrl.trim() || inheritedUrl,
+      apiKey: slot.apiKey.trim() || inheritedKey,
+      modelId: slot.modelId.trim(),
+    };
+  };
+  const encodedTier = encodeUtf8Base64(
+    JSON.stringify({
+      enabled: tierRouting.enabled,
+      optimizationMode: tierRouting.optimizationMode,
+      hardCostCapUsd: tierRouting.hardCostCapUsd,
+      enablePromptCaching: tierRouting.enablePromptCaching,
+      enableResponseCache: tierRouting.enableResponseCache,
+      enableAntiDriftGuard: tierRouting.enableAntiDriftGuard,
+      taskTierMap: tierRouting.taskTierMap,
+      tiers: {
+        economy: resolveTierPayload('economy'),
+        balanced: resolveTierPayload('balanced'),
+        flagship: resolveTierPayload('flagship'),
+      },
+    })
+  );
+  if (encodedTier) {
+    headers['X-AI-Tier-Routing'] = encodedTier;
+  }
 
   return headers;
 }
@@ -152,6 +206,25 @@ export class ApiClient {
   listProjectRevisions(projectId: string) {
     return this.request<{ revisions: ProjectRevisionDto[] }>(
       `/api/projects/${encodeURIComponent(projectId)}/revisions`
+    );
+  }
+
+  logProjectActivity(
+    projectId: string,
+    payload: {
+      actionType: ProjectRevisionDto['actionType'];
+      title: string;
+      summary: string;
+      captureSnapshot?: boolean;
+      extraDetails?: Record<string, unknown>;
+    }
+  ) {
+    return this.request<{ ok: boolean; revisions: ProjectRevisionDto[] }>(
+      `/api/projects/${encodeURIComponent(projectId)}/revisions/log`,
+      {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      }
     );
   }
 
@@ -465,6 +538,99 @@ export class ApiClient {
     }>(`/api/projects/${encodeURIComponent(projectId)}/transcribe-audio`, {
       method: 'POST',
       body: JSON.stringify(payload),
+    });
+  }
+
+  initHarnessBlueprint(
+    projectId: string,
+    payload?: { budgetCapUsd?: number; forceReset?: boolean }
+  ) {
+    return this.request<{
+      ok: boolean;
+      harnessState: HarnessState;
+      routingInfo: {
+        authorModelId: string;
+        patchModelId: string;
+        utilityModelId: string;
+        enablePromptCaching: boolean;
+      };
+      bundle: ProjectBundleDto;
+    }>(`/api/projects/${encodeURIComponent(projectId)}/harness/blueprint/init`, {
+      method: 'POST',
+      body: JSON.stringify(payload || {}),
+    });
+  }
+
+  approveHarnessBlueprint(
+    projectId: string,
+    payload?: { budgetCapUsd?: number; glossaryEntries?: GlossaryTermEntry[] }
+  ) {
+    return this.request<{
+      ok: boolean;
+      harnessState: HarnessState;
+      routingInfo: {
+        authorModelId: string;
+        patchModelId: string;
+        utilityModelId: string;
+        enablePromptCaching: boolean;
+      };
+      bundle: ProjectBundleDto;
+      revisions: ProjectRevisionDto[];
+    }>(`/api/projects/${encodeURIComponent(projectId)}/harness/blueprint/approve`, {
+      method: 'POST',
+      body: JSON.stringify(payload || {}),
+    });
+  }
+
+  executeHarnessStep(
+    projectId: string,
+    payload?: { sectionId?: string; allowBudgetOverride?: boolean },
+    requestOptions?: { signal?: AbortSignal }
+  ) {
+    return this.request<{
+      ok: boolean;
+      done: boolean;
+      pausedByBudgetCap?: boolean;
+      sectionId?: string;
+      outcome?: 'verified' | 'quarantined' | 'budget_paused' | 'completed';
+      layer1?: Layer1AuditResult;
+      layer2?: Layer2AuditResult;
+      harnessState: HarnessState;
+      bundle: ProjectBundleDto;
+    }>(`/api/projects/${encodeURIComponent(projectId)}/harness/step`, {
+      method: 'POST',
+      body: JSON.stringify(payload || {}),
+      signal: requestOptions?.signal,
+    });
+  }
+
+  resolveHarnessQuarantine(
+    projectId: string,
+    sectionId: string,
+    payload: { editedBlocks?: SemanticBlock[]; resolutionNote?: string }
+  ) {
+    return this.request<{
+      ok: boolean;
+      harnessState: HarnessState;
+      bundle: ProjectBundleDto;
+      revisions: ProjectRevisionDto[];
+    }>(
+      `/api/projects/${encodeURIComponent(projectId)}/harness/quarantine/${encodeURIComponent(sectionId)}/resolve`,
+      {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      }
+    );
+  }
+
+  syncHarnessBook(projectId: string) {
+    return this.request<{
+      ok: boolean;
+      harnessState: HarnessState;
+      bundle: ProjectBundleDto;
+    }>(`/api/projects/${encodeURIComponent(projectId)}/harness/sync-book`, {
+      method: 'POST',
+      body: JSON.stringify({}),
     });
   }
 }

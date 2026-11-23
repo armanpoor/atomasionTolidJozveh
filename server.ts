@@ -17,6 +17,7 @@ import {
 } from './src/lib/aiProviderConfig.ts';
 import { issueGuestSession } from './src/server/guestSession.ts';
 import { getOrCreateUser } from './src/db/repository.ts';
+import { resolveServerBindConfig } from './src/server/serverBindConfig.ts';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -274,11 +275,18 @@ async function startServer() {
     }
   });
 
-  const isProd = process.env.NODE_ENV === 'production';
+  const { port, host, isProd, disableHmr } = resolveServerBindConfig();
+  const server = http.createServer(app);
+  attachLiveVoiceWebSocket(server);
+
   if (!isProd) {
     const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({
-      server: { middlewareMode: true },
+      server: {
+        middlewareMode: true,
+        hmr: disableHmr ? false : { server },
+        watch: disableHmr ? null : undefined,
+      },
       appType: 'spa',
     });
     app.use(vite.middlewares);
@@ -290,11 +298,20 @@ async function startServer() {
     });
   }
 
-  const port = Number(process.env.PORT) || 3000;
-  const server = http.createServer(app);
-  attachLiveVoiceWebSocket(server);
-  server.listen(port, '0.0.0.0', () => {
-    console.log(`Server listening on http://0.0.0.0:${port}`);
+  server.on('error', (err) => {
+    console.error(`HTTP server failed to bind ${host}:${port}:`, err);
+    process.exit(1);
+  });
+
+  const shutdown = () => {
+    server.close(() => process.exit(0));
+    setTimeout(() => process.exit(0), 2000).unref();
+  };
+  process.once('SIGTERM', shutdown);
+  process.once('SIGINT', shutdown);
+
+  server.listen(port, host, () => {
+    console.log(`Server listening on http://${host}:${port}`);
   });
 }
 

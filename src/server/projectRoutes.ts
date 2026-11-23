@@ -66,21 +66,50 @@ import {
   normalizeGoogleModelId,
 } from '../lib/aiProviderConfig.ts';
 import {
+  buildAntiDriftContract,
+  buildCompactChapterDigestsWire,
+  buildCompactChatContextWire,
+  buildCompactConflictBatchWire,
+  buildCompactOutlineWire,
+  extractEntityPreservingExcerpt,
+  extractTechnicalFactLedger,
+  getBudgetForOptimizationMode,
+  type TokenOptimizationMode,
+  validateDeepReviewOutput,
+  validateOutlineRefinementOutput,
+} from '../lib/tokenOptimizer.ts';
+import {
+  buildAiTaskCacheKey,
   callNonGoogleChatWithFallback,
+  checkHardCostCap,
   createGoogleGenAiClient,
   executeUnifiedWebSearch,
   executeWithGoogleClientFallback,
   generateGoogleContentResilient,
   generateUnifiedTextOrJson,
+  getCachedAiTaskResult,
   isNonGoogleProvider,
   probeProviderWithCreatorFallback,
   type ResolvedServerAiProvider,
   resolveAiProviderFromRequest,
   resolveAudioRouteFromRequest,
+  resolveProviderForTaskFromRequest,
   resolveThinkingLevelForGoogleModel,
   resolveWebSearchRouteFromRequest,
+  setCachedAiTaskResult,
   transcribeAudioUnified,
 } from './aiProvider.ts';
+import {
+  approveHarnessBlueprintForProject,
+  executeHarnessStepForProject,
+  initHarnessBlueprintForProject,
+  resolveHarnessQuarantineItem,
+  syncHarnessToBookSnapshot,
+} from './harnessOrchestrator.ts';
+import {
+  HarnessRunAbortedError,
+  HarnessStepConflictError,
+} from '../lib/harness/orchestrationGuard.ts';
 
 export function createGeminiClient(): GoogleGenAI | null {
   const apiKey = process.env.GEMINI_API_KEY;
@@ -473,7 +502,12 @@ async function generateWithGroundingFallback(
 async function verifyConflictsWithAi(
   provider: ResolvedServerAiProvider | null,
   candidates: DedupPipelineOutput['conflicts'],
-  preferredGoogleModel = 'gemini-4-hydrogen'
+  preferredGoogleModel = 'gemini-4-hydrogen',
+  options?: {
+    optimizationMode?: TokenOptimizationMode;
+    enablePromptCaching?: boolean;
+    enableResponseCache?: boolean;
+  }
 ): Promise<{
   verified: DedupPipelineOutput['conflicts'];
   aiVerified: boolean;
@@ -486,21 +520,24 @@ async function verifyConflictsWithAi(
     return { verified: candidates, aiVerified: false, usageDelta: null };
   }
 
-  const batch = candidates.slice(0, 40).map((c) => ({
-    id: c.id,
-    topic: c.topic,
-    excerptA: c.excerptA,
-    excerptB: c.excerptB,
-  }));
+  const optMode = options?.optimizationMode || 'balanced_pro';
+  const wire = buildCompactConflictBatchWire(
+    candidates.map((c) => ({
+      id: c.id,
+      topic: c.topic,
+      excerptA: c.excerptA,
+      excerptB: c.excerptB,
+    })),
+    optMode
+  );
 
-  const prompt = [
-    'شما ممیز ارشد دقیق اسناد فنی هستید. فهرست زیر نامزدهای احتمالی «تناقض» بین دو فایل مختلف است.',
-    'برای هر مورد با سخت‌گیری کامل بررسی کن آیا دو متن واقعاً با یکدیگر **تضاد منطقی یا عددی ناسازگار درباره دقیقاً یک موضوع و یک شرط یکسان** دارند (isRealConflict: true) یا فقط **مکمل یکدیگر، ردیف‌های موازی، مثال‌های متفاوت، بسط/توضیح بیشتر، یا مربوط به دو حالت/شرط مختلف** هستند (isRealConflict: false).',
-    'مثال عدم تناقض (false): «عدد ۱۴ در دسیمال = حرف E» در برابر «عدد ۱۱ در دسیمال = حرف B» (مکمل هم هستند)، یا «فشار در دور آرام ۱.۵ بار» در برابر «فشار در تمام‌گاز ۴ بار» (دو شرط مختلف).',
-    'مثال تناقض واقعی (true): «حداکثر فشار ریل سوخت در حالت تمام‌گاز ۴ بار است» در برابر «حداکثر فشار ریل سوخت در حالت تمام‌گاز ۶ بار است» (دقیقاً یک موضوع و یک شرط با دو مقدار ناسازگار).',
-    'خروجی حتماً JSON با کلید results (آرایه‌ای از اشیاء {id, isRealConflict, shortReason}) باشد.',
-    `نامزدها:\n${JSON.stringify(batch)}`,
-  ].join('\n\n');
+  const systemInstruction = [
+    'شما ممیز ارشد دقیق اسناد فنی ریمپ و کالیبراسیون ECU هستید.',
+    'برای هر نامزد با سخت‌گیری کامل بررسی کن آیا دو متن واقعاً **تضاد منطقی یا عددی ناسازگار درباره دقیقاً یک موضوع و یک شرط یکسان** دارند (isRealConflict: true) یا فقط **مکمل، ردیف‌های موازی، مثال متفاوت یا دو شرط مختلف** هستند (isRealConflict: false).',
+    'خروجی حتماً JSON معتبر با کلید results (آرایه‌ای از {id, isRealConflict, shortReason}) باشد.',
+  ].join('\n');
+
+  const prompt = `نامزدهای احتمالی تناقض:\n${wire.wireText}`;
 
   const schema = {
     type: Type.OBJECT,
@@ -521,11 +558,46 @@ async function verifyConflictsWithAi(
     required: ['results'],
   };
 
+  const activeModelId = isNonGoogleProvider(provider)
+    ? provider.customModelId
+    : normalizeGoogleModelId(preferredGoogleModel);
+
+  // Deterministic prompt-hash LRU cache -> 0 tokens on repeated runs!
+  const cacheKey = buildAiTaskCacheKey(['conflict_triage', activeModelId, wire.wireText]);
+  if (options?.enableResponseCache !== false) {
+    const cached = getCachedAiTaskResult(cacheKey);
+    if (cached) {
+      const parsedCached = safeParseGeminiJson<{
+        results?: Array<{ id?: string; isRealConflict?: boolean; shortReason?: string }>;
+      }>(cached.text, {});
+      if (Array.isArray(parsedCached.results) && parsedCached.results.length > 0) {
+        const verdictById = new Map(parsedCached.results.map((r) => [String(r.id || ''), r]));
+        const verified = candidates.filter((c) => {
+          const v = verdictById.get(c.id);
+          return v ? v.isRealConflict === true : true;
+        });
+        return {
+          verified,
+          aiVerified: true,
+          usageDelta: {
+            promptTokens: 0,
+            outputTokens: 0,
+            totalTokens: 0,
+            requestCount: 0,
+            savedTokensByOptimization: cached.savedPromptTokens + wire.estimatedTokensSaved,
+            cachedCallHit: true,
+            modelUsed: cached.modelUsed,
+          },
+        };
+      }
+    }
+  }
+
   const attempts: Array<{ model: string; level: ThinkingLevel }> =
     isNonGoogleProvider(provider)
-      ? [{ model: provider.customModelId, level: ThinkingLevel.MEDIUM }]
+      ? [{ model: provider.customModelId, level: ThinkingLevel.LOW }]
       : [
-          { model: normalizeGoogleModelId(preferredGoogleModel), level: ThinkingLevel.MEDIUM },
+          { model: normalizeGoogleModelId(preferredGoogleModel), level: ThinkingLevel.LOW },
           {
             model:
               normalizeGoogleModelId(preferredGoogleModel) === 'gemini-4-hydrogen'
@@ -541,15 +613,25 @@ async function verifyConflictsWithAi(
         provider,
         googleModel: attempt.model,
         thinkingLevel: attempt.level,
+        systemInstruction,
         prompt,
         expectJson: true,
         googleResponseSchema: schema,
+        enablePromptCaching: options?.enablePromptCaching !== false,
+        savedTokensByOptimization: wire.estimatedTokensSaved,
       });
       const parsed = safeParseGeminiJson<{
         results?: Array<{ id?: string; isRealConflict?: boolean; shortReason?: string }>;
       }>(res.text, {});
 
       if (Array.isArray(parsed.results) && parsed.results.length > 0) {
+        if (options?.enableResponseCache !== false) {
+          setCachedAiTaskResult(cacheKey, {
+            text: res.text,
+            modelUsed: res.modelUsed,
+            savedPromptTokens: res.usageDelta.promptTokens || wire.estimatedCompactTokens,
+          });
+        }
         const verdictById = new Map(parsed.results.map((r) => [String(r.id || ''), r]));
         const verified = candidates.filter((c) => {
           const v = verdictById.get(c.id);
@@ -570,20 +652,7 @@ function buildChapterExcerpt(
   nodeId: string,
   maxChars = 2200
 ): string {
-  const parts: string[] = [];
-  let len = 0;
-  for (const u of units) {
-    if (u.outlineNodeId !== nodeId || u.status === 'merged') continue;
-    const snippet = u.rawText.trim();
-    if (!snippet) continue;
-    if (len + snippet.length > maxChars) {
-      parts.push(snippet.slice(0, Math.max(120, maxChars - len)));
-      break;
-    }
-    parts.push(snippet);
-    len += snippet.length + 2;
-  }
-  return parts.join('\n\n');
+  return extractEntityPreservingExcerpt(units, nodeId, maxChars);
 }
 
 function formatBundleForClient(bundle: NonNullable<Awaited<ReturnType<typeof getProjectBundle>>>) {
@@ -1417,19 +1486,36 @@ export function createProjectRouter(): Router {
 
       const settings = (bundle.project.settingsJson || {}) as Partial<DocxExportConfig>;
       const useAi = settings.useAiBackend !== false;
-      const resolvedProvider = useAi ? resolveAiProviderFromRequest(req) : null;
       const requestedGoogleModel = normalizeGoogleModelId(settings.aiModel);
+      const conflictTaskCtx = useAi
+        ? resolveProviderForTaskFromRequest(req, 'conflict_triage', requestedGoogleModel)
+        : null;
 
-      // Pass 1B: Optional Batched AI Semantic Conflict Verification (drops complementary false positives)
+      // Pass 1B: Optional Batched AI Semantic Conflict Verification (routed to Economy tier by default)
       let finalConflicts = dedup.conflicts;
       let dedupAiUsage = extractAiUsageFromCheckpoint(
         (bundle.project.checkpointJson || {}) as Record<string, unknown>
       );
-      if (resolvedProvider && !resolvedProvider.validationError && resolvedProvider.apiKey && dedup.conflicts.length > 0) {
+      const capCheckConflict = conflictTaskCtx
+        ? checkHardCostCap(dedupAiUsage, conflictTaskCtx.hardCostCapUsd)
+        : { allowed: true, spentUsd: 0 };
+
+      if (
+        conflictTaskCtx &&
+        capCheckConflict.allowed &&
+        !conflictTaskCtx.provider.validationError &&
+        conflictTaskCtx.provider.apiKey &&
+        dedup.conflicts.length > 0
+      ) {
         const verifiedResult = await verifyConflictsWithAi(
-          resolvedProvider,
+          conflictTaskCtx.provider,
           dedup.conflicts,
-          requestedGoogleModel
+          conflictTaskCtx.googleModel,
+          {
+            optimizationMode: conflictTaskCtx.optimizationMode,
+            enablePromptCaching: conflictTaskCtx.enablePromptCaching,
+            enableResponseCache: conflictTaskCtx.enableResponseCache,
+          }
         );
         if (verifiedResult.usageDelta) {
           dedupAiUsage = mergeAiUsageDelta(dedupAiUsage, verifiedResult.usageDelta);
@@ -1465,7 +1551,7 @@ export function createProjectRouter(): Router {
         conflictRows: finalConflicts,
       });
 
-      // Reload updated units and build Stage 3 proposed outline
+      // Reload updated units and build Stage 3 proposed outline (with zero-token domain topic clustering!)
       const afterDedup = await getProjectBundle(projectId, user.uid);
       if (!afterDedup) {
         res.status(404).json({ error: 'پروژه پس از ادغام یافت نشد.' });
@@ -1480,64 +1566,134 @@ export function createProjectRouter(): Router {
         units: formattedAfter.contentUnits as unknown as Parameters<typeof buildInitialOutline>[0]['units'],
       });
 
-      // Optional Pass 2: AI semantic refinement of outline chapter titles (never drops units!)
+      // Optional Pass 2: AI semantic refinement of outline chapter titles & multi-file ordering
+      // Routed to `semantic_reorder` (Balanced) for multi-file merges, or `outline_polish` (Economy) otherwise!
+      const isMultiFileMerge = workflowMode === 'multi_merge' && formattedAfter.sourceFiles.length >= 2;
+      const outlineTaskType = isMultiFileMerge ? 'semantic_reorder' : 'outline_polish';
+      const outlineTaskCtx = useAi
+        ? resolveProviderForTaskFromRequest(req, outlineTaskType, requestedGoogleModel)
+        : null;
+      const capCheckOutline = outlineTaskCtx
+        ? checkHardCostCap(dedupAiUsage, outlineTaskCtx.hardCostCapUsd)
+        : { allowed: true, spentUsd: 0 };
+
       if (
-        resolvedProvider &&
-        !resolvedProvider.validationError &&
-        resolvedProvider.apiKey &&
+        outlineTaskCtx &&
+        capCheckOutline.allowed &&
+        !outlineTaskCtx.provider.validationError &&
+        outlineTaskCtx.provider.apiKey &&
         proposed.nodes.length >= 2 &&
-        proposed.nodes.length <= 24
+        proposed.nodes.length <= 28
       ) {
         try {
-          const level = resolveThinkingLevel(requestedGoogleModel, settings.aiThinkingLevel);
-          const outlinePreview = proposed.nodes.map((n) => ({
-            id: n.id,
-            title: n.title,
-            summary: n.summary,
-          }));
+          const outlineWire = buildCompactOutlineWire(proposed.nodes);
+          const outlineLedger = extractTechnicalFactLedger(
+            afterDedup.contentUnits,
+            proposed.nodes
+          );
+          const antiDriftBlock = outlineTaskCtx.enableAntiDriftGuard
+            ? buildAntiDriftContract(outlineLedger, outlineTaskType)
+            : '';
           const outlineEditorialDirective = buildEditorialSystemDirective(
             bundle.project.settingsJson
           );
-          const outlinePrompt = `${outlineEditorialDirective}\n\nفهرست فصل‌های پیشنهادی زیر برای حالت «${workflowMode}» از فایل‌های کاربر استخراج شده است. لطفاً فقط عناوین فارسی فصل‌ها را حرفه‌ای، یکدست، دقیق و منسجم مطابق لحن انتخاب‌شده کاربر کن (بدون حذف یا تغییر id فصل‌ها و بدون تغییر کدهای فنی). خروجی JSON با کلید refinedNodes باشد:\n${JSON.stringify(outlinePreview)}`;
+          const outlineSystemInstruction = [
+            outlineEditorialDirective,
+            antiDriftBlock,
+            'فقط عناوین و خلاصه فارسی فصل‌ها را یکدست، حرفه‌ای و دقیق کن (بدون حذف یا تغییر id فصل‌ها و بدون حذف کدهای ECU/WinOLS). خروجی صرفاً JSON با کلید refinedNodes باشد.',
+          ]
+            .filter(Boolean)
+            .join('\n\n');
+          const outlinePrompt = `حالت پروژه: ${workflowMode}\nفهرست فصل‌های استخراج‌شده:\n${outlineWire.wireText}`;
 
-          const aiRes = await generateUnifiedTextOrJson({
-            provider: resolvedProvider,
-            googleModel: requestedGoogleModel,
-            thinkingLevel: level,
-            prompt: outlinePrompt,
-            expectJson: true,
-            googleResponseSchema: {
-              type: Type.OBJECT,
-              properties: {
-                refinedNodes: {
-                  type: Type.ARRAY,
-                  items: {
-                    type: Type.OBJECT,
-                    properties: {
-                      id: { type: Type.STRING },
-                      title: { type: Type.STRING },
-                      summary: { type: Type.STRING },
+          const outlineModelKey = isNonGoogleProvider(outlineTaskCtx.provider)
+            ? outlineTaskCtx.provider.customModelId
+            : outlineTaskCtx.googleModel;
+          const outlineCacheKey = buildAiTaskCacheKey([
+            outlineTaskType,
+            outlineModelKey,
+            outlineSystemInstruction,
+            outlineWire.wireText,
+          ]);
+
+          let outlineJsonText = '';
+          const cachedOutline =
+            outlineTaskCtx.enableResponseCache
+              ? getCachedAiTaskResult(outlineCacheKey)
+              : null;
+
+          if (cachedOutline) {
+            outlineJsonText = cachedOutline.text;
+            dedupAiUsage = mergeAiUsageDelta(dedupAiUsage, {
+              promptTokens: 0,
+              outputTokens: 0,
+              totalTokens: 0,
+              requestCount: 0,
+              savedTokensByOptimization: cachedOutline.savedPromptTokens + outlineWire.estimatedTokensSaved,
+              cachedCallHit: true,
+              modelUsed: cachedOutline.modelUsed,
+            });
+          } else {
+            const level = resolveThinkingLevel(outlineTaskCtx.googleModel, settings.aiThinkingLevel);
+            const aiRes = await generateUnifiedTextOrJson({
+              provider: outlineTaskCtx.provider,
+              googleModel: outlineTaskCtx.googleModel,
+              thinkingLevel: level,
+              systemInstruction: outlineSystemInstruction,
+              prompt: outlinePrompt,
+              expectJson: true,
+              enablePromptCaching: outlineTaskCtx.enablePromptCaching,
+              savedTokensByOptimization: outlineWire.estimatedTokensSaved,
+              googleResponseSchema: {
+                type: Type.OBJECT,
+                properties: {
+                  refinedNodes: {
+                    type: Type.ARRAY,
+                    items: {
+                      type: Type.OBJECT,
+                      properties: {
+                        id: { type: Type.STRING },
+                        title: { type: Type.STRING },
+                        summary: { type: Type.STRING },
+                      },
                     },
                   },
                 },
               },
-            },
-          });
-
-          dedupAiUsage = mergeAiUsageDelta(dedupAiUsage, aiRes.usageDelta);
+            });
+            outlineJsonText = aiRes.text;
+            dedupAiUsage = mergeAiUsageDelta(dedupAiUsage, aiRes.usageDelta);
+            if (outlineTaskCtx.enableResponseCache && outlineJsonText) {
+              setCachedAiTaskResult(outlineCacheKey, {
+                text: outlineJsonText,
+                modelUsed: aiRes.modelUsed,
+                savedPromptTokens: aiRes.usageDelta.promptTokens || outlineWire.estimatedCompactTokens,
+              });
+            }
+          }
 
           const parsedAi = safeParseGeminiJson<{
             refinedNodes?: Array<{ id?: string; title?: string; summary?: string }>;
-          }>(aiRes.text, {});
+          }>(outlineJsonText, {});
+
           if (Array.isArray(parsedAi.refinedNodes)) {
-            const byId = new Map(parsedAi.refinedNodes.map((r) => [r.id, r]));
+            const validated = outlineTaskCtx.enableAntiDriftGuard
+              ? validateOutlineRefinementOutput(parsedAi.refinedNodes, proposed.nodes, outlineLedger)
+              : {
+                  acceptedById: new Map(
+                    parsedAi.refinedNodes
+                      .filter((r) => r.id)
+                      .map((r) => [String(r.id), { title: r.title?.trim(), summary: r.summary?.trim() }])
+                  ),
+                };
+
             for (const node of proposed.nodes) {
-              const r = byId.get(node.id);
-              if (r?.title && r.title.trim().length >= 3) {
-                node.title = r.title.trim();
+              const r = validated.acceptedById.get(node.id);
+              if (r?.title && r.title.length >= 3) {
+                node.title = r.title;
               }
-              if (r?.summary && r.summary.trim().length >= 6) {
-                node.summary = r.summary.trim();
+              if (r?.summary && r.summary.length >= 6) {
+                node.summary = r.summary;
               }
             }
           }
@@ -2359,7 +2515,13 @@ export function createProjectRouter(): Router {
         return;
       }
 
-      const deepProvider = resolveAiProviderFromRequest(req);
+      const deepSettingsPre = (bundle.project.settingsJson || {}) as Partial<DocxExportConfig>;
+      const deepTaskCtx = resolveProviderForTaskFromRequest(
+        req,
+        'deep_review',
+        normalizeGoogleModelId(deepSettingsPre.aiModel)
+      );
+      const deepProvider = deepTaskCtx.provider;
       if (deepProvider.validationError) {
         res.status(400).json({ error: deepProvider.validationError });
         return;
@@ -2369,6 +2531,16 @@ export function createProjectRouter(): Router {
           error:
             'کلید API هوش مصنوعی فعال نیست. می‌توانید کلید شخصی Google AI Studio یا ارائه‌دهنده سفارشی خود را در بخش تنظیمات وارد کنید.',
         });
+        return;
+      }
+
+      // Enforce Hard Cost Cap BEFORE invoking expensive Flagship model
+      const currentUsageBeforeReview = extractAiUsageFromCheckpoint(
+        (bundle.project.checkpointJson || {}) as Record<string, unknown>
+      );
+      const deepCapCheck = checkHardCostCap(currentUsageBeforeReview, deepTaskCtx.hardCostCapUsd);
+      if (!deepCapCheck.allowed) {
+        res.status(402).json({ error: deepCapCheck.errorMessageFa });
         return;
       }
 
@@ -2402,54 +2574,43 @@ export function createProjectRouter(): Router {
       emitStream({
         type: 'progress',
         percent: 8,
-        stage: `بررسی ساختار ${toPersianDigits(nodes.length)} فصل و واحدهای محتوایی پروژه...`,
+        stage: `بررسی ساختار ${toPersianDigits(nodes.length)} فصل و فشرده‌سازی هوشمند کانتکست (${deepTaskCtx.tierLabelFa})...`,
       });
 
-      // Dynamically budget chapter excerpts so large multi-chapter books stay fast and well within model limits
-      const detailedNodeLimit = Math.min(nodes.length, 28);
-      const perChapterChars = Math.max(260, Math.min(1100, Math.floor(18000 / Math.max(1, detailedNodeLimit))));
-
-      const chapterDigests = nodes.slice(0, detailedNodeLimit).map((n) => {
-        const nodeUnits = bundle.contentUnits.filter(
-          (u) => u.outlineNodeId === n.id && u.status !== 'merged'
-        );
-        return {
-          nodeId: n.id,
-          order: n.nodeOrder,
-          title: n.title,
-          unitCount: nodeUnits.length,
-          tableCount: nodeUnits.filter((u) => u.unitType === 'table').length,
-          calloutCount: nodeUnits.filter((u) => u.unitType === 'callout').length,
-          excerpt: buildChapterExcerpt(bundle.contentUnits, n.id, perChapterChars),
-        };
+      // Entity-preserving extractive compression + compact wire notation (-35% to -55% prompt tokens!)
+      const digestWire = buildCompactChapterDigestsWire({
+        nodes,
+        units: bundle.contentUnits,
+        optimizationMode: deepTaskCtx.optimizationMode,
       });
+      const detailedNodeLimit = digestWire.detailedNodeCount;
 
-      const remainingChaptersSummary =
-        nodes.length > detailedNodeLimit
-          ? nodes.slice(detailedNodeLimit).map((n) => ({
-              nodeId: n.id,
-              order: n.nodeOrder,
-              title: n.title,
-            }))
-          : [];
+      // Technical Fact Anchor Ledger for Anti-Drift & Anti-Hallucination verification
+      const factLedger = extractTechnicalFactLedger(bundle.contentUnits, nodes);
+      const antiDriftContract = deepTaskCtx.enableAntiDriftGuard
+        ? buildAntiDriftContract(factLedger, 'deep_review')
+        : '';
 
       const editorialDirective = buildEditorialSystemDirective(bundle.project.settingsJson);
 
-      const prompt = [
+      const deepSystemInstruction = [
         'شما سردبیر ارشد فنی و ممیز کیفیت اسناد حرفه‌ای ریمپ و کالیبراسیون ECU به زبان فارسی هستید.',
         editorialDirective,
-        `سند «${bundle.project.title}» (حالت: ${bundle.project.workflowMode}) را با بالاترین دقت بررسی کن و هرگونه نقص ساختاری، عنوان مبهم، نبود جمع‌بندی/هشدار کلیدی، داده متراکم قابل تبدیل به جدول (به‌ویژه جداول تغییرات WinOLS شامل نام نقشه، آدرس هگز، ناحیه دور/بار و مقدار تغییر)، یا شکاف منطقی بین فصل‌ها را کشف و برطرف کن.`,
-        'قانون مطلق عدم افت محتوا (Strict Zero-Loss): هیچ بخشی از متن اصلی کاربر را حذف نکن؛ فقط بهبودهای افزایشی و ساختاری (اصلاح عنوان فصل، افزودن باکس نکته/هشدار/جمع‌بندی، ساخت جدول مقایسه‌ای/راهنمای WinOLS و افزودن پاراگراف پیوندی یا تعریف جامانده) مطابق سطح دخالت و لحن بالا ارائه بده.',
+        antiDriftContract,
+        'قانون مطلق عدم افت محتوا (Strict Zero-Loss): هیچ بخشی از متن اصلی کاربر را حذف نکن؛ فقط بهبودهای افزایشی و ساختاری (اصلاح عنوان فصل، افزودن باکس نکته/هشدار/جمع‌بندی، ساخت جدول مقایسه‌ای/راهنمای WinOLS و افزودن پاراگراف پیوندی یا تعریف جامانده) ارائه بده.',
         'نکته فرمت جدول: در addedTables هر ردیف داخل آرایه rows باید یک رشته با جداکننده « | » بین ستون‌ها باشد (مثلاً: "مقدار اول | مقدار دوم | توضیح").',
+        'خروجی باید صرفاً یک شیء JSON معتبر مطابق ساختار خواسته‌شده باشد.',
+      ]
+        .filter(Boolean)
+        .join('\n\n');
+
+      const prompt = [
+        `سند «${bundle.project.title}» (حالت: ${bundle.project.workflowMode}) را با بالاترین دقت ممیزی کن و هرگونه نقص ساختاری، عنوان مبهم، نبود هشدار کلیدی، داده متراکم قابل تبدیل به جدول WinOLS (شامل نام نقشه، آدرس هگز مستند، ناحیه دور/بار و تغییر)، یا شکاف منطقی بین فصل‌ها را کشف و برطرف کن.`,
         body.focusNote ? `تمرکز ویژه درخواست‌شده توسط کاربر: ${body.focusNote}` : '',
-        `خلاصه ساختار و محتوای فصل‌های سند:\n${JSON.stringify(chapterDigests)}`,
-        remainingChaptersSummary.length > 0
-          ? `فهرست سایر فصل‌های سند:\n${JSON.stringify(remainingChaptersSummary)}`
-          : '',
+        `چکیده فشرده و با چگالی بالای فنی فصل‌های سند:\n${digestWire.wireText}`,
         bundle.conflicts.length > 0
           ? `تعداد تناقض‌های شناسایی‌شده بین فایل‌ها: ${bundle.conflicts.length}`
           : '',
-        'خروجی باید صرفاً یک شیء JSON معتبر مطابق ساختار خواسته‌شده باشد.',
       ]
         .filter(Boolean)
         .join('\n\n');
@@ -2567,10 +2728,9 @@ export function createProjectRouter(): Router {
         }>;
       };
 
-      const deepSettings = (bundle.project.settingsJson || {}) as Partial<DocxExportConfig>;
-      const preferredDeepModel = normalizeGoogleModelId(deepSettings.aiModel);
+      const preferredDeepModel = normalizeGoogleModelId(deepTaskCtx.googleModel);
 
-      // Resilient multi-tier reasoning ladder using strictly Gemini 4 Hydrogen & Gemini 3.8 Flash (or custom OpenAI model)
+      // Resilient multi-tier reasoning ladder using configured Flagship/Primary model
       const reviewAttempts: Array<{
         model: string;
         level: ThinkingLevel;
@@ -2602,7 +2762,7 @@ export function createProjectRouter(): Router {
       emitStream({
         type: 'progress',
         percent: 18,
-        stage: `آماده‌سازی چکیده هوشمند ${toPersianDigits(detailedNodeLimit)} فصل محوری و قوانین ممیزی بدون افت...`,
+        stage: `آماده‌سازی چکیده فشرده ${toPersianDigits(detailedNodeLimit)} فصل (صرفه‌جویی ${toPersianDigits(digestWire.savingsPercent)}٪ توکن ورودی) و سپر ضد انحراف...`,
       });
 
       let parsed: DeepReviewParsed | null = null;
@@ -2621,7 +2781,7 @@ export function createProjectRouter(): Router {
           percent: currentPct,
           stage:
             i === 0
-              ? `در حال تحلیل عمیق سند با مدل ${attempt.model} (سطح استدلال ${attempt.levelLabel})...`
+              ? `در حال تحلیل عمیق سند با مدل ${attempt.model} (${deepTaskCtx.tierLabelFa} · ${attempt.levelLabel})...`
               : `تلاش مجدد با مسیر جایگزین ${attempt.model} (سطح ${attempt.levelLabel})...`,
           model: attempt.model,
           thinkingLevel: attempt.levelLabel,
@@ -2649,9 +2809,12 @@ export function createProjectRouter(): Router {
             provider: deepProvider,
             googleModel: attempt.model,
             thinkingLevel: attempt.level,
+            systemInstruction: deepSystemInstruction,
             prompt,
             expectJson: true,
             googleResponseSchema: attempt.useSchema ? deepReviewSchema : undefined,
+            enablePromptCaching: deepTaskCtx.enablePromptCaching,
+            savedTokensByOptimization: digestWire.estimatedTokensSaved,
             usageFlags: { isDeepReview: true },
           });
           const candidate = safeParseGeminiJson<DeepReviewParsed | null>(aiRes.text, null);
@@ -2693,10 +2856,21 @@ export function createProjectRouter(): Router {
       emitStream({
         type: 'progress',
         percent: 78,
-        stage: 'اعتبارسنجی گزارش هوش مصنوعی و آماده‌سازی بهبودهای بدون افت...',
+        stage: 'اجرای سپر ضد انحراف و ضد توهم هگز روی گزارش هوش مصنوعی...',
         model: modelUsed,
         thinkingLevel: thinkingLevelUsed,
       });
+
+      const antiDriftCheck = deepTaskCtx.enableAntiDriftGuard
+        ? validateDeepReviewOutput(parsed, nodes, factLedger)
+        : {
+            sanitized: parsed,
+            droppedInvalidNodes: 0,
+            flaggedHallucinatedHex: [] as string[],
+            driftWarningsFa: [] as string[],
+            integrityScore: 100,
+          };
+      parsed = antiDriftCheck.sanitized;
 
       const validNodeIds = new Set(nodes.map((n) => n.id));
       const fallbackNode = nodes[0];
@@ -2890,6 +3064,12 @@ export function createProjectRouter(): Router {
           paragraphsAdded,
         },
         findings,
+        tierUsed: deepTaskCtx.tierLabelFa,
+        tokenSavingsPercent: digestWire.savingsPercent,
+        antiDriftIntegrityScore: antiDriftCheck.integrityScore,
+        ...(antiDriftCheck.driftWarningsFa.length > 0
+          ? { antiDriftWarnings: antiDriftCheck.driftWarningsFa }
+          : {}),
       };
 
       const prevReviewCp = (bundle.project.checkpointJson || {}) as Record<string, unknown>;
@@ -2986,7 +3166,20 @@ export function createProjectRouter(): Router {
         return;
       }
 
-      const chatProvider = resolveAiProviderFromRequest(req);
+      // Smart dynamic chat tier routing: short read-only Q&A escalates down to Economy tier
+      // when Multi-Tier Routing is enabled, while structural editing requests stay on Balanced tier!
+      const isStructuralEditIntent =
+        /(?:تغییر\s*نام|جابه‌?جا|انتقال|تقسیم|ادغام|جدول|باکس|کادر|هشدار|اضافه\s*کن|درج\s*کن|فصل|بساز|اصلاح\s*کن|بازنویسی|وینولز|winols|damos|a2l)/i.test(
+          message
+        ) || Boolean(body.enableGoogleSearch);
+
+      const chatTaskCtx = resolveProviderForTaskFromRequest(
+        req,
+        'editor_chat',
+        normalizeGoogleModelId(body.model),
+        !isStructuralEditIntent && message.length < 180 ? 'economy' : undefined
+      );
+      const chatProvider = chatTaskCtx.provider;
       if (chatProvider.validationError) {
         res.status(400).json({ error: chatProvider.validationError });
         return;
@@ -2999,9 +3192,19 @@ export function createProjectRouter(): Router {
         return;
       }
 
-      const requestedModel = normalizeGoogleModelId(body.model);
+      const currentChatUsage = extractAiUsageFromCheckpoint(
+        (bundle.project.checkpointJson || {}) as Record<string, unknown>
+      );
+      const chatCapCheck = checkHardCostCap(currentChatUsage, chatTaskCtx.hardCostCapUsd);
+      if (!chatCapCheck.allowed) {
+        res.status(402).json({ error: chatCapCheck.errorMessageFa });
+        return;
+      }
 
-      const projectContext = {
+      const requestedModel = normalizeGoogleModelId(chatTaskCtx.googleModel);
+      const chatBudget = getBudgetForOptimizationMode(chatTaskCtx.optimizationMode);
+
+      const chatWire = buildCompactChatContextWire({
         title: bundle.project.title,
         workflowMode: bundle.project.workflowMode,
         pipelineStage: bundle.project.pipelineStage,
@@ -3024,20 +3227,20 @@ export function createProjectRouter(): Router {
           status: c.status,
         })),
         coveragePercent: bundle.auditReport?.coveragePercent ?? null,
-      };
+      });
 
       const chatEditorialDirective = buildEditorialSystemDirective(bundle.project.settingsJson);
 
       const systemInstruction = [
         'شما دستیار هوشمند و سردبیر ارشد «استودیو صفحه‌آرایی و ادغام بدون افت اسناد» (متخصص جزوه‌های ریمپ و کالیبراسیون ECU/WinOLS) هستید.',
-        'همیشه به زبان فارسی دقیق، محترمانه و مختصر پاسخ دهید.',
+        'همیشه به زبان فارسی دقیق، محترمانه و مختصر پاسخ دهید و هیچ آدرس هگز یا عدد فنی غیرمستند نسازید.',
         chatEditorialDirective,
         'قانون مطلق: هرگز پیشنهادی ندهید که محتوای یکتایی از فایل‌های کاربر را حذف کند.',
         'اگر کاربر درخواست ویرایش ساختار سند دارد (مثل تغییر نام فصل، جابه‌جایی فصل، تقسیم فصل، افزودن باکس نکته، ساخت جدول مقایسه‌ای/راهنمای WinOLS یا درج متن جدید)، حتماً ابزار متناظر را با nodeId دقیق از کانتکست فراخوانی کنید تا کارت تأیید برای کاربر ساخته شود.',
-        `وضعیت فعلی سند پروژه:\n${JSON.stringify(projectContext)}`,
+        `کانتکست فشرده پروژه:\n${chatWire.wireText}`,
       ].join('\n');
 
-      // Non-Google provider chat branch (Anthropic Claude Opus/Sonnet, OpenAI, Custom OpenAI-compatible)
+      // Non-Google provider chat branch (Anthropic Claude Opus/Sonnet/Haiku, OpenAI, Custom OpenAI-compatible)
       // Also supports hybrid Web Search when user enables web search in chat!
       if (isNonGoogleProvider(chatProvider)) {
         const searchRoute = resolveWebSearchRouteFromRequest(req);
@@ -3064,7 +3267,7 @@ export function createProjectRouter(): Router {
         }
 
         const openAiMessages: Array<{ role: 'user' | 'assistant'; content: string }> = [
-          ...(Array.isArray(body.history) ? body.history.slice(-8) : []).map((h) => ({
+          ...(Array.isArray(body.history) ? body.history.slice(-chatBudget.chatHistoryLimit) : []).map((h) => ({
             role: (h.role === 'model' ? 'assistant' : 'user') as 'user' | 'assistant',
             content: h.text,
           })),
@@ -3074,6 +3277,7 @@ export function createProjectRouter(): Router {
           provider: chatProvider,
           systemInstruction,
           messages: openAiMessages,
+          enablePromptCaching: chatTaskCtx.enablePromptCaching,
         });
         const reply = customRes.text || 'درخواست شما بررسی شد.';
         const fallbackPrompt = Math.ceil((systemInstruction.length + message.length) / 3);
@@ -3086,6 +3290,9 @@ export function createProjectRouter(): Router {
             customRes.usage.totalTokens ||
             (customRes.usage.promptTokens || fallbackPrompt) +
               (customRes.usage.outputTokens || fallbackOutput),
+          cachedInputTokens: customRes.usage.cachedInputTokens || 0,
+          savedTokensByOptimization:
+            chatWire.estimatedTokensSaved + (customRes.usage.cachedInputTokens || 0),
           requestCount: 1,
           chatCallCount: 1,
           modelUsed: customRes.modelUsed,
@@ -3096,12 +3303,15 @@ export function createProjectRouter(): Router {
           proposals: [],
           groundingSources,
           modelUsed: customRes.modelUsed,
+          tierUsed: chatTaskCtx.tierLabelFa,
           ...(updatedChatUsage ? { aiUsage: updatedChatUsage } : {}),
         });
         return;
       }
 
-      const recentHistory = (Array.isArray(body.history) ? body.history.slice(-8) : []).map((h) => ({
+      const recentHistory = (
+        Array.isArray(body.history) ? body.history.slice(-chatBudget.chatHistoryLimit) : []
+      ).map((h) => ({
         role: h.role === 'model' ? 'model' : 'user',
         parts: [{ text: h.text }],
       }));
@@ -3419,6 +3629,78 @@ export function createProjectRouter(): Router {
     }
   });
 
+  // 14B. CHANGE LOG: RECORD CLIENT ACTIVITY OR MANUAL CHECKPOINT SNAPSHOT
+  router.post('/:id/revisions/log', async (req, res) => {
+    try {
+      const user = (req as AuthRequest).user!;
+      const projectId = req.params.id;
+      const body = (req.body || {}) as {
+        actionType?: RevisionActionType;
+        title?: string;
+        summary?: string;
+        captureSnapshot?: boolean;
+        extraDetails?: Record<string, unknown>;
+      };
+
+      const allowedClientActions = new Set<RevisionActionType>([
+        'manual_checkpoint',
+        'winols_map_edited',
+        'winols_damos_exported',
+        'docx_exported',
+        'markdown_exported',
+        'print_preview_opened',
+        'ai_provider_changed',
+        'audio_transcribed',
+        'settings_updated',
+      ]);
+
+      const actionType: RevisionActionType =
+        body.actionType && allowedClientActions.has(body.actionType)
+          ? body.actionType
+          : 'manual_checkpoint';
+
+      const title =
+        typeof body.title === 'string' && body.title.trim()
+          ? body.title.trim().slice(0, 180)
+          : 'ثبت نقطه بازیابی دستی';
+      const summary =
+        typeof body.summary === 'string' && body.summary.trim()
+          ? body.summary.trim().slice(0, 500)
+          : 'وضعیت فعلی پروژه در تاریخچه تغییرات ثبت شد.';
+
+      const shouldCaptureSnapshot =
+        actionType === 'manual_checkpoint' ? true : Boolean(body.captureSnapshot);
+
+      const created = await recordProjectRevision({
+        projectId,
+        ownerUid: user.uid,
+        actorType: 'user',
+        actorName: user.name || (user.isGuest ? 'کاربر مهمان' : 'کاربر استودیو'),
+        actionType,
+        title,
+        summary,
+        extraDetails:
+          body.extraDetails && typeof body.extraDetails === 'object' ? body.extraDetails : undefined,
+        captureSnapshot: shouldCaptureSnapshot,
+      });
+
+      if (!created) {
+        res.status(404).json({ error: 'پروژه موردنظر یافت نشد.' });
+        return;
+      }
+
+      const updatedRevisions = await listProjectRevisions(projectId, user.uid);
+      res.json({
+        ok: true,
+        revisions: (updatedRevisions || []).map(formatRevisionRowForClient),
+      });
+    } catch (err) {
+      res.status(500).json({
+        error: err instanceof Error ? err.message : 'خطا در ثبت رویداد تاریخچه پروژه.',
+      });
+    }
+  });
+
   // 15. CHANGE LOG: ROLLBACK PROJECT TO A PREVIOUS VERSION SNAPSHOT
   router.post('/:id/revisions/:revisionId/rollback', async (req, res) => {
     try {
@@ -3472,6 +3754,203 @@ export function createProjectRouter(): Router {
     } catch (err) {
       res.status(500).json({
         error: err instanceof Error ? err.message : 'خطا در بازگردانی پروژه به نسخه قبلی.',
+      });
+    }
+  });
+
+  // 16. DOMAIN-SPECIFIC AI HARNESS: INIT / REFRESH BLUEPRINT & COST PREVIEW (0 TOKENS)
+  router.post('/:id/harness/blueprint/init', async (req, res) => {
+    try {
+      const user = (req as AuthRequest).user!;
+      const { id: projectId } = req.params;
+      const body = (req.body || {}) as { budgetCapUsd?: number; forceReset?: boolean };
+      const result = await initHarnessBlueprintForProject({
+        req,
+        projectId,
+        ownerUid: user.uid,
+        budgetCapUsd: typeof body.budgetCapUsd === 'number' ? body.budgetCapUsd : undefined,
+        forceReset: Boolean(body.forceReset),
+      });
+      if (!result) {
+        res.status(404).json({ error: 'پروژه موردنظر یافت نشد.' });
+        return;
+      }
+      res.json({
+        ok: true,
+        harnessState: result.harnessState,
+        routingInfo: result.routingInfo,
+        bundle: formatBundleForClient(result.rawBundle),
+      });
+    } catch (err) {
+      res.status(500).json({
+        error: err instanceof Error ? err.message : 'خطا در مقداردهی نقشه راه هارنس.',
+      });
+    }
+  });
+
+  // 17. DOMAIN-SPECIFIC AI HARNESS: HITL GATE APPROVAL & GLOSSARY FREEZE
+  router.post('/:id/harness/blueprint/approve', async (req, res) => {
+    try {
+      const user = (req as AuthRequest).user!;
+      const { id: projectId } = req.params;
+      const body = (req.body || {}) as { budgetCapUsd?: number; glossaryEntries?: unknown[] };
+      const result = await approveHarnessBlueprintForProject({
+        req,
+        projectId,
+        ownerUid: user.uid,
+        budgetCapUsd: typeof body.budgetCapUsd === 'number' ? body.budgetCapUsd : undefined,
+        glossaryEntries: Array.isArray(body.glossaryEntries)
+          ? (body.glossaryEntries as any)
+          : undefined,
+        actorName: user.name || (user.isGuest ? 'کاربر مهمان' : 'کاربر استودیو'),
+      });
+      if (!result) {
+        res.status(404).json({ error: 'پروژه موردنظر یافت نشد.' });
+        return;
+      }
+      const updatedRevisions = await listProjectRevisions(projectId, user.uid);
+      res.json({
+        ok: true,
+        harnessState: result.harnessState,
+        routingInfo: result.routingInfo,
+        bundle: formatBundleForClient(result.rawBundle),
+        revisions: (updatedRevisions || []).map(formatRevisionRowForClient),
+      });
+    } catch (err) {
+      res.status(500).json({
+        error: err instanceof Error ? err.message : 'خطا در تایید دروازه HITL هارنس.',
+      });
+    }
+  });
+
+  // 18. DOMAIN-SPECIFIC AI HARNESS: STATELESS SINGLE-SUBSECTION STEP
+  router.post('/:id/harness/step', async (req, res) => {
+    const stepAbortController = new AbortController();
+    const onClientDisconnect = () => {
+      if (!res.writableEnded) {
+        stepAbortController.abort();
+      }
+    };
+    req.on('close', onClientDisconnect);
+
+    try {
+      const user = (req as AuthRequest).user!;
+      const { id: projectId } = req.params;
+      const body = (req.body || {}) as {
+        sectionId?: string;
+        allowBudgetOverride?: boolean;
+      };
+      const result = await executeHarnessStepForProject({
+        req,
+        projectId,
+        ownerUid: user.uid,
+        sectionId: typeof body.sectionId === 'string' ? body.sectionId : undefined,
+        allowBudgetOverride: Boolean(body.allowBudgetOverride),
+        abortSignal: stepAbortController.signal,
+        actorName: user.name || (user.isGuest ? 'کاربر مهمان' : 'کاربر استودیو'),
+      });
+      if (!result) {
+        if (!res.writableEnded) {
+          res.status(404).json({ error: 'پروژه موردنظر یافت نشد.' });
+        }
+        return;
+      }
+      if (!res.writableEnded) {
+        res.json({
+          ok: true,
+          done: result.done,
+          pausedByBudgetCap: Boolean(result.pausedByBudgetCap),
+          sectionId: result.sectionId,
+          outcome: result.outcome,
+          layer1: result.layer1,
+          layer2: result.layer2,
+          harnessState: result.harnessState,
+          bundle: formatBundleForClient(result.rawBundle),
+        });
+      }
+    } catch (err) {
+      if (res.writableEnded) return;
+      if (err instanceof HarnessStepConflictError) {
+        res.status(409).json({
+          ok: false,
+          code: err.code,
+          error: err.message,
+          activeStepLock: err.existingLock,
+        });
+        return;
+      }
+      if (err instanceof HarnessRunAbortedError) {
+        res.status(499).json({
+          ok: false,
+          code: err.code,
+          error: err.message,
+        });
+        return;
+      }
+      res.status(500).json({
+        error: err instanceof Error ? err.message : 'خطا در اجرای گام هارنس زیربخش.',
+      });
+    } finally {
+      req.off('close', onClientDisconnect);
+    }
+  });
+
+  // 19. DOMAIN-SPECIFIC AI HARNESS: RESOLVE QUARANTINED SUBSECTION MANUALLY
+  router.post('/:id/harness/quarantine/:sectionId/resolve', async (req, res) => {
+    try {
+      const user = (req as AuthRequest).user!;
+      const { id: projectId, sectionId } = req.params;
+      const body = (req.body || {}) as {
+        editedBlocks?: unknown[];
+        resolutionNote?: string;
+      };
+      const result = await resolveHarnessQuarantineItem({
+        projectId,
+        ownerUid: user.uid,
+        sectionId,
+        editedBlocks: Array.isArray(body.editedBlocks) ? (body.editedBlocks as any) : undefined,
+        resolutionNote: typeof body.resolutionNote === 'string' ? body.resolutionNote : undefined,
+        actorName: user.name || (user.isGuest ? 'کاربر مهمان' : 'کاربر استودیو'),
+      });
+      if (!result) {
+        res.status(404).json({ error: 'پروژه موردنظر یافت نشد.' });
+        return;
+      }
+      const updatedRevisions = await listProjectRevisions(projectId, user.uid);
+      res.json({
+        ok: true,
+        harnessState: result.harnessState,
+        bundle: formatBundleForClient(result.rawBundle),
+        revisions: (updatedRevisions || []).map(formatRevisionRowForClient),
+      });
+    } catch (err) {
+      res.status(500).json({
+        error: err instanceof Error ? err.message : 'خطا در تعیین‌تکلیف زیربخش قرنطینه‌شده.',
+      });
+    }
+  });
+
+  // 20. DOMAIN-SPECIFIC AI HARNESS: DETERMINISTIC SYNC SEMANTIC IR -> BOOK SNAPSHOT
+  router.post('/:id/harness/sync-book', async (req, res) => {
+    try {
+      const user = (req as AuthRequest).user!;
+      const { id: projectId } = req.params;
+      const result = await syncHarnessToBookSnapshot({
+        projectId,
+        ownerUid: user.uid,
+      });
+      if (!result) {
+        res.status(404).json({ error: 'پروژه موردنظر یافت نشد.' });
+        return;
+      }
+      res.json({
+        ok: true,
+        harnessState: result.harnessState,
+        bundle: formatBundleForClient(result.rawBundle),
+      });
+    } catch (err) {
+      res.status(500).json({
+        error: err instanceof Error ? err.message : 'خطا در همگام‌سازی Semantic IR با سند نهایی.',
       });
     }
   });

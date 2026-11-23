@@ -18,12 +18,15 @@ import {
   AiModelId,
   AiRewriteLevel,
   AiThinkingLevel,
+  ContentUnitDto,
   DocxExportConfig,
   FileRole,
   GoogleSearchMode,
+  OutlineNodeDto,
   OutputTonePreset,
   ProjectAiUsageLedger,
   ProjectSummaryDto,
+  SourceFileDto,
   WorkflowMode,
 } from '../lib/bookTypes';
 import {
@@ -40,6 +43,7 @@ import {
 import { toPersianDigits } from '../lib/formatParsers';
 import { AiQuotaGauge } from './AiQuotaGauge';
 import { FileDropzone, QueuedUploadFile } from './FileDropzone';
+import { SidebarContentSearch } from './SidebarContentSearch';
 
 const WORKFLOW_MODES: Array<{
   id: WorkflowMode;
@@ -78,6 +82,9 @@ interface WorkspaceSidebarProps {
   activeProjectId: string | null;
   activeWorkflowMode: WorkflowMode;
   queuedFiles: QueuedUploadFile[];
+  sourceFiles?: SourceFileDto[];
+  contentUnits?: ContentUnitDto[];
+  outlineNodes?: OutlineNodeDto[];
   ingestedFilesCount: number;
   ingestedWordCount: number;
   chapterCount: number;
@@ -101,6 +108,11 @@ interface WorkspaceSidebarProps {
   onChangeConfig: (patch: Partial<DocxExportConfig>) => void;
   onChangeOptimization: (patch: Partial<DocxExportConfig['optimization']>) => void;
   onStartPipeline: () => Promise<void>;
+  onJumpToSearchResult?: (params: {
+    unitId: string;
+    outlineNodeId: string | null;
+    sourceFileId: string;
+  }) => void;
 }
 
 export const WorkspaceSidebar: React.FC<WorkspaceSidebarProps> = ({
@@ -108,6 +120,9 @@ export const WorkspaceSidebar: React.FC<WorkspaceSidebarProps> = ({
   activeProjectId,
   activeWorkflowMode,
   queuedFiles,
+  sourceFiles = [],
+  contentUnits = [],
+  outlineNodes = [],
   ingestedFilesCount,
   ingestedWordCount,
   chapterCount,
@@ -131,6 +146,7 @@ export const WorkspaceSidebar: React.FC<WorkspaceSidebarProps> = ({
   onChangeConfig,
   onChangeOptimization,
   onStartPipeline,
+  onJumpToSearchResult,
 }) => {
   const [showAdvanced, setShowAdvanced] = useState(false);
 
@@ -215,6 +231,14 @@ export const WorkspaceSidebar: React.FC<WorkspaceSidebarProps> = ({
             </div>
           )}
         </section>
+
+        {/* 1.5 Full-Text Search in Stage 1 Extracted Files */}
+        <SidebarContentSearch
+          sourceFiles={sourceFiles}
+          contentUnits={contentUnits}
+          outlineNodes={outlineNodes}
+          onJumpToResult={onJumpToSearchResult}
+        />
 
         {/* 2. 4 Workflow Modes */}
         <section className="space-y-2 border-t border-[#EAE5DA] pt-4">

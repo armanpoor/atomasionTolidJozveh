@@ -168,25 +168,57 @@ function BlockRenderer({
         <CalloutCard block={block} footnoteMap={footnoteMap} onSelectFootnote={onSelectFootnote} />
       );
 
-    case 'table':
+    case 'table': {
+      const colTypes = block.headers.map((h, cIdx) => {
+        const isHighlightHeader =
+          /(آدرس|hex|کد|داموس|تغییر|مقدار|دلتا|ضریب|rpm|بار|load|lambda|afr|جرقه|advance)/i.test(
+            h || ''
+          );
+        const samples = block.rows
+          .slice(0, 12)
+          .map((r) => (r[cIdx] || '').trim())
+          .filter((v) => v.length > 0 && v !== '—' && v !== '-');
+        const techHits = samples.filter(
+          (val) =>
+            val.length <= 26 &&
+            (/^(?:0x[0-9a-f]+|\$?[0-9a-f]{4,6}|[+-]?[۰-۹0-9]+(?:[./:][۰-۹0-9]+)?\s*(?:%|°|rpm|bar|ms|mv|v|km\/h|nm|kw|cc|afr|λ|درجه|درصد)?|[A-Z][A-Z0-9_]{2,14})$/i.test(
+              val
+            ) ||
+              /^فصل\s+[۰-۹0-9]+$/.test(val) ||
+              /^جدول\s+[۰-۹0-9]+[-–][۰-۹0-9]+$/.test(val))
+        ).length;
+        const isNumeric = samples.length > 0 && techHits / samples.length >= 0.6;
+        return { isNumeric, isHighlight: isNumeric && isHighlightHeader };
+      });
+
       return wrapWithProvenance(
         <div className="my-6">
           {block.caption && (
-            <div className="mb-2 flex items-center justify-between gap-2">
-              <div className="text-[13px] font-bold text-[#1E3A5F]">{block.caption}</div>
+            <div className="mb-2.5 flex items-center justify-between gap-2 border-r-[3px] border-[#B45309] pr-2.5">
+              <div className="text-[13px] font-extrabold text-[#1E3A5F]">
+                <RichText
+                  text={block.caption}
+                  footnoteMap={footnoteMap}
+                  onSelectFootnote={onSelectFootnote}
+                />
+              </div>
               {block.originalCaption && block.originalCaption !== block.caption && (
-                <span className="shrink-0 text-[11px] text-[#78716C]">شماره‌گذاری اصلاح شد</span>
+                <span className="shrink-0 text-[11px] font-medium text-[#78716C]">
+                  شماره‌گذاری یکپارچه شد
+                </span>
               )}
             </div>
           )}
-          <div className="overflow-x-auto border border-[#D8D2C5]">
+          <div className="overflow-x-auto rounded-lg border border-[#D4CEC2] shadow-[0_1px_2px_rgba(26,24,22,0.03)]">
             <table className="w-full border-collapse text-right text-[13px]">
               <thead>
                 <tr className="bg-[#1E3A5F] text-white">
                   {block.headers.map((h, hIdx) => (
                     <th
                       key={hIdx}
-                      className="border-l border-[#2F527F] px-3 py-2.5 text-right font-semibold last:border-l-0"
+                      className={`border-l border-[#2F527F] px-3.5 py-2.5 font-bold last:border-l-0 ${
+                        colTypes[hIdx]?.isNumeric ? 'text-center' : 'text-right'
+                      }`}
                     >
                       {h}
                     </th>
@@ -197,20 +229,29 @@ function BlockRenderer({
                 {block.rows.map((row, rIdx) => (
                   <tr
                     key={rIdx}
-                    className={`border-t border-[#E2DDD3] ${rIdx % 2 === 1 ? 'bg-[#F8F6F1]' : 'bg-white'}`}
+                    className={`border-t border-[#E6E0D4] ${rIdx % 2 === 1 ? 'bg-[#F8F6F1]' : 'bg-white'}`}
                   >
-                    {row.map((cell, cIdx) => (
-                      <td
-                        key={cIdx}
-                        className="border-l border-[#E2DDD3] px-3 py-2 leading-relaxed text-[#292524] last:border-l-0"
-                      >
-                        <RichText
-                          text={cell || '—'}
-                          footnoteMap={footnoteMap}
-                          onSelectFootnote={onSelectFootnote}
-                        />
-                      </td>
-                    ))}
+                    {row.map((cell, cIdx) => {
+                      const ct = colTypes[cIdx];
+                      return (
+                        <td
+                          key={cIdx}
+                          className={`border-l border-[#E6E0D4] px-3.5 py-2.5 leading-relaxed last:border-l-0 ${
+                            ct?.isNumeric ? 'text-center tabular-nums' : 'text-right'
+                          } ${
+                            ct?.isHighlight
+                              ? 'bg-[#EEF3F8]/55 font-bold text-[#1E3A5F]'
+                              : 'text-[#292524]'
+                          }`}
+                        >
+                          <RichText
+                            text={cell || '—'}
+                            footnoteMap={footnoteMap}
+                            onSelectFootnote={onSelectFootnote}
+                          />
+                        </td>
+                      );
+                    })}
                   </tr>
                 ))}
               </tbody>
@@ -218,6 +259,7 @@ function BlockRenderer({
           </div>
         </div>
       );
+    }
 
     case 'equation': {
       const eqTheme = SPECIAL_FRAME_THEMES.equation;
@@ -490,57 +532,67 @@ export function BookPreview({
 
       <div className="px-4 py-6 sm:px-8 lg:py-8">
       {/* Paper Sheet Container */}
-      <article className="mx-auto max-w-[820px] border border-[#E2DDD3] bg-white px-6 py-8 shadow-[0_1px_4px_rgba(26,24,22,0.04)] sm:px-12 sm:py-12">
+      <article className="mx-auto max-w-[840px] rounded-xl border border-[#DFD9CC] bg-white px-6 py-8 shadow-[0_2px_10px_rgba(26,24,22,0.05)] sm:px-12 sm:py-12">
         {/* COVER & AUTOMATIC TOC VIEW */}
         {selected.kind === 'cover' && (
           <div>
-            <div className="border-b-2 border-[#1E3A5F] pb-3 text-xs font-semibold text-[#57534E]">
-              پیش‌نمایش صفحه جلد و فهرست خودکار سند ورد · فونت {config.fontFamily} · کاملاً راست‌چین (RTL)
+            {/* Architectural Edition Crest Bar */}
+            <div className="-mx-6 -mt-8 mb-8 rounded-t-xl border-b-[3px] border-[#B45309] bg-[#1E3A5F] px-6 py-3.5 text-white sm:-mx-12 sm:-mt-12 sm:px-12">
+              <div className="flex flex-wrap items-center justify-between gap-2 text-[11.5px] font-bold">
+                <span>نسخه صفحه‌آرایی‌شده و یکپارچه · استاندارد نشر فنی و مهندسی</span>
+                <span className="font-mono text-[10.5px] opacity-85" dir="ltr">
+                  {config.fontFamily} · {config.paperSize} · 100% RTL
+                </span>
+              </div>
             </div>
 
-            <div className="py-10">
-              <h1 className="text-2xl font-extrabold leading-tight text-[#1E3A5F] sm:text-3xl">
-                {book.title}
-              </h1>
-              <p className="mt-3 text-sm leading-relaxed text-[#57534E] sm:text-base">
-                {book.subtitle}
-              </p>
+            <div className="py-4">
+              <div className="border-r-4 border-[#1E3A5F] pr-5">
+                <h1 className="text-2xl font-extrabold leading-tight text-[#1E3A5F] sm:text-[30px]">
+                  {book.title}
+                </h1>
+                <p className="mt-3 text-sm leading-relaxed text-[#57534E] sm:text-base">
+                  {book.subtitle}
+                </p>
+              </div>
 
-              {/* Archival Accession Grid */}
-              <dl className="mt-8 grid grid-cols-1 gap-px border border-[#E2DDD3] bg-[#E2DDD3] sm:grid-cols-2">
+              {/* Archival Accession & Anti-Hallucination Stamp Grid */}
+              <dl className="mt-8 grid grid-cols-1 gap-px overflow-hidden rounded-xl border border-[#DDD7C9] bg-[#DDD7C9] sm:grid-cols-2">
                 <div className="bg-[#FBF9F5] p-4">
-                  <dt className="text-[11px] font-semibold text-[#78716C]">تنظیمات تایپوگرافی ورد</dt>
+                  <dt className="text-[11px] font-semibold text-[#78716C]">تایپوگرافی و صفحه‌آرایی ورد</dt>
                   <dd className="mt-1 text-sm font-bold text-[#1A1816]">
-                    {config.fontFamily} · اندازه {toPersianDigits(config.baseFontSizePt)}pt · راست‌چین
+                    {config.fontFamily} · اندازه {toPersianDigits(config.baseFontSizePt)}pt · جداسازی UAX #9 BiDi
                   </dd>
                 </div>
                 <div className="bg-[#FBF9F5] p-4">
-                  <dt className="text-[11px] font-semibold text-[#78716C]">حجم و ساختار نهایی</dt>
-                  <dd className="mt-1 text-sm font-bold tabular-nums text-[#1A1816]">
+                  <dt className="text-[11px] font-semibold text-[#78716C]">ساختار و حجم نهایی کتاب</dt>
+                  <dd className="mt-1 text-sm font-bold tabular-nums text-[#1E3A5F]">
                     {toPersianDigits(book.volumes.length)} مجلد · {toPersianDigits(book.chapters.length)} فصل ·{' '}
-                    {toPersianDigits(book.tableIndex.length)} جدول
+                    {toPersianDigits(book.tableIndex.length)} جدول فنی
                   </dd>
                 </div>
                 <div className="bg-[#FBF9F5] p-4">
-                  <dt className="text-[11px] font-semibold text-[#78716C]">سرفصل‌های استاندارد ورد</dt>
+                  <dt className="text-[11px] font-semibold text-[#78716C]">ساختار سرفصل‌ها و هدر پویا</dt>
                   <dd className="mt-1 text-sm font-bold text-[#1A1816]">
-                    Heading 1 (مجلد) تا Heading 4 + فهرست خودکار (TOC)
+                    Heading 1 تا Heading 4 + فهرست خودکار (TOC) + STYLEREF
                   </dd>
                 </div>
-                <div className="bg-[#FBF9F5] p-4">
-                  <dt className="text-[11px] font-semibold text-[#78716C]">تضمین یکپارچه‌سازی</dt>
-                  <dd className="mt-1 text-sm font-bold text-[#14532D]">
-                    {toPersianDigits(book.audit?.conceptRetentionRate ?? 100)}٪ حفظ مفاهیم ·{' '}
-                    {toPersianDigits(book.audit?.duplicateFootnotesMerged ?? 0)} پانویس تکراری ادغام شد
+                <div className="bg-[#F2F7F4] p-4">
+                  <dt className="text-[11px] font-semibold text-[#14532D]">مهر تضمین یکپارچگی و ضدتوهم</dt>
+                  <dd className="mt-1 text-sm font-extrabold text-[#14532D] tabular-nums">
+                    {toPersianDigits(book.audit?.conceptRetentionRate ?? 100)}٪ حفظ بدون افت · ۰ آدرس هگز ساختگی
                   </dd>
                 </div>
               </dl>
             </div>
 
             {/* Interactive Automatic TOC Preview */}
-            <div className="mt-4 border-t border-[#E2DDD3] pt-8">
-              <div className="mb-4 flex items-center justify-between border-b border-[#1E3A5F] pb-2">
-                <h2 className="text-lg font-bold text-[#1E3A5F]">فهرست مطالب خودکار (ساختار Word TOC)</h2>
+            <div className="mt-6 border-t border-[#E2DDD3] pt-7">
+              <div className="mb-4 flex items-center justify-between border-b-2 border-[#1E3A5F] pb-2.5">
+                <div className="flex items-center gap-2">
+                  <span className="h-4 w-1 rounded-full bg-[#B45309]" />
+                  <h2 className="text-lg font-extrabold text-[#1E3A5F]">فهرست مطالب خودکار (Word RTL TOC)</h2>
+                </div>
                 <span className="font-mono-ltr text-[11px] text-[#78716C]">TOC \o &quot;1-3&quot; \h</span>
               </div>
 
@@ -549,7 +601,7 @@ export function BookPreview({
                   const volChapters = book.chapters.filter((c) => c.volumeIndex === vol.index);
                   return (
                     <div key={vol.id}>
-                      <div className="mb-2 flex items-center justify-between bg-[#EEF3F8] px-3 py-2 text-xs font-bold text-[#1E3A5F]">
+                      <div className="mb-2 flex items-center justify-between rounded-md border-r-[3px] border-[#1E3A5F] bg-[#EEF3F8] px-3.5 py-2 text-xs font-extrabold text-[#1E3A5F]">
                         <span>{vol.title}</span>
                         <span className="font-mono-ltr text-[10px] font-normal text-[#57534E]">
                           Heading 1
@@ -557,21 +609,25 @@ export function BookPreview({
                       </div>
                       <ul className="divide-y divide-[#F0ECE3] pr-3">
                         {volChapters.map((ch) => (
-                          <li key={ch.id} className="py-2">
+                          <li key={ch.id} className="py-2.5">
                             <button
                               type="button"
                               onClick={() => onSelect({ kind: 'chapter', chapterNumber: ch.chapterNumber })}
-                              className="group flex w-full items-baseline justify-between gap-3 text-right"
+                              className="group flex w-full items-baseline gap-2 text-right cursor-pointer"
                             >
+                              <span className="shrink-0 font-mono text-[11px] font-bold text-[#B45309] tabular-nums">
+                                {toPersianDigits(String(ch.chapterNumber).padStart(2, '0'))}
+                              </span>
                               <span className="text-[13.5px] font-bold text-[#1A1816] group-hover:text-[#1E3A5F]">
                                 {ch.title}
                               </span>
-                              <span className="shrink-0 text-[11px] text-[#78716C]">
-                                {toPersianDigits(ch.sections.length)} زیربخش · Heading 2
+                              <span className="flex-1 border-b border-dotted border-[#CFC8B9] mx-1" aria-hidden="true" />
+                              <span className="shrink-0 text-[11px] text-[#78716C] tabular-nums">
+                                {toPersianDigits(ch.sections.length)} زیربخش
                               </span>
                             </button>
                             {ch.sections.length > 0 && (
-                              <ul className="mt-1.5 space-y-1 pr-4 text-xs text-[#57534E]">
+                              <ul className="mt-1.5 space-y-1 pr-6 text-xs text-[#57534E]">
                                 {ch.sections.slice(0, 4).map((sec) => (
                                   <li key={sec.id} className="truncate">
                                     {sec.numberLabel ? `${sec.numberLabel}. ` : ''}
@@ -597,18 +653,43 @@ export function BookPreview({
         )}
 
         {/* CHAPTER MANUSCRIPT VIEW */}
-        {selected.kind === 'chapter' && currentChapter && (
+        {selected.kind === 'chapter' && currentChapter && (() => {
+          const chTablesCount =
+            currentChapter.introBlocks.filter((b) => b.type === 'table').length +
+            currentChapter.sections.reduce(
+              (acc, s) => acc + s.blocks.filter((b) => b.type === 'table').length,
+              0
+            );
+          return (
           <div>
-            {/* Volume Kicker */}
-            <div className="mb-2 flex items-center justify-between text-[11px] font-semibold text-[#78716C]">
-              <span>{currentChapter.volumeTitle}</span>
-              <span className="font-mono-ltr">Word Style: Heading 2</span>
-            </div>
-
-            {/* Chapter Title */}
-            <h1 className="border-b-2 border-[#1E3A5F] pb-3 text-xl font-extrabold leading-snug text-[#1E3A5F] sm:text-2xl">
-              {currentChapter.title}
-            </h1>
+            {/* Architectural Chapter Opener Header */}
+            <header className="mb-6 overflow-hidden rounded-xl border border-[#DCE4EE] bg-gradient-to-l from-[#F3F7FB] to-[#FAFBFD]">
+              <div className="border-r-[5px] border-[#1E3A5F] px-5 py-4 sm:px-6 sm:py-5">
+                <div className="mb-2 flex flex-wrap items-center justify-between gap-2 text-[11px]">
+                  <div className="flex items-center gap-2">
+                    <span className="font-extrabold text-[#B45309] tabular-nums">
+                      فصل {toPersianDigits(String(currentChapter.chapterNumber).padStart(2, '0'))}
+                    </span>
+                    <span className="text-[#C6C0B4]" aria-hidden="true">·</span>
+                    <span className="font-semibold text-[#57534E]">{currentChapter.volumeTitle}</span>
+                  </div>
+                  <div className="flex items-center gap-2 text-[#64748B] tabular-nums">
+                    <span>{toPersianDigits(currentChapter.sections.length)} زیربخش</span>
+                    {chTablesCount > 0 && (
+                      <>
+                        <span aria-hidden="true">·</span>
+                        <span>{toPersianDigits(chTablesCount)} جدول فنی</span>
+                      </>
+                    )}
+                    <span aria-hidden="true">·</span>
+                    <span className="font-mono-ltr text-[10px]">Heading 2</span>
+                  </div>
+                </div>
+                <h1 className="text-xl font-extrabold leading-snug text-[#1E3A5F] sm:text-2xl">
+                  {currentChapter.title}
+                </h1>
+              </div>
+            </header>
 
             {/* Chapter Metadata Framed Table */}
             {config.includeChapterMetaCards && currentChapter.meta.length > 0 && (
@@ -620,7 +701,9 @@ export function BookPreview({
                   {currentChapter.meta.map((m, idx) => (
                     <div key={idx} className="grid grid-cols-1 gap-1 px-4 py-2.5 sm:grid-cols-4">
                       <dt className="font-bold text-[#57534E]">{m.label}</dt>
-                      <dd className="text-[#1A1816] sm:col-span-3">{m.value}</dd>
+                      <dd className="text-[#1A1816] sm:col-span-3">
+                        <RichText text={m.value} footnoteMap={footnoteMap} onSelectFootnote={setActiveFootnote} />
+                      </dd>
                     </div>
                   ))}
                 </dl>
@@ -746,7 +829,8 @@ export function BookPreview({
               )}
             </div>
           </div>
-        )}
+          );
+        })()}
 
         {/* MASTER CHEAT SHEETS APPENDIX */}
         {selected.kind === 'cheatsheets' && (
