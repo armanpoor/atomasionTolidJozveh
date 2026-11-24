@@ -265,6 +265,38 @@ export function applySurgicalPatchBlocks(
 }
 
 /**
+ * Atomic Full-Section Rewrite Replacement (Bug #18 fix):
+ * When a patch targets a structural/omission defect requiring full-section regeneration,
+ * cleanly replaces all blocks with sanitized non-colliding IDs instead of strict ID-splice.
+ */
+export function replaceFullSectionBlocksAtomic(params: {
+  originalIR: SemanticSectionIR;
+  rewrittenBlocks: SemanticBlock[];
+  meta?: { modelUsed?: string; tierUsed?: SemanticSectionIR['tierUsed'] };
+}): SemanticSectionIR {
+  const seenIds = new Set<string>();
+  const sanitizedBlocks = (params.rewrittenBlocks || []).map((blk, idx) => {
+    let candidateId = (blk.id || '').trim() || `blk-rw-${idx + 1}`;
+    while (seenIds.has(candidateId)) {
+      candidateId = `${candidateId}_${idx + 1}`;
+    }
+    seenIds.add(candidateId);
+    return {
+      ...blk,
+      id: candidateId,
+    };
+  });
+
+  return {
+    ...params.originalIR,
+    blocks: sanitizedBlocks.length > 0 ? sanitizedBlocks : params.originalIR.blocks,
+    generatedAt: new Date().toISOString(),
+    modelUsed: params.meta?.modelUsed || params.originalIR.modelUsed,
+    tierUsed: params.meta?.tierUsed || params.originalIR.tierUsed,
+  };
+}
+
+/**
  * Cost Audit Ledger helpers (Package B — Vampire Cost Protection):
  * Records `pending_charge` BEFORE fetch, settles with real API usage on success,
  * and converts unanswered timeouts into `unreconciled_estimated_cost` (counted in budget cap!).

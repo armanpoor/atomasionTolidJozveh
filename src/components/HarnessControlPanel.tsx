@@ -3,6 +3,7 @@ import {
   AlertTriangle,
   BookCheck,
   CheckCircle2,
+  Clock,
   Cpu,
   Database,
   DollarSign,
@@ -10,31 +11,64 @@ import {
   Loader2,
   Pause,
   Play,
+  Plus,
   RefreshCw,
   ShieldAlert,
   ShieldCheck,
+  Sparkles,
   StepForward,
+  Trash2,
 } from 'lucide-react';
 import type { UseHarnessRunnerResult } from '../hooks/useHarnessRunner';
+import type { ValidationDomain } from '../lib/bookTypes';
 import { toPersianDigits } from '../lib/formatParsers';
 import { computeCoverageLedgerStats } from '../lib/harness/harnessStore';
 import type { QuarantineItem, SemanticBlock } from '../lib/harness/types';
 
 interface HarnessControlPanelProps {
   harness: UseHarnessRunnerResult;
+  validationDomain?: ValidationDomain;
+  onChangeValidationDomain?: (domain: ValidationDomain) => void;
   onOpenProviderSettings?: () => void;
 }
 
 type HarnessPanelTab = 'gate_and_run' | 'quarantine' | 'glossary';
 
+function formatEtaFa(seconds: number | null): string {
+  if (seconds === null || !Number.isFinite(seconds)) return '—';
+  if (seconds <= 0) return 'کمتر از ۱ ثانیه';
+  if (seconds < 60) return `${toPersianDigits(seconds)} ثانیه`;
+  const mins = Math.floor(seconds / 60);
+  const remSec = seconds % 60;
+  return remSec > 0
+    ? `${toPersianDigits(mins)} دقیقه و ${toPersianDigits(remSec)} ثانیه`
+    : `${toPersianDigits(mins)} دقیقه`;
+}
+
+const BLOCK_KIND_LABELS: Record<SemanticBlock['kind'], string> = {
+  heading: 'سربرگ بخش',
+  paragraph: 'پاراگراف متنی',
+  callout_warning: 'باکس هشدار ایمنی',
+  callout_tip: 'باکس نکته مهندسی',
+  table: 'جدول ساختاریافته',
+  formula: 'فرمول ریاضی',
+  step_list: 'فهرست مراحل اجرا',
+  source_gap_flag: 'پرچم نقص منبع (Gap)',
+  source_conflict_flag: 'پرچم تناقض منابع',
+  figure_ref: 'ارجاع شکل / نمودار',
+};
+
 const QuarantineCard: React.FC<{
   item: QuarantineItem;
   resolving: boolean;
+  retrying: boolean;
+  running: boolean;
   onResolve: (
     sectionId: string,
     payload: { editedBlocks: SemanticBlock[]; resolutionNote: string }
   ) => Promise<void>;
-}> = ({ item, resolving, onResolve }) => {
+  onRetryFlagship: (sectionId: string) => Promise<void>;
+}> = ({ item, resolving, retrying, running, onResolve, onRetryFlagship }) => {
   const [blocks, setBlocks] = useState<SemanticBlock[]>(item.draftIR.blocks);
   const [note, setNote] = useState(item.resolutionNote || '');
 
@@ -42,10 +76,12 @@ const QuarantineCard: React.FC<{
     setBlocks(item.draftIR.blocks);
   }, [item.draftIR.blocks]);
 
-  const handleTextChange = (idx: number, nextText: string) => {
-    setBlocks((prev) =>
-      prev.map((b, i) => (i === idx ? { ...b, text: nextText } : b))
-    );
+  const updateBlock = (idx: number, updater: (prev: SemanticBlock) => SemanticBlock) => {
+    setBlocks((prev) => prev.map((b, i) => (i === idx ? updater(b) : b)));
+  };
+
+  const removeBlock = (idx: number) => {
+    setBlocks((prev) => (prev.length <= 1 ? prev : prev.filter((_, i) => i !== idx)));
   };
 
   return (
@@ -68,7 +104,21 @@ const QuarantineCard: React.FC<{
             <CheckCircle2 className="h-3.5 w-3.5" />
             تعیین‌تکلیف شد
           </span>
-        ) : null}
+        ) : (
+          <button
+            type="button"
+            disabled={retrying || resolving || running}
+            onClick={() => void onRetryFlagship(item.sectionId)}
+            className="inline-flex min-h-[32px] items-center gap-1.5 rounded-lg border border-[#1E3A5F] bg-white px-2.5 py-1 text-[11px] font-bold text-[#1E3A5F] hover:bg-[#EEF3F8] disabled:opacity-50 cursor-pointer whitespace-nowrap"
+          >
+            {retrying ? (
+              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+            ) : (
+              <Sparkles className="h-3.5 w-3.5" />
+            )}
+            <span>بازنویسی مجدد با مدل پرچمدار</span>
+          </button>
+        )}
       </div>
 
       {/* Layer 1 & Layer 2 Audit Errors */}
@@ -77,7 +127,7 @@ const QuarantineCard: React.FC<{
           <div className="rounded-md bg-white border border-[#EFE3DF] p-2.5 space-y-1">
             <div className="font-bold text-[#9A3412]">یافته‌های گارد قطعی لایه ۱ (۰ توکن):</div>
             <ul className="list-disc pr-4 space-y-0.5 text-[#57534E]">
-              {item.layer1Issues.slice(0, 5).map((iss) => (
+              {item.layer1Issues.slice(0, 6).map((iss) => (
                 <li key={iss.id}>{iss.messageFa}</li>
               ))}
             </ul>
@@ -87,7 +137,7 @@ const QuarantineCard: React.FC<{
           <div className="rounded-md bg-white border border-[#EFE3DF] p-2.5 space-y-1">
             <div className="font-bold text-[#7C4706]">یافته‌های ممیز معنایی لایه ۲:</div>
             <ul className="list-disc pr-4 space-y-0.5 text-[#57534E]">
-              {item.layer2Issues.slice(0, 5).map((iss) => (
+              {item.layer2Issues.slice(0, 6).map((iss) => (
                 <li key={iss.id}>{iss.messageFa}</li>
               ))}
             </ul>
@@ -95,25 +145,292 @@ const QuarantineCard: React.FC<{
         )}
       </div>
 
-      {/* Inline Block Editor */}
+      {/* Bug #11 Fix: Structured AST Block Editor */}
       {!item.resolved && (
-        <div className="space-y-2.5">
+        <div className="space-y-3">
           <div className="text-[11px] font-bold text-[#44403C]">
-            ویرایش مستقیم بلوک‌های Semantic IR پیش از تأیید دستی:
+            ویرایشگر ساختاریافته بلوک‌های Semantic IR پیش از تأیید دستی:
           </div>
           {blocks.map((blk, idx) => (
-            <div key={blk.id} className="space-y-1">
-              <div className="flex items-center justify-between text-[10.5px] text-[#78716C]">
-                <span className="font-mono">{blk.id} ({blk.kind})</span>
-                <span>منابع: {blk.sourceChunkIds.join(', ')}</span>
+            <div
+              key={blk.id}
+              className="rounded-lg border border-[#E2DDD3] bg-white p-3 space-y-2"
+            >
+              <div className="flex flex-wrap items-center justify-between gap-2 text-[10.5px] text-[#78716C] border-b border-[#F2EFE8] pb-1.5">
+                <div className="flex items-center gap-2">
+                  <span className="font-bold text-[#1E3A5F]">
+                    {BLOCK_KIND_LABELS[blk.kind] || blk.kind}
+                  </span>
+                  <span className="font-mono text-[10px]" dir="ltr">
+                    {blk.id}
+                  </span>
+                </div>
+                <div className="flex items-center gap-2">
+                  <span className="text-[10px]">
+                    منابع: {blk.sourceChunkIds.join(', ') || 'نامشخص'}
+                  </span>
+                  {blocks.length > 1 && (
+                    <button
+                      type="button"
+                      onClick={() => removeBlock(idx)}
+                      title="حذف این بلوک"
+                      className="inline-flex items-center gap-0.5 text-[#9A3412] hover:underline cursor-pointer"
+                    >
+                      <Trash2 className="h-3 w-3" />
+                      <span>حذف</span>
+                    </button>
+                  )}
+                </div>
               </div>
-              <textarea
-                value={blk.text ?? blk.gapReason ?? (blk.items || []).join('\n')}
-                onChange={(e) => handleTextChange(idx, e.target.value)}
-                rows={3}
-                dir="rtl"
-                className="w-full rounded-md border border-[#D6D0C4] bg-white px-3 py-2 text-xs leading-6 text-[#1A1816] focus:border-[#1E3A5F] focus:outline-none"
-              />
+
+              {(blk.kind === 'heading' ||
+                blk.kind === 'callout_warning' ||
+                blk.kind === 'callout_tip' ||
+                blk.kind === 'step_list') && (
+                <input
+                  type="text"
+                  value={blk.title ?? ''}
+                  onChange={(e) =>
+                    updateBlock(idx, (prev) => ({ ...prev, title: e.target.value }))
+                  }
+                  placeholder="عنوان بلوک / تیتر..."
+                  dir="rtl"
+                  className="w-full rounded-md border border-[#D6D0C4] bg-[#FAF9F6] px-2.5 py-1.5 text-xs font-bold text-[#1A1816] focus:border-[#1E3A5F] focus:bg-white focus:outline-none"
+                />
+              )}
+
+              {(blk.kind === 'paragraph' ||
+                blk.kind === 'heading' ||
+                blk.kind === 'callout_warning' ||
+                blk.kind === 'callout_tip' ||
+                blk.kind === 'figure_ref') && (
+                <textarea
+                  value={blk.text ?? blk.caption ?? ''}
+                  onChange={(e) =>
+                    updateBlock(idx, (prev) =>
+                      prev.kind === 'figure_ref'
+                        ? { ...prev, caption: e.target.value }
+                        : { ...prev, text: e.target.value }
+                    )
+                  }
+                  rows={3}
+                  dir="rtl"
+                  className="w-full rounded-md border border-[#D6D0C4] bg-white px-3 py-2 text-xs leading-6 text-[#1A1816] focus:border-[#1E3A5F] focus:outline-none"
+                />
+              )}
+
+              {blk.kind === 'step_list' && (
+                <div className="space-y-1.5">
+                  {(blk.items || []).map((stepText, sIdx) => (
+                    <div key={sIdx} className="flex items-center gap-1.5">
+                      <span className="text-[11px] font-bold text-[#78716C] tabular-nums w-5 text-center shrink-0">
+                        {toPersianDigits(sIdx + 1)}.
+                      </span>
+                      <input
+                        type="text"
+                        value={stepText}
+                        onChange={(e) =>
+                          updateBlock(idx, (prev) => {
+                            const nextItems = [...(prev.items || [])];
+                            nextItems[sIdx] = e.target.value;
+                            return { ...prev, items: nextItems };
+                          })
+                        }
+                        dir="rtl"
+                        className="flex-1 rounded-md border border-[#D6D0C4] bg-[#FAF9F6] px-2.5 py-1.5 text-xs text-[#1A1816] focus:border-[#1E3A5F] focus:bg-white focus:outline-none"
+                      />
+                      <button
+                        type="button"
+                        onClick={() =>
+                          updateBlock(idx, (prev) => ({
+                            ...prev,
+                            items: (prev.items || []).filter((_, i) => i !== sIdx),
+                          }))
+                        }
+                        aria-label="حذف گام"
+                        className="p-1 text-[#9A3412] hover:bg-[#FFF5F2] rounded cursor-pointer"
+                      >
+                        <Trash2 className="h-3.5 w-3.5" />
+                      </button>
+                    </div>
+                  ))}
+                  <button
+                    type="button"
+                    onClick={() =>
+                      updateBlock(idx, (prev) => ({
+                        ...prev,
+                        items: [...(prev.items || []), ''],
+                      }))
+                    }
+                    className="inline-flex items-center gap-1 text-[11px] font-bold text-[#1E3A5F] hover:underline cursor-pointer"
+                  >
+                    <Plus className="h-3 w-3" />
+                    <span>افزودن مورد به فهرست</span>
+                  </button>
+                </div>
+              )}
+
+              {blk.kind === 'table' && (
+                <div className="space-y-2 overflow-x-auto">
+                  <div className="flex flex-wrap gap-1.5">
+                    {(blk.headers || []).map((hdr, hIdx) => (
+                      <input
+                        key={hIdx}
+                        type="text"
+                        value={hdr}
+                        onChange={(e) =>
+                          updateBlock(idx, (prev) => {
+                            const nextHeaders = [...(prev.headers || [])];
+                            nextHeaders[hIdx] = e.target.value;
+                            return { ...prev, headers: nextHeaders };
+                          })
+                        }
+                        placeholder={`ستون ${hIdx + 1}`}
+                        className="min-w-[110px] flex-1 rounded border border-[#CBD5E1] bg-[#EEF3F8] px-2 py-1 text-[11px] font-bold text-[#1E3A5F]"
+                      />
+                    ))}
+                  </div>
+                  <div className="space-y-1">
+                    {(blk.rows || []).map((row, rIdx) => (
+                      <div key={rIdx} className="flex items-center gap-1.5">
+                        {row.map((cell, cIdx) => (
+                          <input
+                            key={cIdx}
+                            type="text"
+                            value={cell}
+                            onChange={(e) =>
+                              updateBlock(idx, (prev) => {
+                                const nextRows = (prev.rows || []).map((r, ri) =>
+                                  ri === rIdx
+                                    ? r.map((v, ci) => (ci === cIdx ? e.target.value : v))
+                                    : r
+                                );
+                                return { ...prev, rows: nextRows };
+                              })
+                            }
+                            className="min-w-[110px] flex-1 rounded border border-[#D6D0C4] bg-white px-2 py-1 text-[11px] text-[#1A1816]"
+                          />
+                        ))}
+                        <button
+                          type="button"
+                          onClick={() =>
+                            updateBlock(idx, (prev) => ({
+                              ...prev,
+                              rows: (prev.rows || []).filter((_, ri) => ri !== rIdx),
+                            }))
+                          }
+                          aria-label="حذف ردیف جدول"
+                          className="p-1 text-[#9A3412] hover:bg-[#FFF5F2] rounded cursor-pointer shrink-0"
+                        >
+                          <Trash2 className="h-3.5 w-3.5" />
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() =>
+                      updateBlock(idx, (prev) => {
+                        const colCount = Math.max(1, (prev.headers || prev.rows?.[0] || ['']).length);
+                        return {
+                          ...prev,
+                          rows: [...(prev.rows || []), Array.from({ length: colCount }, () => '')],
+                        };
+                      })
+                    }
+                    className="inline-flex items-center gap-1 text-[11px] font-bold text-[#1E3A5F] hover:underline cursor-pointer"
+                  >
+                    <Plus className="h-3 w-3" />
+                    <span>افزودن ردیف به جدول</span>
+                  </button>
+                </div>
+              )}
+
+              {blk.kind === 'formula' && (
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                  <div className="space-y-1">
+                    <span className="text-[10px] text-[#78716C]">عبارت LaTeX / فرمول:</span>
+                    <input
+                      type="text"
+                      dir="ltr"
+                      value={blk.latex ?? ''}
+                      onChange={(e) =>
+                        updateBlock(idx, (prev) => ({ ...prev, latex: e.target.value }))
+                      }
+                      className="w-full rounded-md border border-[#D6D0C4] bg-[#FAF9F6] px-2.5 py-1.5 font-mono text-xs text-[#1A1816]"
+                    />
+                  </div>
+                  <div className="space-y-1">
+                    <span className="text-[10px] text-[#78716C]">توضیح فارسی خوانا:</span>
+                    <input
+                      type="text"
+                      dir="rtl"
+                      value={blk.readable ?? ''}
+                      onChange={(e) =>
+                        updateBlock(idx, (prev) => ({ ...prev, readable: e.target.value }))
+                      }
+                      className="w-full rounded-md border border-[#D6D0C4] bg-white px-2.5 py-1.5 text-xs text-[#1A1816]"
+                    />
+                  </div>
+                </div>
+              )}
+
+              {blk.kind === 'source_gap_flag' && (
+                <div className="space-y-1.5">
+                  <input
+                    type="text"
+                    value={blk.gapReason ?? ''}
+                    onChange={(e) =>
+                      updateBlock(idx, (prev) => ({ ...prev, gapReason: e.target.value }))
+                    }
+                    placeholder="دلیل نقص منبع..."
+                    className="w-full rounded-md border border-[#D6D0C4] bg-[#FFFBEB] px-2.5 py-1.5 text-xs text-[#78350F]"
+                  />
+                  <input
+                    type="text"
+                    value={blk.missingInfo ?? ''}
+                    onChange={(e) =>
+                      updateBlock(idx, (prev) => ({ ...prev, missingInfo: e.target.value }))
+                    }
+                    placeholder="اطلاعات ناموجود یا نیازمند تکمیل..."
+                    className="w-full rounded-md border border-[#D6D0C4] bg-white px-2.5 py-1.5 text-xs text-[#1A1816]"
+                  />
+                </div>
+              )}
+
+              {blk.kind === 'source_conflict_flag' && (
+                <div className="space-y-1.5">
+                  <input
+                    type="text"
+                    value={blk.conflictTopic ?? ''}
+                    onChange={(e) =>
+                      updateBlock(idx, (prev) => ({ ...prev, conflictTopic: e.target.value }))
+                    }
+                    placeholder="موضوع تناقض بین منابع..."
+                    className="w-full rounded-md border border-[#D6D0C4] bg-[#FFF5F2] px-2.5 py-1.5 text-xs font-bold text-[#9A3412]"
+                  />
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5">
+                    <input
+                      type="text"
+                      value={blk.conflictSourceA ?? ''}
+                      onChange={(e) =>
+                        updateBlock(idx, (prev) => ({ ...prev, conflictSourceA: e.target.value }))
+                      }
+                      placeholder="روایت فایل اول..."
+                      className="rounded-md border border-[#D6D0C4] bg-white px-2.5 py-1.5 text-xs text-[#1A1816]"
+                    />
+                    <input
+                      type="text"
+                      value={blk.conflictSourceB ?? ''}
+                      onChange={(e) =>
+                        updateBlock(idx, (prev) => ({ ...prev, conflictSourceB: e.target.value }))
+                      }
+                      placeholder="روایت فایل دوم..."
+                      className="rounded-md border border-[#D6D0C4] bg-white px-2.5 py-1.5 text-xs text-[#1A1816]"
+                    />
+                  </div>
+                </div>
+              )}
             </div>
           ))}
 
@@ -127,7 +444,7 @@ const QuarantineCard: React.FC<{
             />
             <button
               type="button"
-              disabled={resolving}
+              disabled={resolving || retrying}
               onClick={() =>
                 void onResolve(item.sectionId, {
                   editedBlocks: blocks,
@@ -152,6 +469,8 @@ const QuarantineCard: React.FC<{
 
 export const HarnessControlPanel: React.FC<HarnessControlPanelProps> = ({
   harness,
+  validationDomain: propDomain,
+  onChangeValidationDomain,
   onOpenProviderSettings,
 }) => {
   const {
@@ -161,15 +480,19 @@ export const HarnessControlPanel: React.FC<HarnessControlPanelProps> = ({
     approving,
     running,
     resolvingSectionId,
+    retryingSectionId,
     syncingBook,
     error,
     lastStepMessage,
+    avgStepLatencyMs,
+    etaSeconds,
     initBlueprint,
     approveAndOptionallyStart,
     startRun,
     pauseRun,
     runSingleStep,
     resolveQuarantine,
+    retryQuarantineFlagship,
     syncBookFromHarness,
     clearError,
   } = harness;
@@ -178,6 +501,9 @@ export const HarnessControlPanel: React.FC<HarnessControlPanelProps> = ({
   const [budgetCapInput, setBudgetCapInput] = useState<string>(
     String(harnessState?.blueprint.budgetCapUsd ?? 2.0)
   );
+
+  const effectiveDomain: ValidationDomain =
+    propDomain || harnessState?.blueprint.validationDomain || 'ecu_winols';
 
   useEffect(() => {
     if (harnessState?.blueprint.budgetCapUsd) {
@@ -203,22 +529,34 @@ export const HarnessControlPanel: React.FC<HarnessControlPanelProps> = ({
   }, [harnessState]);
 
   const parsedBudgetCap = Math.max(0.1, Number(budgetCapInput) || 2.0);
-  const progressPct = stats && stats.totalSections > 0
-    ? Math.round(((stats.verifiedSections + stats.quarantinedSections) / stats.totalSections) * 100)
-    : 0;
+  const progressPct =
+    stats && stats.totalSections > 0
+      ? Math.round(((stats.verifiedSections + stats.quarantinedSections) / stats.totalSections) * 100)
+      : 0;
 
   return (
     <section
       data-testid="harness-control-panel"
-      aria-label="موتور هارنس تخصصی ECU و WinOLS"
+      aria-label="موتور هارنس تولید و ممیزی کتاب"
       className="rounded-xl border border-[#D8D1C4] bg-white overflow-hidden"
     >
       {/* Top Bar */}
       <div className="border-b border-[#EFECE4] bg-[#FCFBF8] px-4 py-3.5 flex flex-wrap items-center justify-between gap-3">
         <div className="space-y-0.5 min-w-0">
-          <div className="flex items-center gap-2 text-xs sm:text-sm font-extrabold text-[#1A1816]">
+          <div className="flex flex-wrap items-center gap-2 text-xs sm:text-sm font-extrabold text-[#1A1816]">
             <Cpu className="h-4 w-4 text-[#1E3A5F] shrink-0" />
-            <span>هارنس مرحله‌محور تخصصی ECU و WinOLS (بدون افت و بدون توهم فنی)</span>
+            <span>موتور هارنس مرحله‌محور و ممیزی دولایه (بدون افت و بدون توهم)</span>
+            <span
+              className={`rounded border px-2 py-0.5 text-[10.5px] font-bold ${
+                effectiveDomain === 'ecu_winols'
+                  ? 'border-[#D4E5D9] bg-[#F4FAF6] text-[#14532D]'
+                  : 'border-[#DCE5F0] bg-[#EEF3F8] text-[#1E3A5F]'
+              }`}
+            >
+              {effectiveDomain === 'ecu_winols'
+                ? 'حالت تخصصی ECU / WinOLS'
+                : 'حالت عمومی فنی فارسی'}
+            </span>
           </div>
           <div className="flex flex-wrap items-center gap-1.5 text-[11px] text-[#57534E]">
             <span className="inline-flex items-center gap-1">
@@ -228,7 +566,7 @@ export const HarnessControlPanel: React.FC<HarnessControlPanelProps> = ({
             <span aria-hidden="true">·</span>
             <span>فراخوانی بی‌حافظه (Stateless) با Prompt Caching</span>
             <span aria-hidden="true">·</span>
-            <span>ممیزی دولایه + مدار شکن بودجه</span>
+            <span>دروازه ۱ (سرفصل) ← اجرا ← دروازه ۲ (قرنطینه)</span>
           </div>
         </div>
 
@@ -239,7 +577,7 @@ export const HarnessControlPanel: React.FC<HarnessControlPanelProps> = ({
               onClick={onOpenProviderSettings}
               className="inline-flex min-h-[34px] items-center gap-1.5 rounded-lg border border-[#D6D0C4] bg-white px-2.5 py-1.5 text-[11px] font-semibold text-[#44403C] hover:bg-[#F5F3EE] cursor-pointer whitespace-nowrap"
             >
-              تنظیم مدل‌های ۳لایه / 9Router
+              تنظیم مدل‌ها / درگاه ایرانی / ۳لایه
             </button>
           )}
 
@@ -250,6 +588,7 @@ export const HarnessControlPanel: React.FC<HarnessControlPanelProps> = ({
               void initBlueprint({
                 budgetCapUsd: parsedBudgetCap,
                 forceReset: Boolean(harnessState && !harnessState.blueprint.approved),
+                validationDomain: effectiveDomain,
               })
             }
             data-testid="harness-init-blueprint-btn"
@@ -260,7 +599,11 @@ export const HarnessControlPanel: React.FC<HarnessControlPanelProps> = ({
             ) : (
               <RefreshCw className="h-3.5 w-3.5" />
             )}
-            <span>{harnessState ? 'به‌روزرسانی نقشه راه (۰ توکن)' : 'ساخت نقشه راه و برآورد هزینه (۰ توکن)'}</span>
+            <span>
+              {harnessState
+                ? 'به‌روزرسانی نقشه راه (۰ توکن)'
+                : 'ساخت نقشه راه و برآورد هزینه (۰ توکن)'}
+            </span>
           </button>
         </div>
       </div>
@@ -277,7 +620,7 @@ export const HarnessControlPanel: React.FC<HarnessControlPanelProps> = ({
                 : 'border-transparent text-[#57534E] hover:text-[#1A1816]'
             }`}
           >
-            دروازه تأیید (HITL) و اجرا
+            دروازه ۱ (تأیید نقشه راه) و اجرا
           </button>
           <button
             type="button"
@@ -286,10 +629,12 @@ export const HarnessControlPanel: React.FC<HarnessControlPanelProps> = ({
             className={`px-3 py-2 text-xs font-bold border-b-2 transition-colors cursor-pointer whitespace-nowrap inline-flex items-center gap-1.5 ${
               activeTab === 'quarantine'
                 ? 'border-[#9A3412] text-[#9A3412]'
-                : 'border-transparent text-[#57534E] hover:text-[#1A1816]'
+                : unresolvedQuarantines.length > 0
+                  ? 'border-transparent text-[#9A3412] hover:text-[#7C2D12]'
+                  : 'border-transparent text-[#57534E] hover:text-[#1A1816]'
             }`}
           >
-            <span>صف قرنطینه</span>
+            <span>دروازه ۲: صف قرنطینه</span>
             <span className="tabular-nums font-extrabold">
               ({toPersianDigits(unresolvedQuarantines.length)})
             </span>
@@ -303,7 +648,7 @@ export const HarnessControlPanel: React.FC<HarnessControlPanelProps> = ({
                 : 'border-transparent text-[#57534E] hover:text-[#1A1816]'
             }`}
           >
-            واژه‌نامه زنده ECU ({toPersianDigits(harnessState.glossary.entries.length)})
+            واژه‌نامه زنده ({toPersianDigits(harnessState.glossary.entries.length)})
           </button>
         </div>
       )}
@@ -329,6 +674,41 @@ export const HarnessControlPanel: React.FC<HarnessControlPanelProps> = ({
           </div>
         )}
 
+        {/* Dual-Mode Validation Domain Quick Switcher when Blueprint isn't frozen yet */}
+        {onChangeValidationDomain && (!harnessState || !harnessState.blueprint.approved) && (
+          <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-[#EAE5DA] bg-[#FCFBF8] px-3 py-2 text-xs">
+            <span className="font-bold text-[#44403C]">
+              حوزه اعتبارسنجی و ممیزی هارنس:
+            </span>
+            <div className="flex flex-wrap items-center gap-1.5">
+              <button
+                type="button"
+                disabled={running}
+                onClick={() => onChangeValidationDomain('ecu_winols')}
+                className={`rounded-md border px-2.5 py-1 text-[11px] font-bold cursor-pointer ${
+                  effectiveDomain === 'ecu_winols'
+                    ? 'border-[#14532D] bg-[#14532D] text-white'
+                    : 'border-[#D6D0C4] bg-white text-[#44403C] hover:bg-[#F5F3EE]'
+                }`}
+              >
+                تخصصی ECU / WinOLS
+              </button>
+              <button
+                type="button"
+                disabled={running}
+                onClick={() => onChangeValidationDomain('general_persian_technical')}
+                className={`rounded-md border px-2.5 py-1 text-[11px] font-bold cursor-pointer ${
+                  effectiveDomain === 'general_persian_technical'
+                    ? 'border-[#1E3A5F] bg-[#1E3A5F] text-white'
+                    : 'border-[#D6D0C4] bg-white text-[#44403C] hover:bg-[#F5F3EE]'
+                }`}
+              >
+                متون فنی و آموزشی عمومی فارسی
+              </button>
+            </div>
+          </div>
+        )}
+
         {!harnessState ? (
           <div className="rounded-lg border border-dashed border-[#D6D0C4] bg-[#FCFBF8] p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
             <div className="space-y-1 text-xs text-[#57534E] leading-6">
@@ -336,13 +716,18 @@ export const HarnessControlPanel: React.FC<HarnessControlPanelProps> = ({
                 آماده ساخت نقشه راه (MasterBlueprint) و برآورد شفاف هزینه پیش از اولین فراخوانی مدل
               </div>
               <p>
-                هارنس ابتدا بدون مصرف حتی ۱ توکن، درخت زیربخش‌ها، نگاشت دقیق شناسه‌های منبع (sourceChunkIds) و واژه‌نامه تخصصی ECU/WinOLS را می‌سازد و پس از تأیید شما در دروازه HITL، زیربخش‌به‌زیربخش تولید و ممیزی می‌کند.
+                هارنس ابتدا بدون مصرف حتی ۱ توکن، درخت زیربخش‌ها، نگاشت دقیق شناسه‌های منبع (sourceChunkIds) و واژه‌نامه را می‌سازد و پس از تأیید شما در دروازه ۱، زیربخش‌به‌زیربخش تولید و ممیزی می‌کند.
               </p>
             </div>
             <button
               type="button"
               disabled={initializing}
-              onClick={() => void initBlueprint({ budgetCapUsd: parsedBudgetCap })}
+              onClick={() =>
+                void initBlueprint({
+                  budgetCapUsd: parsedBudgetCap,
+                  validationDomain: effectiveDomain,
+                })
+              }
               className="inline-flex min-h-[40px] items-center justify-center gap-1.5 rounded-lg bg-[#1E3A5F] px-4 py-2 text-xs font-bold text-white hover:bg-[#162C49] disabled:opacity-60 cursor-pointer shrink-0 whitespace-nowrap"
             >
               {initializing ? (
@@ -355,6 +740,25 @@ export const HarnessControlPanel: React.FC<HarnessControlPanelProps> = ({
           </div>
         ) : activeTab === 'gate_and_run' ? (
           <div className="space-y-4">
+            {/* Gate 2 Warning Banner if unresolved quarantined sections exist */}
+            {unresolvedQuarantines.length > 0 && (
+              <div className="rounded-lg border border-[#E5C6BD] bg-[#FFF5F2] p-3 flex flex-wrap items-center justify-between gap-2 text-xs">
+                <div className="flex items-center gap-2 text-[#9A3412] font-bold">
+                  <ShieldAlert className="h-4 w-4 shrink-0" />
+                  <span>
+                    دروازه ۲ (بازبینی قرنطینه): {toPersianDigits(unresolvedQuarantines.length)} زیربخش نیازمند تأیید یا بازنویسی پرچمدار است.
+                  </span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setActiveTab('quarantine')}
+                  className="rounded-md bg-[#9A3412] px-3 py-1 text-[11px] font-bold text-white hover:bg-[#7C2D12] cursor-pointer"
+                >
+                  مشاهده و ویرایش صف قرنطینه
+                </button>
+              </div>
+            )}
+
             {/* Blueprint + Cost + Routing KPI Strip */}
             <dl className="grid grid-cols-2 sm:grid-cols-4 gap-3 border-b border-[#EFECE4] pb-3.5 text-xs tabular-nums">
               <div className="space-y-0.5">
@@ -390,12 +794,12 @@ export const HarnessControlPanel: React.FC<HarnessControlPanelProps> = ({
                 </dd>
               </div>
               <div className="space-y-0.5">
-                <dt className="text-[11px] text-[#78716C]">آمار واقعی کش پیشوند</dt>
+                <dt className="text-[11px] text-[#78716C]">آمار کش پیشوند / زمان‌بندی</dt>
                 <dd className="font-extrabold text-[#8C6226]">
                   {harnessState.telemetry.totalCalls > 0 &&
                   (harnessState.telemetry.cacheTelemetryReportedCalls || 0) === 0 ? (
                     <span className="text-[11px] font-bold text-[#78716C]">
-                      گزارش‌نشده توسط ارائه‌دهنده
+                      گزارش‌نشده توسط درگاه
                     </span>
                   ) : (
                     <>
@@ -405,17 +809,19 @@ export const HarnessControlPanel: React.FC<HarnessControlPanelProps> = ({
                       </span>
                     </>
                   )}
-                  {(harnessState.telemetry.totalReasoningTokens || 0) > 0 && (
-                    <span className="block text-[10px] font-normal text-[#57534E]">
-                      توکن استدلال (Reasoning):{' '}
-                      {toPersianDigits((harnessState.telemetry.totalReasoningTokens || 0).toLocaleString('en-US'))}
+                  {(avgStepLatencyMs !== null || etaSeconds !== null) && (
+                    <span className="flex items-center gap-1 text-[10px] font-normal text-[#1E3A5F] mt-0.5">
+                      <Clock className="h-3 w-3 shrink-0" />
+                      <span>
+                        گام: {avgStepLatencyMs ? `${toPersianDigits((avgStepLatencyMs / 1000).toFixed(1))}ث` : '—'} · باقیمانده: {formatEtaFa(etaSeconds)}
+                      </span>
                     </span>
                   )}
                 </dd>
               </div>
             </dl>
 
-            {/* Pre-HITL Blueprint Audit Strip (Package A Red-Team) */}
+            {/* Pre-HITL Blueprint Audit Strip */}
             {harnessState.blueprint.blueprintAudit && (
               <div
                 data-testid="harness-blueprint-audit"
@@ -439,14 +845,6 @@ export const HarnessControlPanel: React.FC<HarnessControlPanelProps> = ({
                     حجیم‌تر از سقف {toPersianDigits(harnessState.blueprint.blueprintAudit.maxSectionInputTokens)} توکن:{' '}
                     {toPersianDigits(harnessState.blueprint.blueprintAudit.oversizedSectionIds.length)}
                   </span>
-                  {harnessState.blueprint.blueprintAudit.brokenContinuityChunkIds.length > 0 && (
-                    <>
-                      <span aria-hidden="true">·</span>
-                      <span>
-                        پیوستگی شکسته: {toPersianDigits(harnessState.blueprint.blueprintAudit.brokenContinuityChunkIds.length)}
-                      </span>
-                    </>
-                  )}
                 </div>
                 <div className="flex flex-wrap items-center gap-2 font-mono text-[10px] text-[#57534E]" dir="ltr">
                   {harnessState.blueprint.sourceCorpusHash && (
@@ -459,7 +857,6 @@ export const HarnessControlPanel: React.FC<HarnessControlPanelProps> = ({
               </div>
             )}
 
-            {/* Package B Transparent Cache Threshold / TTL Notice & Model Mismatch Warnings */}
             {harnessState.telemetry.prefixCacheWarningFa && (
               <div
                 data-testid="harness-prefix-cache-warning"
@@ -508,7 +905,7 @@ export const HarnessControlPanel: React.FC<HarnessControlPanelProps> = ({
               <div className="flex flex-wrap items-center gap-2 shrink-0">
                 <label className="inline-flex items-center gap-1.5 text-[11px] font-bold text-[#44403C]">
                   <DollarSign className="h-3.5 w-3.5 text-[#8C6226]" />
-                  <span>سقف مدار شکن بودجه ($):</span>
+                  <span>سقف بودجه ($):</span>
                   <input
                     type="number"
                     min="0.1"
@@ -528,6 +925,7 @@ export const HarnessControlPanel: React.FC<HarnessControlPanelProps> = ({
                     onClick={() =>
                       void approveAndOptionallyStart({
                         budgetCapUsd: parsedBudgetCap,
+                        validationDomain: effectiveDomain,
                         autoRun: false,
                       })
                     }
@@ -539,7 +937,7 @@ export const HarnessControlPanel: React.FC<HarnessControlPanelProps> = ({
                     ) : (
                       <ShieldCheck className="h-3.5 w-3.5" />
                     )}
-                    <span>تأیید نقشه راه و فریز واژه‌نامه (HITL Gate)</span>
+                    <span>تأیید نقشه راه و فریز واژه‌نامه (دروازه ۱)</span>
                   </button>
                 ) : (
                   <div className="flex flex-wrap items-center gap-1.5">
@@ -713,7 +1111,7 @@ export const HarnessControlPanel: React.FC<HarnessControlPanelProps> = ({
                 <BookCheck className="h-5 w-5 text-[#14532D] mx-auto" />
                 <div className="text-xs font-bold text-[#1A1816]">صف قرنطینه خالی است</div>
                 <p className="text-[11px] text-[#57534E]">
-                  هر زیربخشی که پس از ۲ بار ترمیم جراحی همچنان خطای لایه ۱ (آدرس هگز/کد خطا/نقص منبع) یا لایه ۲ داشته باشد اینجا برای بررسی دستی شما ثبت می‌شود.
+                  هر زیربخشی که پس از ۲ بار ترمیم جراحی همچنان خطای لایه ۱ یا لایه ۲ داشته باشد، اینجا برای ویرایش ساختاریافته یا بازنویسی با مدل پرچمدار ثبت می‌شود.
                 </p>
               </div>
             ) : (
@@ -722,7 +1120,10 @@ export const HarnessControlPanel: React.FC<HarnessControlPanelProps> = ({
                   key={item.sectionId}
                   item={item}
                   resolving={resolvingSectionId === item.sectionId}
+                  retrying={retryingSectionId === item.sectionId}
+                  running={running}
                   onResolve={resolveQuarantine}
+                  onRetryFlagship={(sectionId) => retryQuarantineFlagship(sectionId)}
                 />
               ))
             )}
@@ -731,7 +1132,7 @@ export const HarnessControlPanel: React.FC<HarnessControlPanelProps> = ({
           <div className="space-y-2.5">
             <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] text-[#57534E]">
               <span>
-                واژه‌نامه زنده (LivingGlossary) در پیشوند ثابت کش‌شده (Immutable Cached Prefix) تزریق می‌شود تا نام‌گذاری در تمام فصل‌ها یکدست بماند.
+                واژه‌نامه زنده (LivingGlossary) در پیشوند ثابت کش‌شده تزریق می‌شود تا نام‌گذاری در تمام فصل‌ها یکدست بماند.
               </span>
               <span className="font-bold text-[#14532D]">
                 وضعیت: {harnessState.glossary.frozen ? 'فریز شده برای کش' : 'در حال تکمیل'}
@@ -739,7 +1140,7 @@ export const HarnessControlPanel: React.FC<HarnessControlPanelProps> = ({
             </div>
             {harnessState.glossary.entries.length === 0 ? (
               <div className="rounded-lg border border-dashed border-[#D6D0C4] bg-[#FCFBF8] p-4 text-center text-xs text-[#78716C]">
-                هنوز اصطلاح تخصصی ECU یا کد نقشه WinOLS در متن منابع شناسایی نشده است.
+                هنوز اصطلاح تخصصی یا کلیدواژه‌ای در متن منابع ثبت نشده است.
               </div>
             ) : (
               <div className="max-h-56 overflow-y-auto rounded-lg border border-[#EFECE4] divide-y divide-[#F4F1EA]">
@@ -769,3 +1170,4 @@ export const HarnessControlPanel: React.FC<HarnessControlPanelProps> = ({
     </section>
   );
 };
+

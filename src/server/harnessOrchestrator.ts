@@ -4,8 +4,10 @@ import { ThinkingLevel } from '@google/genai';
 import {
   createProjectRevisionRecord,
   getProjectBundle,
+  saveAuditReportRecord,
   updateProjectRecord,
 } from '../db/repository.ts';
+import type { CustomModelProfile } from '../lib/aiProviderConfig.ts';
 import {
   extractAiUsageFromCheckpoint,
   mergeAiUsageDelta,
@@ -13,10 +15,12 @@ import {
 } from '../lib/aiUsageMetrics.ts';
 import type {
   ContentUnitDto,
+  DocxExportConfig,
   OutlineNodeDto,
   ParsedBook,
   ProjectBundleDto,
   SourceFileDto,
+  ValidationDomain,
 } from '../lib/bookTypes.ts';
 import {
   buildRevisionSnapshotPayload,
@@ -47,6 +51,7 @@ import {
   markChargeAbortedZeroCost,
   markChargeUnreconciledTimeout,
   recordPendingChargeEntry,
+  replaceFullSectionBlocksAtomic,
   settleChargeEntry,
 } from '../lib/harness/patchAndBudget.ts';
 import {
@@ -71,8 +76,15 @@ import {
   buildSurgicalPatchPrompt,
   compileCompactRollingSummary,
   evaluatePrefixCachePolicy,
+  LAYER2_JUDGE_JSON_SCHEMA,
+  LAYER2_JUDGE_RESPONSE_SCHEMA,
   mergeDeltaGlossaryAtChapterBoundary,
+  ROLLING_SUMMARY_JSON_SCHEMA,
+  ROLLING_SUMMARY_RESPONSE_SCHEMA,
+  SEMANTIC_SECTION_IR_JSON_SCHEMA,
   SEMANTIC_SECTION_IR_RESPONSE_SCHEMA,
+  SURGICAL_PATCH_JSON_SCHEMA,
+  SURGICAL_PATCH_RESPONSE_SCHEMA,
 } from '../lib/harness/promptBuilder.ts';
 import {
   ProviderGatewayError,
@@ -86,7 +98,6 @@ import type {
   HarnessState,
   Layer1AuditResult,
   Layer2AuditResult,
-  Layer2Issue,
   SemanticBlock,
   SemanticBlockKind,
   SemanticSectionIR,
@@ -209,6 +220,7 @@ function accumulateTelemetry(
     role?: string;
     estimatedPromptTokens?: number;
     usedLockedPrefix?: boolean;
+    customProfiles?: Record<string, CustomModelProfile>;
   }
 ): number {
   const delta = res.usageDelta;
@@ -228,6 +240,7 @@ function accumulateTelemetry(
     reasoningTokens,
     cachedInputTokens: cachedTokens,
     cacheCreationInputTokens: cacheCreationTokens,
+    customProfiles: meta?.customProfiles,
   });
 
   state.telemetry.totalPromptTokens += promptTokens;
@@ -328,6 +341,7 @@ async function invokeTrackedHarnessSubcall(params: {
   prompt: string;
   expectJson: boolean;
   googleResponseSchema?: unknown;
+  jsonSchema?: Record<string, unknown> | null;
   enablePromptCaching: boolean;
   usedLockedPrefix?: boolean;
   allowBudgetOverride?: boolean;
@@ -348,10 +362,12 @@ async function invokeTrackedHarnessSubcall(params: {
         ? 220
         : 360;
   const requestedModel = getEffectiveModelIdFromCtx(params.ctx);
+  const customProfiles = params.ctx.provider.customModels;
   const estCostUsd = computeCallCostUsd({
     modelId: requestedModel,
     promptTokens: estPromptTokens,
     outputTokens: estOutputTokens,
+    customProfiles,
   });
 
   if (!harnessState.telemetry.costAuditLedger) {
@@ -398,6 +414,7 @@ async function invokeTrackedHarnessSubcall(params: {
       prompt: params.prompt,
       expectJson: params.expectJson,
       googleResponseSchema: params.googleResponseSchema,
+      jsonSchema: params.jsonSchema,
       enablePromptCaching: params.enablePromptCaching,
       abortSignal: params.abortSignal,
     });
@@ -418,6 +435,7 @@ async function invokeTrackedHarnessSubcall(params: {
       role: params.ledgerRole,
       estimatedPromptTokens: estPromptTokens,
       usedLockedPrefix: params.usedLockedPrefix,
+      customProfiles,
     });
 
     return res;
@@ -566,6 +584,7 @@ export async function initHarnessBlueprintForProject(params: {
   projectId: string;
   ownerUid: string;
   budgetCapUsd?: number;
+  validationDomain?: ValidationDomain;
   forceReset?: boolean;
 }) {
   const raw = await getProjectBundle(params.projectId, params.ownerUid);
@@ -574,6 +593,16 @@ export async function initHarnessBlueprintForProject(params: {
   const existingCheckpoint =
     (raw.project.checkpointJson as Record<string, unknown> | null) || {};
   const existingHarness = extractHarnessStateFromCheckpoint(existingCheckpoint);
+
+  const projectSettings = (raw.project.settingsJson as Partial<DocxExportConfig> | null) || {};
+  const resolvedDomain: ValidationDomain =
+    params.validationDomain === 'general_persian_technical' || params.validationDomain === 'ecu_winols'
+      ? params.validationDomain
+      : existingHarness?.blueprint.validationDomain === 'general_persian_technical'
+        ? 'general_persian_technical'
+        : projectSettings.validationDomain === 'general_persian_technical'
+          ? 'general_persian_technical'
+          : 'ecu_winols';
 
   const authorCtx = resolveProviderForTaskFromRequest(
     params.req,
@@ -595,12 +624,12 @@ export async function initHarnessBlueprintForProject(params: {
   const patchModelId = getEffectiveModelIdFromCtx(patchCtx);
 
   if (existingHarness && !params.forceReset) {
-    // Recompute cost preview with current configured models without discarding progress
+    existingHarness.blueprint.validationDomain = resolvedDomain;
     const costEst = estimateHarnessRunCost({
       blueprint: existingHarness.blueprint,
       authorModelId,
       utilityModelId,
-      immutablePrefixText: buildImmutableCachedPrefix(existingHarness.glossary),
+      immutablePrefixText: buildImmutableCachedPrefix(existingHarness.glossary, { validationDomain: resolvedDomain }),
       enablePromptCaching: authorCtx.enablePromptCaching,
       authorProvider: authorCtx.provider.provider,
       authorBaseUrl: authorCtx.provider.baseUrl,
@@ -641,6 +670,7 @@ export async function initHarnessBlueprintForProject(params: {
     utilityModelId,
     enablePromptCaching: authorCtx.enablePromptCaching,
     existingVersion: existingHarness?.blueprint.version || 0,
+    validationDomain: resolvedDomain,
   });
 
   // Evaluate honest provider-aware cache threshold & prefixHash immediately for HITL transparency
@@ -648,7 +678,7 @@ export async function initHarnessBlueprintForProject(params: {
     blueprint: harnessState.blueprint,
     authorModelId,
     utilityModelId,
-    immutablePrefixText: buildImmutableCachedPrefix(harnessState.glossary),
+    immutablePrefixText: buildImmutableCachedPrefix(harnessState.glossary, { validationDomain: resolvedDomain }),
     enablePromptCaching: authorCtx.enablePromptCaching,
     authorProvider: authorCtx.provider.provider,
     authorBaseUrl: authorCtx.provider.baseUrl,
@@ -685,6 +715,7 @@ export async function approveHarnessBlueprintForProject(params: {
   ownerUid: string;
   budgetCapUsd?: number;
   glossaryEntries?: GlossaryTermEntry[];
+  validationDomain?: ValidationDomain;
   actorName: string;
 }) {
   const initRes = await initHarnessBlueprintForProject({
@@ -692,6 +723,7 @@ export async function approveHarnessBlueprintForProject(params: {
     projectId: params.projectId,
     ownerUid: params.ownerUid,
     budgetCapUsd: params.budgetCapUsd,
+    validationDomain: params.validationDomain,
     forceReset: false,
   });
   if (!initRes) return null;
@@ -702,6 +734,13 @@ export async function approveHarnessBlueprintForProject(params: {
   if (typeof params.budgetCapUsd === 'number' && params.budgetCapUsd > 0) {
     harnessState.blueprint.budgetCapUsd = params.budgetCapUsd;
   }
+  if (
+    params.validationDomain === 'general_persian_technical' ||
+    params.validationDomain === 'ecu_winols'
+  ) {
+    harnessState.blueprint.validationDomain = params.validationDomain;
+  }
+  const activeDomain: ValidationDomain = harnessState.blueprint.validationDomain || 'ecu_winols';
   if (Array.isArray(params.glossaryEntries)) {
     harnessState.glossary.entries = params.glossaryEntries;
   }
@@ -741,7 +780,7 @@ export async function approveHarnessBlueprintForProject(params: {
     blueprint: harnessState.blueprint,
     authorModelId: routingInfo.authorModelId,
     utilityModelId: routingInfo.utilityModelId,
-    immutablePrefixText: buildImmutableCachedPrefix(harnessState.glossary),
+    immutablePrefixText: buildImmutableCachedPrefix(harnessState.glossary, { validationDomain: activeDomain }),
     enablePromptCaching: routingInfo.enablePromptCaching,
     authorProvider: authorCtxForEstimate.provider.provider,
     authorBaseUrl: authorCtxForEstimate.provider.baseUrl,
@@ -754,7 +793,12 @@ export async function approveHarnessBlueprintForProject(params: {
 
   const existingCheckpoint =
     (rawBundle.project.checkpointJson as Record<string, unknown> | null) || {};
+  const existingSettings = (rawBundle.project.settingsJson as Record<string, unknown> | null) || {};
   await updateProjectRecord(params.projectId, params.ownerUid, {
+    settingsJson: {
+      ...existingSettings,
+      validationDomain: activeDomain,
+    },
     checkpointJson: {
       ...existingCheckpoint,
       harnessState,
@@ -793,6 +837,7 @@ async function runLayer2SemanticJudge(params: {
     sectionIR: params.sectionIR,
     sourceChunks: params.sourceChunks,
     glossary: params.harnessState.glossary,
+    validationDomain: params.harnessState.blueprint.validationDomain,
   });
 
   const judgeRes = await invokeTrackedHarnessSubcall({
@@ -805,6 +850,8 @@ async function runLayer2SemanticJudge(params: {
     systemInstruction: promptPayload.immutableCachedPrefix,
     prompt: promptPayload.dynamicSuffix,
     expectJson: true,
+    googleResponseSchema: LAYER2_JUDGE_RESPONSE_SCHEMA,
+    jsonSchema: LAYER2_JUDGE_JSON_SCHEMA,
     enablePromptCaching: false,
     allowBudgetOverride: params.allowBudgetOverride,
     abortSignal: params.abortSignal,
@@ -829,7 +876,7 @@ async function runLayer2SemanticJudge(params: {
  * Executes ONE strictly stateless subsection step:
  * Concurrency Lease Lock -> Budget Circuit Breaker -> Author (Flagship + Cached Prefix)
  * -> Immediate drafted_unverified persistence -> Output Truncation Guard -> Layer 1 Guard (0 tokens)
- * -> Claim-by-Claim Layer 2 Judge (Anti-Rubber-Stamp) -> Up to 2 Strict Surgical Patches + Mandatory L1/L2 Re-Audit
+ * -> Claim-by-Claim Layer 2 Judge (Fail-Closed Anti-Rubber-Stamp) -> Up to 2 Strict Surgical Patches + Mandatory L1/L2 Re-Audit
  * -> Verify (with full SectionProvenance) OR Quarantine -> Append-Only RollingSummary -> Release Lock -> Persist to Cloud SQL.
  */
 export async function executeHarnessStepForProject(params: {
@@ -838,6 +885,7 @@ export async function executeHarnessStepForProject(params: {
   ownerUid: string;
   sectionId?: string;
   allowBudgetOverride?: boolean;
+  forceFlagshipForAuthor?: boolean;
   abortSignal?: AbortSignal;
   actorName: string;
 }): Promise<{
@@ -935,7 +983,7 @@ export async function executeHarnessStepForProject(params: {
     checkpointJson: { ...existingCheckpoint, aiUsage: projectUsage, harnessState },
   });
 
-  const renewOwnLock = () => {
+  const renewOwnLock = async (persistToDb = false) => {
     const renewed = renewStepLockHeartbeat({
       existingLock: harnessState!.activeStepLock,
       stepRunId,
@@ -943,6 +991,15 @@ export async function executeHarnessStepForProject(params: {
     });
     if (renewed.renewed) {
       harnessState!.activeStepLock = renewed.lock;
+      if (persistToDb) {
+        try {
+          await updateProjectRecord(params.projectId, params.ownerUid, {
+            checkpointJson: { ...existingCheckpoint, aiUsage: projectUsage, harnessState },
+          });
+        } catch {
+          // Best-effort heartbeat write
+        }
+      }
     }
   };
 
@@ -999,22 +1056,25 @@ export async function executeHarnessStepForProject(params: {
       return await persistBudgetPause(budgetCheck.reasonFa || 'سقف بودجه هارنس تکمیل شد.');
     }
 
-    // Resolve 3-Tier providers from request headers
+    // Resolve 3-Tier providers from request headers (with optional Flagship escalation for Gate 2 retry)
     const authorCtx = resolveProviderForTaskFromRequest(
       params.req,
       'harness_author',
-      'gemini-4-hydrogen'
+      'gemini-4-hydrogen',
+      params.forceFlagshipForAuthor ? 'flagship' : undefined
     );
     const patchCtx = resolveProviderForTaskFromRequest(
       params.req,
       'harness_patch',
-      'gemini-4-hydrogen'
+      'gemini-4-hydrogen',
+      params.forceFlagshipForAuthor ? 'flagship' : undefined
     );
-    const judgeCtx = resolveProviderForTaskFromRequest(
+    const rawJudgeCtx = resolveProviderForTaskFromRequest(
       params.req,
       'harness_judge',
       'gemini-3.8-flash'
     );
+    const judgeCtx = rawJudgeCtx.provider.validationError ? authorCtx : rawJudgeCtx;
     const utilityCtx = resolveProviderForTaskFromRequest(
       params.req,
       'harness_utility',
@@ -1025,6 +1085,13 @@ export async function executeHarnessStepForProject(params: {
       throw new Error(authorCtx.provider.validationError);
     }
 
+    const activeValidationDomain: ValidationDomain =
+      harnessState.blueprint.validationDomain ||
+      ((raw.project.settingsJson as Partial<DocxExportConfig> | null)?.validationDomain ===
+      'general_persian_technical'
+        ? 'general_persian_technical'
+        : 'ecu_winols');
+
     const sourceChunks: HarnessSourceChunk[] = targetSection.sourceChunkIds
       .map((id) => chunksMap.get(id))
       .filter((c): c is HarnessSourceChunk => Boolean(c));
@@ -1034,12 +1101,13 @@ export async function executeHarnessStepForProject(params: {
       return st === 'pending' || st === 'drafted' || st === 'drafted_unverified';
     }).length;
 
-    // 1. STATELESS AUTHOR CALL (Immutable Cached Prefix + Isolated Dynamic Suffix + TTL/Threshold Guard)
+    // 1. STATELESS AUTHOR CALL (Immutable Cached Prefix + Isolated Dynamic Suffix + Strict Schema on Google & Custom)
     const authorPrompt = buildStatelessAuthorPrompt({
       glossary: harnessState.glossary,
       section: targetSection,
       sourceChunks,
       rollingSummary: harnessState.rollingSummary,
+      validationDomain: activeValidationDomain,
     });
 
     const prefixPolicy = evaluatePrefixCachePolicy({
@@ -1068,6 +1136,7 @@ export async function executeHarnessStepForProject(params: {
         prompt: authorPrompt.dynamicSuffix,
         expectJson: true,
         googleResponseSchema: SEMANTIC_SECTION_IR_RESPONSE_SCHEMA,
+        jsonSchema: SEMANTIC_SECTION_IR_JSON_SCHEMA,
         enablePromptCaching: enableCacheForRun,
         usedLockedPrefix: enableCacheForRun,
         haltOnAuthorDowngrade: true,
@@ -1082,13 +1151,47 @@ export async function executeHarnessStepForProject(params: {
     }
 
     projectUsage = mergeAiUsageDelta(projectUsage, authorRes.usageDelta);
-    renewOwnLock();
+    await renewOwnLock(false);
 
     const parsedAuthor = safeParseJsonObject<{
       sectionId?: string;
       title?: string;
       blocks?: unknown;
+      newGlossaryTerms?: Array<{ term?: string; canonicalForm?: string; unit?: string; notes?: string }>;
     }>(authorRes.text);
+
+    // Record newly discovered terms safely in deltaEntries (never mutating frozen prefix mid-chapter)
+    if (Array.isArray(parsedAuthor?.newGlossaryTerms) && parsedAuthor.newGlossaryTerms.length > 0) {
+      const existingBaseTerms = new Set(
+        harnessState.glossary.entries.map((g) => g.canonicalTerm.toLowerCase())
+      );
+      const existingDeltaTerms = new Set(
+        (harnessState.glossary.deltaEntries || []).map((g) => g.canonicalTerm.toLowerCase())
+      );
+      const deltaList = [...(harnessState.glossary.deltaEntries || [])];
+      for (const item of parsedAuthor.newGlossaryTerms.slice(0, 6)) {
+        const term = String(item?.term || '').trim();
+        const canonicalForm = String(item?.canonicalForm || term).trim();
+        if (!term || term.length < 2) continue;
+        const low = term.toLowerCase();
+        if (existingBaseTerms.has(low) || existingDeltaTerms.has(low)) continue;
+        existingDeltaTerms.add(low);
+        deltaList.push({
+          id: `gl-delta-${deltaList.length + 1}-${low.replace(/[^a-z0-9_-]+/gi, '').slice(0, 12) || 'term'}`,
+          canonicalTerm: canonicalForm || term,
+          enEquivalents: [term],
+          faEquivalents: item.notes ? [item.notes.trim()] : [term],
+          forbiddenVariants: [],
+          category: 'general',
+          definitionFa:
+            [item.notes?.trim(), item.unit?.trim() ? `واحد: ${item.unit.trim()}` : '']
+              .filter(Boolean)
+              .join(' — ') || canonicalForm,
+          sourceChunkIds: targetSection.sourceChunkIds.slice(0, 2),
+        });
+      }
+      harnessState.glossary.deltaEntries = deltaList;
+    }
 
     const resolvedTier: SemanticSectionIR['tierUsed'] =
       authorCtx.tierUsed === 'economy' ||
@@ -1149,7 +1252,7 @@ export async function executeHarnessStepForProject(params: {
 
     assertNotAborted(params.abortSignal, 'layer1_and_judge');
 
-    // 2. LAYER 1 DETERMINISTIC GUARD (0 TOKENS) + OUTPUT TRUNCATION + CLAIM-BY-CLAIM JUDGE + STRICT SURGICAL PATCH (MAX 2)
+    // 2. LAYER 1 DETERMINISTIC GUARD (0 TOKENS) + OUTPUT TRUNCATION + FAIL-CLOSED LAYER 2 JUDGE + STRICT SURGICAL PATCH (MAX 2)
     const MAX_PATCH_ATTEMPTS = 2;
     let attempts = 0;
     let reAuditedAfterLastPatch = true;
@@ -1169,6 +1272,7 @@ export async function executeHarnessStepForProject(params: {
       previousChapterSectionsIR,
       knownSectionIds,
       allowedEcuPlatformTags: targetSection.ecuPlatformTags,
+      validationDomain: activeValidationDomain,
     };
 
     const runLayer1WithTruncation = (ir: SemanticSectionIR, truncEval: typeof outputTruncatedEval) => {
@@ -1200,43 +1304,73 @@ export async function executeHarnessStepForProject(params: {
     let judgeModelActuallyUsed: string | null = null;
 
     if (l1Audit.passed && !judgeCtx.provider.validationError) {
-      try {
-        const judgeOut = await runLayer2SemanticJudge({
-          judgeCtx,
-          section: targetSection,
-          sectionIR: currentIR,
-          sourceChunks,
-          harnessState,
-          allowBudgetOverride: params.allowBudgetOverride,
-          abortSignal: params.abortSignal,
-        });
-        l2Audit = judgeOut.audit;
-        judgeModelActuallyUsed = judgeOut.modelUsed;
-        projectUsage = mergeAiUsageDelta(projectUsage, judgeOut.usageDelta);
-        renewOwnLock();
-      } catch (err) {
-        if (err instanceof HarnessBudgetPausedSignal) {
-          return await persistBudgetPause(err.message);
+      let judgeSuccess = false;
+      let lastJudgeErr: unknown = null;
+      for (let jTry = 0; jTry < 2 && !judgeSuccess; jTry++) {
+        try {
+          const judgeOut = await runLayer2SemanticJudge({
+            judgeCtx,
+            section: targetSection,
+            sectionIR: currentIR,
+            sourceChunks,
+            harnessState,
+            allowBudgetOverride: params.allowBudgetOverride,
+            abortSignal: params.abortSignal,
+          });
+          l2Audit = judgeOut.audit;
+          judgeModelActuallyUsed = judgeOut.modelUsed;
+          projectUsage = mergeAiUsageDelta(projectUsage, judgeOut.usageDelta);
+          await renewOwnLock(true);
+          judgeSuccess = true;
+        } catch (err) {
+          if (err instanceof HarnessBudgetPausedSignal) {
+            return await persistBudgetPause(err.message);
+          }
+          if (err instanceof HarnessRunAbortedError) {
+            throw err;
+          }
+          if (err instanceof ProviderGatewayError && err.neverEnterPatchLoop) {
+            throw err;
+          }
+          lastJudgeErr = err;
         }
-        if (err instanceof HarnessRunAbortedError) {
-          throw err;
-        }
-        if (err instanceof ProviderGatewayError && err.neverEnterPatchLoop) {
-          throw err;
-        }
+      }
+      // Fail-Closed Judge: never rubber-stamp passed:true if Layer 2 Judge failed both attempts!
+      if (!judgeSuccess) {
+        const errMsg = lastJudgeErr instanceof Error ? lastJudgeErr.message : 'خطای ارتباط با مدل داور';
         l2Audit = {
-          passed: true,
-          score: 88,
-          summaryFa: 'لایه ۱ قطعی پاس شد؛ بررسی لایه ۲ با خطای موقت شبکه مواجه شد و عبور داده شد.',
-          issues: [],
+          passed: false,
+          score: 0,
+          summaryFa: `داوری لایه ۲ ناموفق ماند (${errMsg.slice(0, 120)})؛ برای جلوگیری از تأیید کاذب Fail-Closed متوقف شد.`,
+          issues: [
+            {
+              id: 'l2-fail-closed',
+              category: 'structure',
+              severity: 'error',
+              messageFa: `ممیزی لایه ۲ تکمیل نشد (${errMsg.slice(0, 100)}).`,
+            },
+          ],
           invalidBlockIds: [],
           modelUsed: getEffectiveModelIdFromCtx(judgeCtx),
         };
       }
     } else if (l1Audit.passed) {
-      l2Audit.passed = true;
-      l2Audit.score = 90;
-      l2Audit.summaryFa = 'ممیزی قطعی لایه ۱ تایید شد.';
+      // Only reached if no AI provider key is usable at all for Judge
+      l2Audit = {
+        passed: false,
+        score: 0,
+        summaryFa: 'داور لایه ۲ به دلیل نبود کلید معتبر در دسترس نیست (Fail-Closed).',
+        issues: [
+          {
+            id: 'l2-no-key-fail-closed',
+            category: 'structure',
+            severity: 'error',
+            messageFa: 'کلید API برای داور لایه ۲ در دسترس نیست.',
+          },
+        ],
+        invalidBlockIds: [],
+        modelUsed: getEffectiveModelIdFromCtx(judgeCtx),
+      };
     }
 
     while ((!l1Audit.passed || !l2Audit.passed) && attempts < MAX_PATCH_ATTEMPTS) {
@@ -1260,6 +1394,7 @@ export async function executeHarnessStepForProject(params: {
         layer1Issues: plan.focusedLayer1Issues,
         layer2Issues: plan.focusedLayer2Issues,
         minimalSourceChunks: plan.minimalSourceChunks,
+        validationDomain: activeValidationDomain,
       });
 
       const effectivePatchCtx = patchCtx.provider.validationError ? authorCtx : patchCtx;
@@ -1277,6 +1412,8 @@ export async function executeHarnessStepForProject(params: {
           systemInstruction: patchPrompt.immutableCachedPrefix,
           prompt: patchPrompt.dynamicSuffix,
           expectJson: true,
+          googleResponseSchema: SURGICAL_PATCH_RESPONSE_SCHEMA,
+          jsonSchema: SURGICAL_PATCH_JSON_SCHEMA,
           enablePromptCaching: enableCacheForRun,
           usedLockedPrefix: enableCacheForRun,
           allowBudgetOverride: params.allowBudgetOverride,
@@ -1290,43 +1427,82 @@ export async function executeHarnessStepForProject(params: {
       }
 
       projectUsage = mergeAiUsageDelta(projectUsage, patchRes.usageDelta);
-      renewOwnLock();
+      await renewOwnLock(true);
 
       lastFinishReason = patchRes.finishReason ?? lastFinishReason;
-      outputTruncatedEval = evaluateOutputTruncation({
+      const patchTruncEval = evaluateOutputTruncation({
         finishReason: patchRes.finishReason,
         sectionId: targetSection.sectionId,
       });
+      const wasPreviouslyTruncated = outputTruncatedEval.truncated;
+      outputTruncatedEval = patchTruncEval;
 
       const parsedPatch = safeParseJsonObject<{
         patchedBlocks?: unknown;
         blocks?: unknown;
       }>(patchRes.text);
+
+      // Bug #6: Prefer focused faulty blocks' sourceChunkIds as fallback instead of blasting ALL section chunks
+      const focusedChunkIds = Array.from(
+        new Set(plan.faultyBlocks.flatMap((b) => b.sourceChunkIds || []))
+      );
+      const patchFallbackChunkIds =
+        focusedChunkIds.length > 0 && !plan.requiresFullSectionRewrite
+          ? focusedChunkIds
+          : targetSection.sourceChunkIds;
+
       const patchedBlocks = normalizeSemanticBlocks(
         parsedPatch?.patchedBlocks || parsedPatch?.blocks,
-        targetSection.sourceChunkIds
+        patchFallbackChunkIds
       );
 
       attempts += 1;
       reAuditedAfterLastPatch = false;
 
       if (patchedBlocks.length > 0) {
-        const spliceResult = applySurgicalPatchBlocksStrict({
-          originalIR: currentIR,
-          patchedBlocks,
-          targetFaultyBlockIds: plan.faultyBlocks.map((b) => b.id),
-          meta: {
-            modelUsed: patchRes.modelUsed,
-            tierUsed:
-              effectivePatchCtx.tierUsed === 'economy' ||
-              effectivePatchCtx.tierUsed === 'balanced' ||
-              effectivePatchCtx.tierUsed === 'flagship'
-                ? effectivePatchCtx.tierUsed
-                : 'balanced',
-          },
-        });
-        currentIR = spliceResult.mergedIR;
+        const patchMeta = {
+          modelUsed: patchRes.modelUsed,
+          tierUsed: (
+            effectivePatchCtx.tierUsed === 'economy' ||
+            effectivePatchCtx.tierUsed === 'balanced' ||
+            effectivePatchCtx.tierUsed === 'flagship'
+              ? effectivePatchCtx.tierUsed
+              : 'balanced'
+          ) as SemanticSectionIR['tierUsed'],
+        };
+        currentIR = plan.requiresFullSectionRewrite
+          ? replaceFullSectionBlocksAtomic({
+              originalIR: currentIR,
+              rewrittenBlocks: patchedBlocks,
+              meta: patchMeta,
+            })
+          : applySurgicalPatchBlocksStrict({
+              originalIR: currentIR,
+              patchedBlocks,
+              targetFaultyBlockIds: plan.faultyBlocks.map((b) => b.id),
+              meta: patchMeta,
+            }).mergedIR;
         harnessState.sectionsIR[targetSection.sectionId] = currentIR;
+      }
+
+      // Bug #4: If author truncated previously and patch didn't verify all chunks, keep truncated signal until L1 proves 100% chunk coverage
+      if (wasPreviouslyTruncated && !patchTruncEval.truncated) {
+        const citedIds = new Set(currentIR.blocks.flatMap((b) => b.sourceChunkIds || []));
+        const missingChunks = targetSection.sourceChunkIds.filter((cid) => !citedIds.has(cid));
+        if (missingChunks.length > 0) {
+          outputTruncatedEval = {
+            truncated: true,
+            code: 'output_truncated',
+            rawFinishReason: lastFinishReason,
+            normalizedFinishReason: 'length',
+            issue: {
+              id: `trunc-uncovered-${targetSection.sectionId}`,
+              kind: 'missing_source_chunk',
+              severity: 'error',
+              messageFa: `پاسخ برش‌خورده بود و هنوز ${toPersianDigits(missingChunks.length)} قطعه منبع در بلوک‌های بازنویسی‌شده پوشش داده نشده است.`,
+            },
+          };
+        }
       }
 
       // Mandatory post-patch Dual-Layer Re-Audit (L1 + L2)
@@ -1346,7 +1522,7 @@ export async function executeHarnessStepForProject(params: {
           judgeModelActuallyUsed = judgeOut.modelUsed;
           projectUsage = mergeAiUsageDelta(projectUsage, judgeOut.usageDelta);
           reAuditedAfterLastPatch = true;
-          renewOwnLock();
+          await renewOwnLock(true);
         } catch (err) {
           if (err instanceof HarnessBudgetPausedSignal) {
             return await persistBudgetPause(err.message);
@@ -1359,7 +1535,7 @@ export async function executeHarnessStepForProject(params: {
           }
           l2Audit = {
             passed: false,
-            score: 50,
+            score: 0,
             summaryFa: 'بازممیزی لایه ۲ پس از ترمیم جراحی با خطا مواجه شد؛ برای جلوگیری از تأیید کاذب متوقف شد.',
             issues: [
               {
@@ -1374,9 +1550,6 @@ export async function executeHarnessStepForProject(params: {
           };
           reAuditedAfterLastPatch = false;
         }
-      } else if (l1Audit.passed) {
-        l2Audit.passed = true;
-        reAuditedAfterLastPatch = true;
       } else {
         l2Audit.passed = false;
         reAuditedAfterLastPatch = true;
@@ -1434,7 +1607,7 @@ export async function executeHarnessStepForProject(params: {
         (q) => q.sectionId !== targetSection.sectionId
       );
 
-      // Append-Only RollingSummary update (Economy tier, strictly budget-checked + abort-checked, deterministic fallback)
+      // Append-Only RollingSummary update (Economy tier, strict JSON schema, budget-checked + abort-checked)
       let summaryText = `${targetSection.title} بر اساس ${toPersianDigits(targetSection.sourceChunkIds.length)} قطعه منبع تدوین و تایید شد.`;
       let keyConcepts: string[] = [];
 
@@ -1454,6 +1627,8 @@ export async function executeHarnessStepForProject(params: {
             systemInstruction: sumPrompt.immutableCachedPrefix,
             prompt: sumPrompt.dynamicSuffix,
             expectJson: true,
+            googleResponseSchema: ROLLING_SUMMARY_RESPONSE_SCHEMA,
+            jsonSchema: ROLLING_SUMMARY_JSON_SCHEMA,
             enablePromptCaching: false,
             allowBudgetOverride: params.allowBudgetOverride,
             abortSignal: params.abortSignal,
@@ -1483,6 +1658,8 @@ export async function executeHarnessStepForProject(params: {
         sectionId: targetSection.sectionId,
         chapterTitle: targetSection.chapterTitle,
         sectionTitle: targetSection.title,
+        chapterOrder: targetSection.chapterOrder,
+        sectionOrder: targetSection.sectionOrder,
         summaryText,
         keyConcepts,
         updatedAt: finishTs,
@@ -1561,7 +1738,7 @@ export async function executeHarnessStepForProject(params: {
 
     harnessState.status = hasMorePending ? 'running' : 'completed';
 
-    // Always compile fresh bookSnapshotJson when run completes (or if a book already exists)
+    // Always compile fresh bookSnapshotJson & advance Stage/Status + AuditReport when run completes (Bug #9)
     const updatePayload: Parameters<typeof updateProjectRecord>[2] = {
       checkpointJson: {
         ...existingCheckpoint,
@@ -1579,6 +1756,42 @@ export async function executeHarnessStepForProject(params: {
         existingBook: dto.existingBook,
       });
       updatePayload.bookSnapshotJson = compiledBook as unknown as Record<string, unknown>;
+    }
+
+    if (!hasMorePending) {
+      const fullyVerified = stats.quarantinedSections === 0;
+      updatePayload.pipelineStage = fullyVerified ? 5 : 4;
+      updatePayload.status = fullyVerified ? 'completed' : 'structuring';
+
+      const uniqueUnitsCount = dto.contentUnits.filter(
+        (u) => u.status !== 'merged' && u.status !== 'merged_duplicate'
+      ).length;
+      const mergedDuplicatesCount = dto.contentUnits.length - uniqueUnitsCount;
+      const openOrAllConflicts = raw.conflicts.length;
+      const coveragePct =
+        stats.totalChunks > 0
+          ? Number(((stats.verifiedChunks / stats.totalChunks) * 100).toFixed(1))
+          : 100;
+
+      await saveAuditReportRecord({
+        id: `audit_${params.projectId}_harness`,
+        projectId: params.projectId,
+        totalSourceFiles: dto.sourceFiles.length,
+        totalInputUnits: dto.contentUnits.length,
+        uniqueUnitsCount,
+        mergedDuplicatesCount,
+        conflictsCount: openOrAllConflicts,
+        coveragePercent: coveragePct,
+        sourceTraceJson: {
+          mode: 'harness_verified',
+          verifiedSections: stats.verifiedSections,
+          quarantinedSections: stats.quarantinedSections,
+          totalSections: stats.totalSections,
+          totalChunks: stats.totalChunks,
+          verifiedChunks: stats.verifiedChunks,
+          conflictsResolved: raw.conflicts.filter((c) => c.status !== 'open').length,
+        },
+      });
     }
 
     await updateProjectRecord(params.projectId, params.ownerUid, updatePayload);
@@ -1693,6 +1906,15 @@ export async function resolveHarnessQuarantineItem(params: {
   harnessState.telemetry.quarantinedSections = stats.quarantinedSections;
   harnessState.updatedAt = now;
 
+  const hasMorePending = harnessState.blueprint.sections.some((s) => {
+    const st = harnessState.coverageLedger.bySectionId[s.sectionId]?.status || 'pending';
+    return st === 'pending' || st === 'drafted' || st === 'drafted_unverified';
+  });
+  const fullyCompleted = !hasMorePending && stats.quarantinedSections === 0;
+  if (!hasMorePending) {
+    harnessState.status = 'completed';
+  }
+
   const dto = toDtoShapes(raw);
   const compiledBook = convertHarnessStateToParsedBook({
     harnessState,
@@ -1702,7 +1924,36 @@ export async function resolveHarnessQuarantineItem(params: {
     existingBook: dto.existingBook,
   });
 
+  const uniqueUnitsCount = dto.contentUnits.filter(
+    (u) => u.status !== 'merged' && u.status !== 'merged_duplicate'
+  ).length;
+  await saveAuditReportRecord({
+    id: `audit_${params.projectId}_harness`,
+    projectId: params.projectId,
+    totalSourceFiles: dto.sourceFiles.length,
+    totalInputUnits: dto.contentUnits.length,
+    uniqueUnitsCount,
+    mergedDuplicatesCount: dto.contentUnits.length - uniqueUnitsCount,
+    conflictsCount: raw.conflicts.length,
+    coveragePercent:
+      stats.totalChunks > 0
+        ? Number(((stats.verifiedChunks / stats.totalChunks) * 100).toFixed(1))
+        : 100,
+    sourceTraceJson: {
+      mode: 'harness_verified',
+      verifiedSections: stats.verifiedSections,
+      quarantinedSections: stats.quarantinedSections,
+      totalSections: stats.totalSections,
+      totalChunks: stats.totalChunks,
+      verifiedChunks: stats.verifiedChunks,
+      conflictsResolved: raw.conflicts.filter((c) => c.status !== 'open').length,
+    },
+  });
+
   await updateProjectRecord(params.projectId, params.ownerUid, {
+    ...(fullyCompleted
+      ? { pipelineStage: 5, status: 'completed' }
+      : { pipelineStage: Math.max(raw.project.pipelineStage || 4, 4) }),
     checkpointJson: {
       ...existingCheckpoint,
       harnessState,
@@ -1752,8 +2003,37 @@ export async function syncHarnessToBookSnapshot(params: {
     existingBook: dto.existingBook,
   });
 
+  const stats = computeCoverageLedgerStats(harnessState.coverageLedger);
+  const uniqueUnitsCount = dto.contentUnits.filter(
+    (u) => u.status !== 'merged' && u.status !== 'merged_duplicate'
+  ).length;
+
+  await saveAuditReportRecord({
+    id: `audit_${params.projectId}_harness`,
+    projectId: params.projectId,
+    totalSourceFiles: dto.sourceFiles.length,
+    totalInputUnits: dto.contentUnits.length,
+    uniqueUnitsCount,
+    mergedDuplicatesCount: dto.contentUnits.length - uniqueUnitsCount,
+    conflictsCount: raw.conflicts.length,
+    coveragePercent:
+      stats.totalChunks > 0
+        ? Number(((stats.verifiedChunks / stats.totalChunks) * 100).toFixed(1))
+        : 100,
+    sourceTraceJson: {
+      mode: 'harness_verified',
+      verifiedSections: stats.verifiedSections,
+      quarantinedSections: stats.quarantinedSections,
+      totalSections: stats.totalSections,
+      totalChunks: stats.totalChunks,
+      verifiedChunks: stats.verifiedChunks,
+      conflictsResolved: raw.conflicts.filter((c) => c.status !== 'open').length,
+    },
+  });
+
   await updateProjectRecord(params.projectId, params.ownerUid, {
-    pipelineStage: Math.max(raw.project.pipelineStage || 3, 4),
+    pipelineStage: stats.quarantinedSections === 0 ? 5 : Math.max(raw.project.pipelineStage || 3, 4),
+    status: stats.quarantinedSections === 0 ? 'completed' : 'structuring',
     bookSnapshotJson: compiledBook as unknown as Record<string, unknown>,
   });
 
@@ -1762,6 +2042,69 @@ export async function syncHarnessToBookSnapshot(params: {
     harnessState,
     rawBundle: refreshed,
   };
+}
+
+/**
+ * Re-runs a single quarantined subsection directly with Flagship-tier escalation (HITL Gate 2 retry).
+ */
+export async function retryQuarantinedSectionForProject(params: {
+  req: express.Request;
+  projectId: string;
+  ownerUid: string;
+  sectionId: string;
+  allowBudgetOverride?: boolean;
+  abortSignal?: AbortSignal;
+  actorName: string;
+}) {
+  const raw = await getProjectBundle(params.projectId, params.ownerUid);
+  if (!raw) return null;
+
+  const existingCheckpoint =
+    (raw.project.checkpointJson as Record<string, unknown> | null) || {};
+  const harnessState = extractHarnessStateFromCheckpoint(existingCheckpoint);
+  if (!harnessState) {
+    throw new Error('وضعیت هارنس برای این پروژه یافت نشد.');
+  }
+
+  const targetSection = harnessState.blueprint.sections.find(
+    (s) => s.sectionId === params.sectionId
+  );
+  if (!targetSection) {
+    throw new Error('زیربخش موردنظر در نقشه راه هارنس یافت نشد.');
+  }
+
+  // Temporarily mark section pending so executeHarnessStepForProject processes it cleanly
+  const now = new Date().toISOString();
+  harnessState.coverageLedger.bySectionId[params.sectionId] = {
+    sectionId: params.sectionId,
+    chapterId: targetSection.chapterId,
+    status: 'pending',
+    attempts: 0,
+    layer1Passed: false,
+    layer2Passed: false,
+    lastError: null,
+    lastUpdatedAt: now,
+  };
+  harnessState.status = 'running';
+  harnessState.updatedAt = now;
+
+  await updateProjectRecord(params.projectId, params.ownerUid, {
+    checkpointJson: {
+      ...existingCheckpoint,
+      harnessState,
+    },
+  });
+
+  return await executeHarnessStepForProject({
+    req: params.req,
+    projectId: params.projectId,
+    ownerUid: params.ownerUid,
+    sectionId: params.sectionId,
+    allowBudgetOverride: params.allowBudgetOverride,
+    forceFlagshipForAuthor: true,
+    abortSignal: params.abortSignal,
+    actorName: params.actorName,
+  });
 }
 
 export type HarnessStepApiResponse = {

@@ -1,12 +1,12 @@
 {
-  "projectId": "proverbial-hill-rg33w",
-  "appId": "1:135603891753:web:c6a63fe50bfb5aa6c5f638",
-  "apiKey": "AIzaSyBTnJv91MN7OGXqGZ7LslB91sp8v_y9tTQ",
-  "authDomain": "proverbial-hill-rg33w.firebaseapp.com",
-  "firestoreDatabaseId": "ai-studio-664f35f4-b6d6-43cb-bc06-406a09df07d0",
-  "storageBucket": "proverbial-hill-rg33w.firebasestorage.app",
-  "messagingSenderId": "135603891753",
+  "projectId": "my-course-transcriber",
+  "appId": "1:216246591439:web:13add5624f90d185e9bcba",
+  "apiKey": "AIzaSyAVDYEEP409i9yPpXRNPY--DR3woSSHbso",
+  "authDomain": "my-course-transcriber.firebaseapp.com",
+  "firestoreDatabaseId": "ai-studio-atomasiontolidjo-f8067986-f8b7-4ad0-90b0-bbbc00bd2601",
+  "storageBucket": "my-course-transcriber.firebasestorage.app",
+  "messagingSenderId": "216246591439",
   "measurementId": "",
-  "oAuthClientId": "135603891753-jrp8v4843ruskrdt96hc1qs45jajmgg9.apps.googleusercontent.com",
+  "oAuthClientId": "216246591439-671huvb79au426mdqe9oss5eqr0g6dl4.apps.googleusercontent.com",
   "recaptchaSiteKey": ""
 }

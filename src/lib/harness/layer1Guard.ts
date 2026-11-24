@@ -1,3 +1,4 @@
+import type { ValidationDomain } from '../bookTypes.ts';
 import {
   extractEcuPlatforms,
   extractTechnicalEntities,
@@ -22,6 +23,8 @@ const MAP_DIM_RX = /\b\d{1,2}\s*[xX×]\s*\d{1,2}\b/g;
 // Critical automotive/ECU safety warning triggers (evaluated on normalized Persian)
 const SAFETY_WARNING_KEYWORDS_RX =
   /(?:سوختن|ناک|ایموبلایزر|ایموبیلایزر|قفل\s*شدن|چک\s*سام|چکسام|بکاپ|پشتیبان\s*گیری|اتصال\s*کوتاه|خطر|هشدار)/;
+const GENERAL_SAFETY_WARNING_KEYWORDS_RX =
+  /(?:خطر\s*(?:برق\s*گرفتگی|آتش|انفجار|حیاتی|جدی)|هشدار\s*(?:ایمنی|مهم|جدی|حیاتی)|اتصال\s*کوتاه|ممنوعیت\s*قطعی)/;
 
 // Fake numeric cross-references like "جدول ۳-۲", "شکل زیر", "نمودار ۲-۱"
 const FAKE_TABLE_REF_RX = /جدول\s+\d+(?:\s*[-–.]\s*\d+)?/g;
@@ -80,7 +83,14 @@ const UNIT_SYNONYM_MAP: Record<string, string> = {
 };
 
 const MEASUREMENT_TRIPLE_RX =
-  /([+-])?\s*(\d+(?:\.\d+)?)\s*(°[CFcf]|°|mg\/stroke|mg\/str|mg\/stk|mg\/hub|kg\/h|g\/s|BTDC|ATDC|RPM|rpm|bar|BAR|psi|PSI|kPa|kpa|mbar|hPa|ms|mV|V|kHz|MHz|Hz|Nm|kW|hp|AFR|afr|lambda|λ|kbps|baud|deg|CA|%|میلی[\s\u200c]*ثانیه|میلی[\s\u200c]*ولت|دور\s+بر\s+دقیقه|نیوتن[\s\u200c]*متر|اسب\s+بخار|کیلوپاسکال|کیلووات|درجه|درصد|لامبدا|ولت|بار)(?![A-Za-z0-9\u0600-\u06FF])/g;
+  /([+-])?\s*(\d+(?:\.\d+)?)(?:\s*:\s*1)?\s*(°[CFcf]|°|mg\/stroke|mg\/str|mg\/stk|mg\/hub|kg\/h|g\/s|BTDC|ATDC|RPM|rpm|bar|BAR|psi|PSI|kPa|kpa|mbar|hPa|ms|mV|V|kHz|MHz|Hz|Nm|kW|hp|AFR|afr|lambda|λ|kbps|baud|deg|CA|%|میلی[\s\u200c]*ثانیه|میلی[\s\u200c]*ولت|دور\s+بر\s+دقیقه|نیوتن[\s\u200c]*متر|اسب\s+بخار|کیلوپاسکال|کیلووات|درجه|درصد|لامبدا|ولت|بار)(?![A-Za-z0-9\u0600-\u06FF])/g;
+
+const PREFIX_PERCENT_RX = /([%٪])\s*([+-])?\s*(\d+(?:\.\d+)?)(?![A-Za-z0-9\u0600-\u06FF])/g;
+
+const TABLE_HEADER_STOPWORDS = new Set([
+  'در', 'از', 'با', 'به', 'و', 'یا', 'این', 'آن', 'که', 'را', 'تا', 'بر', 'برای', 'روی',
+  'پس', 'پیش', 'هم', 'است', 'هست', 'شود', 'می', 'the', 'and', 'for', 'with', 'of', 'in', 'to', 'on',
+]);
 
 function countWords(text: string): number {
   const cleaned = (text || '').trim();
@@ -170,10 +180,27 @@ export function extractMeasurementTriples(text: string): MeasurementTriple[] {
 
   let m: RegExpExecArray | null;
   while ((m = MEASUREMENT_TRIPLE_RX.exec(normalized)) !== null) {
-    const sign = (m[1] === '+' || m[1] === '-' ? m[1] : '') as '+' | '-' | '';
+    let sign = (m[1] === '+' || m[1] === '-' ? m[1] : '') as '+' | '-' | '';
+    if (sign === '-') {
+      // Bug #14 fix: Distinguish numeric range hyphen ("3000 - 5500 RPM") from real negative sign ("-2.5°")
+      const before = normalized.slice(Math.max(0, m.index - 24), m.index);
+      if (/(?:\d|تا|الی)\s*$/.test(before)) {
+        sign = '';
+      }
+    }
     const value = canonicalizeDecimalNumber(m[2]);
     const rawUnit = m[3].trim().toLowerCase().replace(/\s+/g, ' ');
     const unit = UNIT_SYNONYM_MAP[rawUnit] || rawUnit;
+    const key = `${sign}${value}|${unit}`;
+    triples.push({ sign, value, unit, raw: m[0].trim(), key });
+  }
+
+  // Handle prefix percent syntax such as "%15"
+  PREFIX_PERCENT_RX.lastIndex = 0;
+  while ((m = PREFIX_PERCENT_RX.exec(normalized)) !== null) {
+    const sign = (m[2] === '+' || m[2] === '-' ? m[2] : '') as '+' | '-' | '';
+    const value = canonicalizeDecimalNumber(m[3]);
+    const unit = 'pct';
     const key = `${sign}${value}|${unit}`;
     triples.push({ sign, value, unit, raw: m[0].trim(), key });
   }
@@ -286,6 +313,18 @@ function stripStepListOrdinals(text: string): string {
  * or consecutive identical sentences repeated >= 3 times).
  */
 export function detectDegenerateRepetition(text: string): string | null {
+  const rawLines = (text || '')
+    .split('\n')
+    .map((l) => l.trim())
+    .filter(Boolean);
+  const structuredLineCount = rawLines.filter((l) =>
+    /^(?:[-•*]|\d+\s*[.)\-–:]|(?:پین|پایه|کانکتور|کد|pin|dtc|[pcbu]\d{4})\b)/i.test(
+      normalizePersianStrict(l)
+    )
+  ).length;
+  const isStructuredPinoutOrEnum =
+    rawLines.length >= 3 && structuredLineCount / rawLines.length >= 0.5;
+
   const normalized = normalizePersianStrict(text)
     .replace(/[^\u0600-\u06FFa-zA-Z0-9\s.؟!]/g, ' ')
     .replace(/\s+/g, ' ')
@@ -308,14 +347,15 @@ export function detectDegenerateRepetition(text: string): string | null {
     }
   }
 
-  // Check 4-gram repetition counts
+  // Bug #17 fix: structured pinout/DTC listings legitimately share connector boilerplate phrases
+  const repeatThreshold = isStructuredPinoutOrEnum ? 8 : 4;
   const words = normalized.split(/\s+/).filter(Boolean);
   if (words.length >= 16) {
     const ngramCounts = new Map<string, number>();
     for (let i = 0; i <= words.length - 4; i++) {
       const gram = `${words[i]} ${words[i + 1]} ${words[i + 2]} ${words[i + 3]}`;
       const next = (ngramCounts.get(gram) || 0) + 1;
-      if (next >= 4) {
+      if (next >= repeatThreshold) {
         return gram;
       }
       ngramCounts.set(gram, next);
@@ -339,7 +379,9 @@ function extractSourceTableHeaderTokens(sourceText: string): Set<string> {
         .filter(Boolean);
       for (const cell of cells) {
         for (const w of cell.split(/\s+/)) {
-          if (w.length >= 2) tokens.add(w);
+          if (w.length >= 3 && !TABLE_HEADER_STOPWORDS.has(w)) {
+            tokens.add(w);
+          }
         }
       }
     }
@@ -348,6 +390,8 @@ function extractSourceTableHeaderTokens(sourceText: string): Set<string> {
 }
 
 export interface Layer1GuardOptions {
+  /** Validation domain: specialized automotive ECU/WinOLS or general Persian technical docs */
+  validationDomain?: ValidationDomain;
   /** Minimum output/source word ratio for pure prose (default 0.40) */
   minWordRatio?: number;
   /** Relaxed floor when 100% of technical entities are preserved on verbose spoken transcripts (default 0.25) */
@@ -386,12 +430,15 @@ export function runLayer1DeterministicGuard(
   const issues: Layer1Issue[] = [];
   const invalidBlockSet = new Set<string>();
 
+  const validationDomain: ValidationDomain = options?.validationDomain || 'ecu_winols';
+  const isGeneralDomain = validationDomain === 'general_persian_technical';
   const minWordRatio = options?.minWordRatio ?? 0.4;
   const minWordRatioEntities = options?.minWordRatioWhenEntitiesPreserved ?? 0.25;
   const maxWordRatio = options?.maxWordRatio ?? 3.8;
   const requireAllChunksCovered = options?.requireAllChunksCovered ?? true;
 
   const allowedChunkIds = new Set(sourceChunks.map((c) => c.id));
+  const chunkById = new Map(sourceChunks.map((c) => [c.id, c]));
   const coveredChunkIds = new Set<string>();
 
   const sourceFullText = sourceChunks.map((c) => c.text).join('\n');
@@ -401,8 +448,12 @@ export function runLayer1DeterministicGuard(
     0
   );
 
-  // Extract technical anchors STRICTLY from THIS subsection's source chunks (never bleed global glossary ECUs/Hex!)
+  // Extract technical anchors STRICTLY from THIS subsection's source chunks & per-chunk provenance matrix
   const sourceAnchors = extractExtendedEcuAnchors(sourceFullText);
+  const perChunkAnchors = new Map<string, ExtractedAnchorSet>();
+  for (const chunk of sourceChunks) {
+    perChunkAnchors.set(chunk.id, extractExtendedEcuAnchors(chunk.text));
+  }
   const allowedPlatforms = new Set<string>([
     ...sourceAnchors.ecuPlatforms,
     ...(options?.allowedEcuPlatformTags || []),
@@ -410,10 +461,11 @@ export function runLayer1DeterministicGuard(
   ]);
 
   // Identify source chunks containing critical safety warnings that MUST yield a callout_warning
+  const safetyRx = isGeneralDomain ? GENERAL_SAFETY_WARNING_KEYWORDS_RX : SAFETY_WARNING_KEYWORDS_RX;
   const safetyRequiredChunkIds = new Set<string>();
   for (const chunk of sourceChunks) {
     const normChunk = normalizePersianStrict(chunk.text).replace(/\u200c/g, ' ');
-    if (SAFETY_WARNING_KEYWORDS_RX.test(normChunk)) {
+    if (safetyRx.test(normChunk)) {
       safetyRequiredChunkIds.add(chunk.id);
     }
   }
@@ -490,15 +542,16 @@ export function runLayer1DeterministicGuard(
           });
         }
 
-        // If source contained a structured table, verify headers aren't completely fabricated
+        // Bug #16 fix: If source contained a structured table, verify meaningful (non-stopword) headers match
         if (sourceTableHeaderTokens.size > 0) {
           const genHeaderTokens = headers
             .map((h) => normalizeForGlossaryMatch(h))
             .join(' ')
             .split(/\s+/)
-            .filter((w) => w.length >= 2);
+            .filter((w) => w.length >= 3 && !TABLE_HEADER_STOPWORDS.has(w));
+          const normalizedSourceForTable = normalizeForGlossaryMatch(sourceFullText);
           const overlap = genHeaderTokens.filter(
-            (w) => sourceTableHeaderTokens.has(w) || normalizeForGlossaryMatch(sourceFullText).includes(w)
+            (w) => sourceTableHeaderTokens.has(w) || normalizedSourceForTable.includes(w)
           );
           if (genHeaderTokens.length > 0 && overlap.length === 0) {
             invalidBlockSet.add(blockId);
@@ -583,8 +636,39 @@ export function runLayer1DeterministicGuard(
       });
     }
 
-    // 3. Degenerate N-gram repetition loop guard
-    const repeatedGram = detectDegenerateRepetition(flatText);
+    // 3. Degenerate N-gram repetition loop guard (for tables, check identical consecutive rows & per-cell prose rather than flattening all rows together)
+    let repeatedGram: string | null = null;
+    if (block.kind === 'table') {
+      const tableRows = Array.isArray(block.rows) ? block.rows : [];
+      let sameRowStreak = 1;
+      for (let rIdx = 0; rIdx < tableRows.length; rIdx++) {
+        const rowStr = (tableRows[rIdx] || []).map((c) => normalizePersianStrict(c)).join(' | ');
+        if (rIdx > 0) {
+          const prevRowStr = (tableRows[rIdx - 1] || [])
+            .map((c) => normalizePersianStrict(c))
+            .join(' | ');
+          if (rowStr.length >= 10 && rowStr === prevRowStr) {
+            sameRowStreak += 1;
+            if (sameRowStreak >= 3) {
+              repeatedGram = rowStr.slice(0, 60);
+              break;
+            }
+          } else {
+            sameRowStreak = 1;
+          }
+        }
+        for (const cell of tableRows[rIdx] || []) {
+          const cellRep = detectDegenerateRepetition(cell);
+          if (cellRep) {
+            repeatedGram = cellRep;
+            break;
+          }
+        }
+        if (repeatedGram) break;
+      }
+    } else {
+      repeatedGram = detectDegenerateRepetition(flatText);
+    }
     if (repeatedGram) {
       invalidBlockSet.add(blockId);
       issues.push({
@@ -635,10 +719,19 @@ export function runLayer1DeterministicGuard(
       const inspectText = block.kind === 'step_list' ? stripStepListOrdinals(flatText) : flatText;
       const blockAnchors = extractExtendedEcuAnchors(inspectText);
 
+      // Bug #15 fix: Block-level provenance scope — validate against cited chunks of THIS block when valid
+      const validBlockRefIds = refs.filter((id) => chunkById.has(id));
+      const scopedAnchors: ExtractedAnchorSet =
+        validBlockRefIds.length > 0 && validBlockRefIds.length < sourceChunks.length
+          ? extractExtendedEcuAnchors(
+              validBlockRefIds.map((id) => chunkById.get(id)?.text || '').join('\n')
+            )
+          : sourceAnchors;
+
       // 5a. Hex addresses (canonicalized: 0x001A4F == 0x1a4f)
       for (const hex of blockAnchors.hexAddresses) {
         checkedAnchorsCount++;
-        if (!sourceAnchors.hexAddresses.has(hex)) {
+        if (!scopedAnchors.hexAddresses.has(hex)) {
           invalidBlockSet.add(blockId);
           issues.push({
             id: `l1-halluc-hex-${blockId}-${hex}`,
@@ -646,80 +739,84 @@ export function runLayer1DeterministicGuard(
             severity: 'error',
             blockId,
             offendingToken: hex,
-            messageFa: `آدرس هگز «${hex}» در بلوک ${blockId} در هیچ‌یک از قطعات منبع این زیربخش وجود ندارد (احتمال توهم فنی).`,
+            messageFa: sourceAnchors.hexAddresses.has(hex)
+              ? `آدرس هگز «${hex}» در بلوک ${blockId} در قطعات ارجاع‌شده همین بلوک (${validBlockRefIds.join(', ')}) وجود ندارد.`
+              : `آدرس هگز «${hex}» در بلوک ${blockId} در هیچ‌یک از قطعات منبع این زیربخش وجود ندارد (احتمال توهم فنی).`,
           });
         }
       }
 
-      // 5b. OBD-II DTC codes
-      for (const dtc of blockAnchors.dtcCodes) {
-        checkedAnchorsCount++;
-        if (!sourceAnchors.dtcCodes.has(dtc)) {
-          invalidBlockSet.add(blockId);
-          issues.push({
-            id: `l1-halluc-dtc-${blockId}-${dtc}`,
-            kind: 'hallucinated_technical_fact',
-            severity: 'error',
-            blockId,
-            offendingToken: dtc,
-            messageFa: `کد خطای OBD «${dtc}» در بلوک ${blockId} در قطعات منبع تزریق‌شده وجود ندارد.`,
-          });
+      if (!isGeneralDomain) {
+        // 5b. OBD-II DTC codes
+        for (const dtc of blockAnchors.dtcCodes) {
+          checkedAnchorsCount++;
+          if (!scopedAnchors.dtcCodes.has(dtc)) {
+            invalidBlockSet.add(blockId);
+            issues.push({
+              id: `l1-halluc-dtc-${blockId}-${dtc}`,
+              kind: 'hallucinated_technical_fact',
+              severity: 'error',
+              blockId,
+              offendingToken: dtc,
+              messageFa: `کد خطای OBD «${dtc}» در بلوک ${blockId} در قطعات منبع ارجاع‌شده وجود ندارد.`,
+            });
+          }
         }
-      }
 
-      // 5c. ECU Platform Isolation (ecu_platform_mismatch) & ECU Model codes
-      for (const platform of blockAnchors.ecuPlatforms) {
-        checkedAnchorsCount++;
-        if (allowedPlatforms.size > 0 && !allowedPlatforms.has(platform)) {
-          invalidBlockSet.add(blockId);
-          issues.push({
-            id: `l1-ecu-platform-${blockId}-${platform}`,
-            kind: 'ecu_platform_mismatch',
-            severity: 'error',
-            blockId,
-            offendingToken: platform,
-            messageFa: `نشت پلتفرم ایسیو ناسازگار (${platform}) در بلوک ${blockId}: این زیربخش منحصراً متعلق به پلتفرم‌های [${Array.from(allowedPlatforms).join(', ')}] است.`,
-          });
+        // 5c. ECU Platform Isolation (ecu_platform_mismatch) & ECU Model codes
+        for (const platform of blockAnchors.ecuPlatforms) {
+          checkedAnchorsCount++;
+          if (allowedPlatforms.size > 0 && !allowedPlatforms.has(platform)) {
+            invalidBlockSet.add(blockId);
+            issues.push({
+              id: `l1-ecu-platform-${blockId}-${platform}`,
+              kind: 'ecu_platform_mismatch',
+              severity: 'error',
+              blockId,
+              offendingToken: platform,
+              messageFa: `نشت پلتفرم ایسیو ناسازگار (${platform}) در بلوک ${blockId}: این زیربخش منحصراً متعلق به پلتفرم‌های [${Array.from(allowedPlatforms).join(', ')}] است.`,
+            });
+          }
         }
-      }
-      for (const ecu of blockAnchors.ecuModels) {
-        checkedAnchorsCount++;
-        if (!sourceAnchors.ecuModels.has(ecu)) {
-          const ecuPlatformMatchesAllowed = Array.from(extractEcuPlatforms(ecu)).some((p) =>
-            allowedPlatforms.has(p)
-          );
-          invalidBlockSet.add(blockId);
-          issues.push({
-            id: `l1-halluc-ecu-${blockId}-${ecu}`,
-            kind: ecuPlatformMatchesAllowed ? 'hallucinated_technical_fact' : 'ecu_platform_mismatch',
-            severity: 'error',
-            blockId,
-            offendingToken: ecu,
-            messageFa: `مدل ایسیو «${ecu}» در بلوک ${blockId} در قطعات منبع این زیربخش وجود ندارد.`,
-          });
+        for (const ecu of blockAnchors.ecuModels) {
+          checkedAnchorsCount++;
+          if (!scopedAnchors.ecuModels.has(ecu)) {
+            const ecuPlatformMatchesAllowed = Array.from(extractEcuPlatforms(ecu)).some((p) =>
+              allowedPlatforms.has(p)
+            );
+            invalidBlockSet.add(blockId);
+            issues.push({
+              id: `l1-halluc-ecu-${blockId}-${ecu}`,
+              kind: ecuPlatformMatchesAllowed ? 'hallucinated_technical_fact' : 'ecu_platform_mismatch',
+              severity: 'error',
+              blockId,
+              offendingToken: ecu,
+              messageFa: `مدل ایسیو «${ecu}» در بلوک ${blockId} در قطعات منبع این زیربخش وجود ندارد.`,
+            });
+          }
         }
-      }
 
-      // 5d. WinOLS Map Identifiers
-      for (const mapCode of blockAnchors.mapIdentifiers) {
-        checkedAnchorsCount++;
-        if (!sourceAnchors.mapIdentifiers.has(mapCode)) {
-          invalidBlockSet.add(blockId);
-          issues.push({
-            id: `l1-halluc-map-${blockId}-${mapCode}`,
-            kind: 'hallucinated_technical_fact',
-            severity: 'error',
-            blockId,
-            offendingToken: mapCode,
-            messageFa: `نام نقشه WinOLS «${mapCode}» در بلوک ${blockId} در قطعات منبع این زیربخش دیده نشده است.`,
-          });
+        // 5d. WinOLS Map Identifiers
+        for (const mapCode of blockAnchors.mapIdentifiers) {
+          checkedAnchorsCount++;
+          if (!scopedAnchors.mapIdentifiers.has(mapCode)) {
+            invalidBlockSet.add(blockId);
+            issues.push({
+              id: `l1-halluc-map-${blockId}-${mapCode}`,
+              kind: 'hallucinated_technical_fact',
+              severity: 'error',
+              blockId,
+              offendingToken: mapCode,
+              messageFa: `نام نقشه WinOLS «${mapCode}» در بلوک ${blockId} در قطعات منبع ارجاع‌شده دیده نشده است.`,
+            });
+          }
         }
       }
 
       // 5e. Calibration Map Dimensions (canonicalized: ۱۶×۱۶ == 16x16)
       for (const dim of blockAnchors.mapDimensions) {
         checkedAnchorsCount++;
-        if (!sourceAnchors.mapDimensions.has(dim)) {
+        if (!scopedAnchors.mapDimensions.has(dim)) {
           invalidBlockSet.add(blockId);
           issues.push({
             id: `l1-halluc-dim-${blockId}-${dim}`,
@@ -727,7 +824,7 @@ export function runLayer1DeterministicGuard(
             severity: 'error',
             blockId,
             offendingToken: dim,
-            messageFa: `ابعاد نقشه «${dim}» در بلوک ${blockId} در منابع این زیربخش ثبت نشده است.`,
+            messageFa: `ابعاد نقشه «${dim}» در بلوک ${blockId} در منابع ارجاع‌شده ثبت نشده است.`,
           });
         }
       }
@@ -735,13 +832,12 @@ export function runLayer1DeterministicGuard(
       // 5f. Strict (Sign + Number + Unit) Triple Guard & Anti-Unit-Conversion
       for (const tr of blockAnchors.measurements) {
         checkedAnchorsCount++;
-        if (sourceAnchors.measurementKeys.has(tr.key)) {
+        if (scopedAnchors.measurementKeys.has(tr.key)) {
           continue;
         }
         const vuKey = `${tr.value}|${tr.unit}`;
-        const sourceSigns = sourceAnchors.measurementByValueAndUnit.get(vuKey);
+        const sourceSigns = scopedAnchors.measurementByValueAndUnit.get(vuKey);
         if (sourceSigns) {
-          // Unsigned output matches unsigned source, OR explicit '+' matches unsigned source only if source wasn't negative
           const hasExplicitMinus = sourceSigns.has('-');
           const hasExplicitPlus = sourceSigns.has('+');
           const hasUnsigned = sourceSigns.has('');
@@ -749,7 +845,6 @@ export function runLayer1DeterministicGuard(
           if (tr.sign === '' && hasUnsigned) continue;
           if (tr.sign === '+' && hasUnsigned && !hasExplicitMinus) continue;
 
-          // Sign inversion detected! (e.g. -2.5° -> +2.5° or -2.5° -> 2.5° or +2.5° -> -2.5°)
           if (
             (hasExplicitMinus && tr.sign !== '-') ||
             (hasExplicitPlus && tr.sign === '-') ||
@@ -768,8 +863,7 @@ export function runLayer1DeterministicGuard(
           }
         }
 
-        // Check if same numeric value existed in source with a DIFFERENT unit (e.g. 1200 RPM -> 1200 ms)
-        const sourceUnitsForVal = sourceAnchors.measurementByValue.get(tr.value);
+        const sourceUnitsForVal = scopedAnchors.measurementByValue.get(tr.value);
         if (sourceUnitsForVal && !sourceUnitsForVal.has(tr.unit)) {
           invalidBlockSet.add(blockId);
           issues.push({
@@ -783,8 +877,7 @@ export function runLayer1DeterministicGuard(
           continue;
         }
 
-        // Check unsolicited unit conversion (e.g. bar -> psi or °C -> °F when target unit isn't in source at all)
-        if (!sourceAnchors.measurementUnits.has(tr.unit)) {
+        if (!scopedAnchors.measurementUnits.has(tr.unit)) {
           invalidBlockSet.add(blockId);
           issues.push({
             id: `l1-unit-conv-${blockId}-${tr.raw}`,
@@ -792,12 +885,11 @@ export function runLayer1DeterministicGuard(
             severity: 'error',
             blockId,
             offendingToken: tr.raw,
-            messageFa: `تبدیل واحد سرخود یا واحد غیرمستند «${tr.raw}» در بلوک ${blockId}: واحد «${tr.unit}» در منبع این زیربخش وجود ندارد.`,
+            messageFa: `تبدیل واحد سرخود یا واحد غیرمستند «${tr.raw}» در بلوک ${blockId}: واحد «${tr.unit}» در منبع ارجاع‌شده وجود ندارد.`,
           });
           continue;
         }
 
-        // Fabricated numeric measurement
         invalidBlockSet.add(blockId);
         issues.push({
           id: `l1-halluc-meas-${blockId}-${tr.raw}`,
@@ -805,7 +897,7 @@ export function runLayer1DeterministicGuard(
           severity: 'error',
           blockId,
           offendingToken: tr.raw,
-          messageFa: `مقدار فنی «${tr.raw}» در بلوک ${blockId} در قطعات منبع تزریق‌شده وجود ندارد.`,
+          messageFa: `مقدار فنی «${tr.raw}» در بلوک ${blockId} در قطعات منبع ارجاع‌شده وجود ندارد.`,
         });
       }
     }
@@ -923,7 +1015,7 @@ export function runLayer1DeterministicGuard(
     }
   }
 
-  // 11. Technical Entity Retention Rate (100% hard requirement on critical ECU facts)
+  // 11. Technical Entity Retention Rate (100% hard requirement on critical technical facts)
   const fullOutputAnchors = extractExtendedEcuAnchors(combinedOutputTexts.join('\n'));
   let totalCriticalEntities = 0;
   let preservedCriticalEntities = 0;
@@ -944,34 +1036,36 @@ export function runLayer1DeterministicGuard(
     }
   }
 
-  for (const dtc of sourceAnchors.dtcCodes) {
-    totalCriticalEntities++;
-    checkedAnchorsCount++;
-    if (fullOutputAnchors.dtcCodes.has(dtc)) {
-      preservedCriticalEntities++;
-    } else {
-      issues.push({
-        id: `l1-missing-dtc-${dtc}`,
-        kind: 'missing_technical_anchor',
-        severity: 'error',
-        offendingToken: dtc,
-        messageFa: `کد خطای کلیدی «${dtc}» از متن منبع در خروجی زیربخش حذف شده است.`,
-      });
+  if (!isGeneralDomain) {
+    for (const dtc of sourceAnchors.dtcCodes) {
+      totalCriticalEntities++;
+      checkedAnchorsCount++;
+      if (fullOutputAnchors.dtcCodes.has(dtc)) {
+        preservedCriticalEntities++;
+      } else {
+        issues.push({
+          id: `l1-missing-dtc-${dtc}`,
+          kind: 'missing_technical_anchor',
+          severity: 'error',
+          offendingToken: dtc,
+          messageFa: `کد خطای کلیدی «${dtc}» از متن منبع در خروجی زیربخش حذف شده است.`,
+        });
+      }
     }
-  }
 
-  for (const mapCode of sourceAnchors.mapIdentifiers) {
-    totalCriticalEntities++;
-    if (fullOutputAnchors.mapIdentifiers.has(mapCode)) {
-      preservedCriticalEntities++;
-    } else {
-      issues.push({
-        id: `l1-missing-map-${mapCode}`,
-        kind: 'missing_technical_anchor',
-        severity: 'error',
-        offendingToken: mapCode,
-        messageFa: `شناسه نقشه WinOLS «${mapCode}» از متن منبع در خروجی زیربخش حذف شده است.`,
-      });
+    for (const mapCode of sourceAnchors.mapIdentifiers) {
+      totalCriticalEntities++;
+      if (fullOutputAnchors.mapIdentifiers.has(mapCode)) {
+        preservedCriticalEntities++;
+      } else {
+        issues.push({
+          id: `l1-missing-map-${mapCode}`,
+          kind: 'missing_technical_anchor',
+          severity: 'error',
+          offendingToken: mapCode,
+          messageFa: `شناسه نقشه WinOLS «${mapCode}» از متن منبع در خروجی زیربخش حذف شده است.`,
+        });
+      }
     }
   }
 

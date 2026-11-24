@@ -7,11 +7,13 @@ import {
   Brain,
   CheckCircle2,
   Download,
+  FolderOpen,
   Globe,
   Grid2x2,
   History,
   ListTree,
   Loader2,
+  Lock,
   LogIn,
   LogOut,
   Menu,
@@ -37,6 +39,7 @@ import {
 import { WinolsMapWorkbench } from './components/WinolsMapWorkbench';
 import { AiProviderModal } from './components/AiProviderModal';
 import { ProjectChangeLogModal } from './components/ProjectChangeLogModal';
+import { GoogleWorkspaceModal } from './components/GoogleWorkspaceModal';
 import { PrintPreviewModal } from './components/PrintPreviewModal';
 import { ChapterSidebar, SelectedChapterKey } from './components/ChapterSidebar';
 import { QueuedUploadFile } from './components/FileDropzone';
@@ -57,6 +60,7 @@ import {
   OutlineNodeDto,
   ProjectBundleDto,
   ProjectSummaryDto,
+  ValidationDomain,
   WorkflowMode,
 } from './lib/bookTypes';
 import {
@@ -64,7 +68,6 @@ import {
   AiQuotaProbeResponse,
   DEFAULT_AI_PROVIDER_CONFIG,
   getProviderDisplaySummary,
-  normalizeGoogleModelId,
   resolveCapabilityRoutingPlan,
 } from './lib/aiProviderConfig';
 import {
@@ -122,7 +125,11 @@ export default function App() {
     user,
     isGuest,
     loading: authLoading,
+    signingIn,
+    workspaceAccessToken,
+    hasWorkspaceAccess,
     signInWithGoogle,
+    connectGoogleWorkspace,
     signOut,
     getIdToken,
   } = useAuth();
@@ -156,6 +163,8 @@ export default function App() {
   const [rollingBackId, setRollingBackId] = useState<string | null>(null);
   const [savingCheckpoint, setSavingCheckpoint] = useState(false);
   const [printPreviewOpen, setPrintPreviewOpen] = useState(false);
+  const [googleWorkspaceModalOpen, setGoogleWorkspaceModalOpen] = useState(false);
+  const [googleWorkspaceInitialTab, setGoogleWorkspaceInitialTab] = useState<'import' | 'export'>('import');
   const [showDashboardOverview, setShowDashboardOverview] = useState(false);
   const [highlightedOutlineNodeId, setHighlightedOutlineNodeId] = useState<string | null>(null);
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
@@ -178,6 +187,7 @@ export default function App() {
   const harnessRunner = useHarnessRunner({
     api,
     bundle,
+    ownerUid: user?.uid || null,
     onBundleUpdated: handleHarnessBundleUpdated,
     onSyncCompleteNavigateStage4: () => setActiveStage(4),
   });
@@ -266,7 +276,10 @@ export default function App() {
         setConfig({
           ...DEFAULT_DOCX_CONFIG,
           ...savedSettings,
-          aiModel: normalizeGoogleModelId(savedSettings.aiModel),
+          aiModel:
+            typeof savedSettings.aiModel === 'string' && savedSettings.aiModel.trim()
+              ? savedSettings.aiModel.trim()
+              : DEFAULT_DOCX_CONFIG.aiModel,
           optimization: {
             ...DEFAULT_DOCX_CONFIG.optimization,
             ...(savedSettings.optimization || {}),
@@ -373,7 +386,7 @@ export default function App() {
       providerConfigRef.current = nextConfig;
       setProviderConfig(nextConfig);
       if (nextGoogleModel) {
-        const normalized = normalizeGoogleModelId(nextGoogleModel);
+        const normalized = nextGoogleModel.trim() || DEFAULT_DOCX_CONFIG.aiModel;
         setConfig((prev) => {
           const updated = { ...prev, aiModel: normalized };
           if (activeProjectId) {
@@ -533,7 +546,10 @@ export default function App() {
         setConfig({
           ...DEFAULT_DOCX_CONFIG,
           ...savedSettings,
-          aiModel: normalizeGoogleModelId(savedSettings.aiModel),
+          aiModel:
+            typeof savedSettings.aiModel === 'string' && savedSettings.aiModel.trim()
+              ? savedSettings.aiModel.trim()
+              : DEFAULT_DOCX_CONFIG.aiModel,
           optimization: {
             ...DEFAULT_DOCX_CONFIG.optimization,
             ...(savedSettings.optimization || {}),
@@ -645,6 +661,31 @@ export default function App() {
         return [...prev, ...additions];
       });
       setBannerError(null);
+    },
+    [workflowMode]
+  );
+
+  const handleImportWorkspaceFiles = useCallback(
+    (items: QueuedUploadFile[]) => {
+      if (items.length === 0) return;
+      setQueuedFiles((prev) => {
+        const hasMaster = prev.some((p) => p.role === 'master');
+        const normalized = items.map((item, idx) => ({
+          ...item,
+          role:
+            workflowMode === 'master_update'
+              ? !hasMaster && idx === 0
+                ? ('master' as FileRole)
+                : ('supplement' as FileRole)
+              : ('standard' as FileRole),
+        }));
+        return [...prev, ...normalized];
+      });
+      setActiveStage(1);
+      setBannerError(null);
+      setBannerToast(
+        `${toPersianDigits(items.length)} فایل از Google Drive / Sheets به صف مرحله ۱ اضافه شد. برای استخراج دکمه «اجرای مرحله ۱» را بزنید.`
+      );
     },
     [workflowMode]
   );
@@ -996,6 +1037,7 @@ export default function App() {
         const updated = await api.saveOutline(activeProjectId, {
           nodes: nextNodes,
           reassignments,
+          validationDomain: config.validationDomain || 'ecu_winols',
         });
         setBundle(updated);
         if (!silent) {
@@ -1013,6 +1055,25 @@ export default function App() {
         }
       }
     },
+    [activeProjectId, api, config.validationDomain]
+  );
+
+  const handleChangeValidationDomain = useCallback(
+    (nextDomain: ValidationDomain) => {
+      setConfig((prev) => {
+        const updated = { ...prev, validationDomain: nextDomain };
+        if (activeProjectId) {
+          void api
+            .updateProject(activeProjectId, {
+              settingsJson: updated as unknown as Record<string, unknown>,
+            })
+            .catch(() => {
+              // ignore transient save warning
+            });
+        }
+        return updated;
+      });
+    },
     [activeProjectId, api]
   );
 
@@ -1029,7 +1090,10 @@ export default function App() {
           message: 'در حال صفحه‌آرایی، تولید نمودارها و ممیزی ۱۰۰٪ پوشش...',
           workflowMode,
         });
-        await api.saveOutline(activeProjectId, { nodes: approvedNodes });
+        await api.saveOutline(activeProjectId, {
+          nodes: approvedNodes,
+          validationDomain: config.validationDomain || 'ecu_winols',
+        });
         const finished = await api.finalizeProject(activeProjectId);
         setBundle(finished);
         setSelectedView({ kind: 'cover' });
@@ -1049,7 +1113,7 @@ export default function App() {
         setFinalizing(false);
       }
     },
-    [activeProjectId, api, workflowMode, refreshProjectsList, syncFirestoreJobState]
+    [activeProjectId, api, workflowMode, config.validationDomain, refreshProjectsList, syncFirestoreJobState]
   );
 
   const handleEnrichNodeWithGoogle = useCallback(
@@ -1395,6 +1459,18 @@ export default function App() {
   const activeBook = bundle?.project.bookSnapshotJson ?? null;
   const openConflictsCount =
     bundle?.conflicts.filter((c) => c.status === 'open').length ?? 0;
+  const completedStagesCount = BOOK_WORKFLOW_STAGES.filter(
+    (st) => workflowProgress.completedStages[st.stage]
+  ).length;
+  const completedStagesPercent = Math.round(
+    (completedStagesCount / BOOK_WORKFLOW_STAGES.length) * 100
+  );
+
+  const handleNavigateStage = (stage: BookWorkflowStageId) => {
+    if (!workflowProgress.unlockedStages[stage]) return;
+    setActiveStage(stage);
+    setShowDashboardOverview(false);
+  };
 
   const activeChapterNumber =
     selectedView.kind === 'chapter' ? selectedView.chapterNumber : null;
@@ -1405,8 +1481,13 @@ export default function App() {
         dir="rtl"
         className="studio-app-shell min-h-screen bg-[#F8F6F1] text-[#1A1816] flex flex-col"
       >
-        {/* Top Studio Header */}
-        <header className="no-print sticky top-0 z-30 h-[58px] border-b border-[#E2DDD3] bg-white px-3 sm:px-5 flex items-center justify-between gap-2">
+        {/* Top Studio Header with Interactive Workflow Status Bar */}
+        <header className="no-print sticky top-0 z-30 h-[58px] border-b border-[#E2DDD3] bg-white px-3 sm:px-5 flex items-center justify-between gap-2 relative">
+        <div
+          className="absolute bottom-0 right-0 h-[2px] bg-[#14532D] transition-all duration-300"
+          style={{ width: `${completedStagesPercent}%` }}
+          aria-hidden="true"
+        />
         <div className="flex items-center gap-2.5 min-w-0">
           <button
             type="button"
@@ -1425,15 +1506,19 @@ export default function App() {
             <div className="truncate text-xs sm:text-sm font-extrabold text-[#1A1816]">
               {bundle?.project.title || 'استودیو صفحه‌آرایی و ادغام بدون افت'}
             </div>
-            <div className="hidden sm:block text-[10.5px] text-[#78716C]">
-              فونت وزیر مدیوم · راست‌چین کامل · تضمین پوشش ۱۰۰٪
+            <div className="hidden sm:block text-[10.5px] text-[#78716C] tabular-nums">
+              پیشرفت مراحل: {toPersianDigits(completedStagesCount)} از ۵ تکمیل‌شده ({toPersianDigits(completedStagesPercent)}٪)
             </div>
           </div>
         </div>
 
-        {/* Center 5-Stage Workflow Navigation */}
-        <nav className="hidden md:flex items-center gap-1 rounded-lg bg-[#F5F3EE] p-1" aria-label="ناوبری مراحل">
+        {/* Center Interactive 5-Stage Status & Navigation Bar */}
+        <nav
+          className="hidden md:flex items-center gap-1 rounded-lg border border-[#E6E1D6] bg-[#F7F5EF] p-1"
+          aria-label="نوار وضعیت تعاملی مراحل"
+        >
           {BOOK_WORKFLOW_STAGES.map((st) => {
+            const done = workflowProgress.completedStages[st.stage];
             const unlocked = workflowProgress.unlockedStages[st.stage];
             const isActive = activeStage === st.stage;
             return (
@@ -1441,16 +1526,35 @@ export default function App() {
                 key={st.stage}
                 type="button"
                 disabled={!unlocked}
-                onClick={() => unlocked && setActiveStage(st.stage)}
-                className={`inline-flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs font-bold transition-colors cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed ${
+                aria-current={isActive ? 'step' : undefined}
+                title={
+                  unlocked
+                    ? `${st.titleFa}${done ? ' (تکمیل‌شده — کلیک برای هدایت)' : ' — کلیک برای مشاهده'}`
+                    : `ابتدا پیش‌نیاز مرحله قبل را تکمیل کنید`
+                }
+                onClick={() => handleNavigateStage(st.stage)}
+                className={`inline-flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs font-bold transition-colors whitespace-nowrap shrink-0 cursor-pointer disabled:opacity-45 disabled:cursor-not-allowed ${
                   isActive
-                    ? 'bg-white text-[#1E3A5F] shadow-xs'
-                    : 'text-[#57534E] hover:text-[#1A1816]'
+                    ? 'bg-[#1E3A5F] text-white shadow-xs'
+                    : done
+                      ? 'bg-[#EEF6F0] text-[#14532D] hover:bg-[#E1F0E5]'
+                      : unlocked
+                        ? 'text-[#1E3A5F] hover:bg-white'
+                        : 'text-[#A8A29E]'
                 }`}
               >
+                {done ? (
+                  <CheckCircle2 className="h-3.5 w-3.5 shrink-0" />
+                ) : !unlocked ? (
+                  <Lock className="h-3 w-3 shrink-0 opacity-70" />
+                ) : null}
                 <span>{st.shortTitleFa}</span>
                 {st.stage === 2 && openConflictsCount > 0 && (
-                  <span className="rounded-sm bg-[#9A3412] px-1.5 py-0.5 text-[10px] font-bold text-white tabular-nums">
+                  <span
+                    className={`rounded-sm px-1.5 py-0.5 text-[10px] font-bold tabular-nums ${
+                      isActive ? 'bg-white text-[#9A3412]' : 'bg-[#9A3412] text-white'
+                    }`}
+                  >
                     {toPersianDigits(openConflictsCount)}
                   </span>
                 )}
@@ -1459,8 +1563,26 @@ export default function App() {
           })}
         </nav>
 
-        {/* Trailing Controls: Change Log + Assistant Drawer Toggle + User / Guest */}
+        {/* Trailing Controls: Drive/Sheets + Change Log + Assistant Drawer Toggle + User / Guest */}
         <div className="flex items-center gap-2 shrink-0">
+          <button
+            type="button"
+            onClick={() => {
+              setGoogleWorkspaceInitialTab(activeStage === 5 && activeBook ? 'export' : 'import');
+              setGoogleWorkspaceModalOpen(true);
+            }}
+            aria-label="اتصال به Google Drive و Google Sheets"
+            title="ایمپورت از Google Drive / Sheets یا ذخیره خروجی"
+            className={`inline-flex min-h-[38px] items-center gap-1.5 rounded-lg border px-2.5 sm:px-3 py-1.5 text-xs font-bold transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+              hasWorkspaceAccess
+                ? 'border-[#C7DDD0] bg-[#F2F7F4] text-[#14532D] hover:bg-[#E1F0E5]'
+                : 'border-[#D6D0C4] bg-white text-[#1E3A5F] hover:bg-[#FAF9F6] hover:border-[#1E3A5F]/40'
+            }`}
+          >
+            <FolderOpen className="h-3.5 w-3.5 shrink-0" />
+            <span className="hidden lg:inline">Drive / Sheets</span>
+          </button>
+
           <button
             type="button"
             onClick={handleOpenChangeLog}
@@ -1526,23 +1648,33 @@ export default function App() {
         </div>
       </header>
 
-      {/* Mobile 5-Stage Tabs Bar */}
-      <div className="flex md:hidden items-center gap-1 overflow-x-auto border-b border-[#E2DDD3] bg-white px-2 py-1.5 text-[11px]">
+      {/* Mobile Interactive 5-Stage Status & Navigation Bar */}
+      <div className="flex md:hidden items-center gap-1.5 overflow-x-auto border-b border-[#E2DDD3] bg-white px-2 py-1.5 text-[11px]">
         {BOOK_WORKFLOW_STAGES.map((st) => {
+          const done = workflowProgress.completedStages[st.stage];
           const unlocked = workflowProgress.unlockedStages[st.stage];
+          const isActive = activeStage === st.stage;
           return (
             <button
               key={st.stage}
               type="button"
               disabled={!unlocked}
-              onClick={() => unlocked && setActiveStage(st.stage)}
-              className={`shrink-0 px-2.5 py-1.5 rounded-md font-bold disabled:opacity-40 ${
-                activeStage === st.stage
-                  ? 'bg-[#EEF3F8] text-[#1E3A5F]'
-                  : 'text-[#57534E]'
+              aria-current={isActive ? 'step' : undefined}
+              onClick={() => handleNavigateStage(st.stage)}
+              className={`shrink-0 inline-flex items-center gap-1 px-2.5 py-1.5 rounded-md font-bold whitespace-nowrap disabled:opacity-45 cursor-pointer ${
+                isActive
+                  ? 'bg-[#1E3A5F] text-white'
+                  : done
+                    ? 'bg-[#EEF6F0] text-[#14532D]'
+                    : 'text-[#57534E]'
               }`}
             >
-              {st.shortTitleFa}
+              {done ? (
+                <CheckCircle2 className="h-3 w-3 shrink-0" />
+              ) : !unlocked ? (
+                <Lock className="h-3 w-3 shrink-0 opacity-70" />
+              ) : null}
+              <span>{st.shortTitleFa}</span>
             </button>
           );
         })}
@@ -1722,6 +1854,7 @@ export default function App() {
             progressPercent={liveState?.percent}
             statusMessage={liveState?.stageMessage}
             busy={processing || finalizing}
+            openConflictsCount={openConflictsCount}
             showDashboardOverview={showDashboardOverview}
             onToggleDashboardOverview={() => setShowDashboardOverview((v) => !v)}
             onPauseToggle={() => {
@@ -1732,10 +1865,7 @@ export default function App() {
               }
             }}
             onSelectStageView={(st) => {
-              if (workflowProgress.unlockedStages[st]) {
-                setActiveStage(st);
-                if (st === 1) setShowDashboardOverview(false);
-              }
+              handleNavigateStage(st);
             }}
           />
 
@@ -1788,6 +1918,10 @@ export default function App() {
                 onGoToStage2={() => setActiveStage(2)}
                 onLoadDemoFiles={handleLoadQuickDemoFiles}
                 onOpenMobileSidebar={() => setMobileSidebarOpen(true)}
+                onOpenGoogleDriveImport={() => {
+                  setGoogleWorkspaceInitialTab('import');
+                  setGoogleWorkspaceModalOpen(true);
+                }}
               />
             ) : activeStage === 2 && bundle ? (
               <AuditConflictsView
@@ -1828,20 +1962,38 @@ export default function App() {
                 onEnrichAllWithGoogle={handleEnrichFullDocumentWithGoogle}
                 onRunDeepReview={handleRunDeepAiReview}
                 harness={harnessRunner}
+                validationDomain={config.validationDomain || 'ecu_winols'}
+                onChangeValidationDomain={handleChangeValidationDomain}
                 onOpenProviderSettings={() => setProviderModalOpen(true)}
               />
             ) : activeStage === 5 && activeBook ? (
               <StageExportView
                 book={activeBook}
+                projectId={bundle?.project.id || activeProjectId}
                 auditReport={bundle?.auditReport ?? null}
                 conflicts={bundle?.conflicts ?? []}
+                outlineNodes={bundle?.outlineNodes ?? []}
+                winolsGuideReport={winolsGuideReport}
+                harnessState={harnessRunner.harnessState}
+                deepReviewReport={deepReviewReport}
+                validationDomain={config.validationDomain || 'ecu_winols'}
                 config={config}
                 exportingDocx={exportingDocx}
+                onFetchServerMetrics={(pid) => api.getProjectQualityMetrics(pid)}
                 onDownloadDocx={handleDownloadDocx}
                 onDownloadMarkdown={handleDownloadMarkdown}
                 onPrintPdf={handleOpenPrintPreview}
                 onGoToStage4Preview={() => setActiveStage(4)}
                 onGoToStage2Audit={() => setActiveStage(2)}
+                onGoToStage3Outline={() => setActiveStage(3)}
+                onGoToStage4Winols={() => {
+                  setWinolsWorkbenchOpen(true);
+                  setActiveStage(4);
+                }}
+                onOpenGoogleWorkspaceExport={() => {
+                  setGoogleWorkspaceInitialTab('export');
+                  setGoogleWorkspaceModalOpen(true);
+                }}
               />
             ) : activeBook ? (
               <div className="flex flex-col h-full">
@@ -2082,6 +2234,7 @@ export default function App() {
         probing={probingQuota}
         onSaveProviderConfig={handleSaveProviderConfig}
         onRunLiveProbe={handleRunLiveProbe}
+        onProbeModels={(payload) => api.probeProviderModels(payload)}
       />
 
       <ProjectChangeLogModal
@@ -2096,6 +2249,22 @@ export default function App() {
         onRefresh={() => void refreshProjectRevisions(activeProjectId)}
         onRollback={handleRollbackRevision}
         onCreateCheckpoint={handleCreateManualCheckpoint}
+      />
+
+      <GoogleWorkspaceModal
+        open={googleWorkspaceModalOpen}
+        initialTab={googleWorkspaceInitialTab}
+        workspaceAccessToken={workspaceAccessToken}
+        connectingWorkspace={signingIn}
+        workflowMode={workflowMode}
+        book={activeBook}
+        auditReport={bundle?.auditReport ?? null}
+        conflicts={bundle?.conflicts ?? []}
+        winolsReport={winolsGuideReport}
+        config={config}
+        onConnectWorkspace={connectGoogleWorkspace}
+        onImportFiles={handleImportWorkspaceFiles}
+        onClose={() => setGoogleWorkspaceModalOpen(false)}
       />
       </div>
 

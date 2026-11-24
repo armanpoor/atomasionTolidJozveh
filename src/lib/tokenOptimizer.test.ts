@@ -11,6 +11,7 @@ import {
   estimateMultiTierPipelineCost,
   extractEntityPreservingExcerpt,
   extractTechnicalFactLedger,
+  lookupModelPricing,
   validateDeepReviewOutput,
   validateOutlineRefinementOutput,
 } from './tokenOptimizer';
@@ -495,4 +496,35 @@ test('segmentBidiTechnicalRuns preserves multi-word English technical phrases wi
   );
   assert.ok(codeTexts.includes('0x1A4F0'), 'Hex address must remain isolated as ltr_code chip');
 });
+
+test('lookupModelPricing & computeCallCostUsd support Nov 2026 models and custom user USD pricing overrides', () => {
+  const novSonnet = lookupModelPricing('claude-sonnet-5.5');
+  assert.equal(novSonnet.inputPerMillionUsd, 3.0);
+  assert.equal(novSonnet.outputPerMillionUsd, 15.0);
+
+  const novGpt = lookupModelPricing('gpt-6.2-sol');
+  assert.equal(novGpt.inputPerMillionUsd, 1.5);
+  assert.equal(novGpt.outputPerMillionUsd, 6.0);
+
+  const customProfiles = {
+    'avalai/private-persian-ecu': {
+      modelId: 'avalai/private-persian-ecu',
+      displayName: 'AvalAI Private',
+      inputPerMillionUsd: 0.8,
+      outputPerMillionUsd: 3.2,
+    },
+  };
+  const resolved = lookupModelPricing('avalai/private-persian-ecu', customProfiles);
+  assert.equal(resolved.inputPerMillionUsd, 0.8);
+  assert.equal(resolved.outputPerMillionUsd, 3.2);
+
+  const cost = computeCallCostUsd({
+    modelId: 'avalai/private-persian-ecu',
+    promptTokens: 1_000_000,
+    outputTokens: 500_000,
+    customProfiles,
+  });
+  assert.equal(Number(cost.toFixed(6)), 2.4);
+});
+
 

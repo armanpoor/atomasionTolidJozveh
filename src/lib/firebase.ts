@@ -18,22 +18,32 @@ import {
   type Firestore,
 } from 'firebase/firestore';
 import firebaseConfig from '../../firebase-applet-config.json';
+import { GOOGLE_WORKSPACE_SCOPES } from './googleWorkspace';
 
 const app = initializeApp(firebaseConfig);
 export const auth = getAuth(app);
 export const googleAuthProvider = new GoogleAuthProvider();
+for (const scope of GOOGLE_WORKSPACE_SCOPES) {
+  googleAuthProvider.addScope(scope);
+}
+
+const configuredDatabaseId = (
+  firebaseConfig as { firestoreDatabaseId?: string }
+).firestoreDatabaseId?.trim();
 
 function createResilientFirestore(): Firestore {
   try {
-    return initializeFirestore(
-      app,
-      {
-        experimentalForceLongPolling: true,
-      },
-      firebaseConfig.firestoreDatabaseId
-    );
+    return configuredDatabaseId
+      ? initializeFirestore(
+          app,
+          { experimentalForceLongPolling: true },
+          configuredDatabaseId
+        )
+      : initializeFirestore(app, { experimentalForceLongPolling: true });
   } catch {
-    return getFirestore(app, firebaseConfig.firestoreDatabaseId);
+    return configuredDatabaseId
+      ? getFirestore(app, configuredDatabaseId)
+      : getFirestore(app);
   }
 }
 

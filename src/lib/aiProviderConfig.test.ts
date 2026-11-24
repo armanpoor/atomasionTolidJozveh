@@ -3,10 +3,13 @@ import assert from 'node:assert/strict';
 import {
   AI_PROVIDER_METADATA,
   DEFAULT_AI_PROVIDER_CONFIG,
+  OPENAI_COMPATIBLE_GATEWAY_TEMPLATES,
   formatFriendlyProviderErrorFa,
+  normalizeGoogleModelId,
   resolveCapabilityRoutingPlan,
   validateCustomBaseUrl,
 } from './aiProviderConfig.ts';
+import { resolveProviderCapabilityProfile } from './harness/providerGuard.ts';
 
 test('formatFriendlyProviderErrorFa cleanly converts raw Gemini 503 UNAVAILABLE JSON into readable Persian', () => {
   const rawScreenshotError = new Error(
@@ -87,3 +90,37 @@ test('validateCustomBaseUrl accepts public HTTPS search/audio gateways and rejec
   assert.equal(validateCustomBaseUrl('https://169.254.169.254/latest').valid, false);
   assert.equal(validateCustomBaseUrl('https://127.0.0.1/v1').valid, false);
 });
+
+test('Open custom model pass-through preserves arbitrary provider/custom model IDs and Iranian gateways pass SSRF check', () => {
+  assert.equal(normalizeGoogleModelId('avalai/gpt-6-custom'), 'avalai/gpt-6-custom');
+  assert.equal(normalizeGoogleModelId('qwen-max-latest'), 'qwen-max-latest');
+  assert.equal(normalizeGoogleModelId('gemini-4.5-experimental-custom'), 'gemini-4.5-experimental-custom');
+
+  const labelsJoined = OPENAI_COMPATIBLE_GATEWAY_TEMPLATES.map((t) => t.label).join(' ');
+  for (const required of ['AvalAI', 'GapGPT', 'MetisAI', 'TalkBot', 'Liara AI']) {
+    assert.ok(labelsJoined.includes(required), `Missing Iranian gateway template: ${required}`);
+  }
+  for (const tpl of OPENAI_COMPATIBLE_GATEWAY_TEMPLATES) {
+    assert.equal(
+      validateCustomBaseUrl(tpl.baseUrl).valid,
+      true,
+      `Gateway template ${tpl.label} baseUrl must pass SSRF validation`
+    );
+  }
+});
+
+test('resolveProviderCapabilityProfile respects custom per-model capability overrides', () => {
+  const cap = resolveProviderCapabilityProfile({
+    provider: 'custom_openai',
+    baseUrl: 'https://api.avalai.ir/v1',
+    modelId: 'my-persian-gateway-model',
+    customProfile: {
+      supportsJsonSchema: false,
+      supportsPromptCaching: true,
+    },
+  });
+  assert.equal(cap.supportsJsonSchema, false);
+  assert.equal(cap.supportsPromptCaching, true);
+});
+
+

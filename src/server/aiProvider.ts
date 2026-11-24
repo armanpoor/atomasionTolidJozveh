@@ -10,6 +10,7 @@ import {
   AUDIO_TRANSCRIBE_PROVIDER_METADATA,
   type AudioTranscribeProviderType,
   type AuthStrategyDecision,
+  type CustomModelProfile,
   DEFAULT_MULTI_TIER_ROUTING,
   DEFAULT_TASK_TIER_MAP,
   formatFriendlyProviderErrorFa,
@@ -67,6 +68,7 @@ export interface ResolvedServerAiProvider {
   /** True if user supplied a non-default Base URL for Gemini */
   hasCustomGeminiBaseUrl: boolean;
   customModelId: string;
+  customModels?: Record<string, CustomModelProfile>;
   validationError?: string;
 }
 
@@ -125,12 +127,56 @@ export function isNonGoogleProvider(provider: ResolvedServerAiProvider): boolean
   return provider.provider !== 'google_aistudio';
 }
 
+export function parseCustomModelsFromRequest(
+  req: Request
+): Record<string, CustomModelProfile> | undefined {
+  const raw = readHeaderString(req, 'x-ai-custom-models');
+  if (!raw || raw.length > 16384) return undefined;
+  try {
+    const jsonStr = Buffer.from(raw, 'base64').toString('utf8');
+    const parsed = JSON.parse(jsonStr) as Record<string, Partial<CustomModelProfile>>;
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return undefined;
+    const out: Record<string, CustomModelProfile> = {};
+    for (const [k, v] of Object.entries(parsed)) {
+      const id = sanitizeCustomModelId(k);
+      if (!id || !v || typeof v !== 'object') continue;
+      out[id] = {
+        modelId: id,
+        displayName:
+          typeof v.displayName === 'string' && v.displayName.trim()
+            ? v.displayName.trim().slice(0, 80)
+            : undefined,
+        inputPerMillionUsd:
+          typeof v.inputPerMillionUsd === 'number' && Number.isFinite(v.inputPerMillionUsd) && v.inputPerMillionUsd >= 0
+            ? v.inputPerMillionUsd
+            : 0.5,
+        outputPerMillionUsd:
+          typeof v.outputPerMillionUsd === 'number' && Number.isFinite(v.outputPerMillionUsd) && v.outputPerMillionUsd >= 0
+            ? v.outputPerMillionUsd
+            : 2.0,
+        contextWindow:
+          typeof v.contextWindow === 'number' && Number.isFinite(v.contextWindow) && v.contextWindow > 0
+            ? Math.round(v.contextWindow)
+            : undefined,
+        supportsJsonSchema: typeof v.supportsJsonSchema === 'boolean' ? v.supportsJsonSchema : undefined,
+        supportsPromptCaching:
+          typeof v.supportsPromptCaching === 'boolean' ? v.supportsPromptCaching : undefined,
+        supportsTools: typeof v.supportsTools === 'boolean' ? v.supportsTools : undefined,
+      };
+    }
+    return Object.keys(out).length > 0 ? out : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 export function resolveAiProviderFromRequest(req: Request): ResolvedServerAiProvider {
   const provider = normalizeProviderType(readHeaderString(req, 'x-ai-provider'));
   const keyMode = normalizeKeyAuthMode(readHeaderString(req, 'x-ai-key-mode'));
   const personalApiKey = readHeaderString(req, 'x-ai-api-key');
   const rawBaseUrl = readHeaderString(req, 'x-ai-base-url');
   const rawCustomModel = readHeaderString(req, 'x-ai-custom-model');
+  const customModels = parseCustomModelsFromRequest(req);
   const meta = AI_PROVIDER_METADATA[provider];
   const creatorApiKey = getCreatorKeyForProvider(provider);
 
@@ -148,6 +194,7 @@ export function resolveAiProviderFromRequest(req: Request): ResolvedServerAiProv
       baseUrl: '',
       hasCustomGeminiBaseUrl: false,
       customModelId: sanitizeCustomModelId(rawCustomModel) || meta.defaultModelId,
+      ...(customModels ? { customModels } : {}),
       validationError: urlCheck.error || 'آدرس Base URL واردشده معتبر نیست.',
     };
   }
@@ -159,7 +206,7 @@ export function resolveAiProviderFromRequest(req: Request): ResolvedServerAiProv
 
   const customModelId =
     provider === 'google_aistudio'
-      ? ''
+      ? sanitizeCustomModelId(rawCustomModel) || ''
       : sanitizeCustomModelId(rawCustomModel) || meta.defaultModelId;
 
   // Explicit personal key mode: always use user's own key (even if App Owner has quota)
@@ -175,6 +222,7 @@ export function resolveAiProviderFromRequest(req: Request): ResolvedServerAiProv
         baseUrl: normalizedBaseUrl,
         hasCustomGeminiBaseUrl,
         customModelId,
+        ...(customModels ? { customModels } : {}),
         validationError: `حالت «کلید اختصاصی من» برای ${meta.shortName} انتخاب شده اما کلید API وارد نشده است.`,
       };
     }
@@ -188,6 +236,7 @@ export function resolveAiProviderFromRequest(req: Request): ResolvedServerAiProv
       baseUrl: normalizedBaseUrl,
       hasCustomGeminiBaseUrl,
       customModelId,
+      ...(customModels ? { customModels } : {}),
     };
   }
 
@@ -206,6 +255,7 @@ export function resolveAiProviderFromRequest(req: Request): ResolvedServerAiProv
       baseUrl: normalizedBaseUrl,
       hasCustomGeminiBaseUrl,
       customModelId,
+      ...(customModels ? { customModels } : {}),
     };
   }
 
@@ -220,6 +270,7 @@ export function resolveAiProviderFromRequest(req: Request): ResolvedServerAiProv
       baseUrl: normalizedBaseUrl,
       hasCustomGeminiBaseUrl,
       customModelId,
+      ...(customModels ? { customModels } : {}),
     };
   }
 
@@ -233,6 +284,7 @@ export function resolveAiProviderFromRequest(req: Request): ResolvedServerAiProv
     baseUrl: normalizedBaseUrl,
     hasCustomGeminiBaseUrl,
     customModelId,
+    ...(customModels ? { customModels } : {}),
     ...(creatorApiKey
       ? {}
       : {
@@ -355,9 +407,13 @@ export function resolveProviderForTaskFromRequest(
   const routing = parseTierRoutingFromRequest(req);
 
   if (!routing.enabled) {
+    const resolvedFallbackGoogle =
+      primary.provider === 'google_aistudio' && primary.customModelId
+        ? primary.customModelId
+        : normalizeGoogleModelId(fallbackGoogleModel);
     return {
       provider: primary,
-      googleModel: normalizeGoogleModelId(fallbackGoogleModel),
+      googleModel: resolvedFallbackGoogle,
       tierUsed: 'primary',
       tierLabelFa: TIER_LABELS_FA.primary,
       optimizationMode: routing.optimizationMode,
@@ -390,6 +446,7 @@ export function resolveProviderForTaskFromRequest(
         baseUrl: '',
         hasCustomGeminiBaseUrl: false,
         customModelId: slot.modelId || meta.defaultModelId,
+        ...(primary.customModels ? { customModels: primary.customModels } : {}),
         validationError: `آدرس Base URL برای ${TIER_LABELS_FA[tierId]} نامعتبر است: ${urlCheck.error}`,
       },
       googleModel: slot.provider === 'google_aistudio' ? slot.modelId : normalizeGoogleModelId(fallbackGoogleModel),
@@ -455,6 +512,7 @@ export function resolveProviderForTaskFromRequest(
       baseUrl: normalizedBaseUrl,
       hasCustomGeminiBaseUrl,
       customModelId,
+      ...(primary.customModels ? { customModels: primary.customModels } : {}),
       ...(validationError ? { validationError } : {}),
     },
     googleModel: resolvedGoogleModel,
@@ -790,8 +848,20 @@ export interface UnifiedGenerationResult {
   keySourceUsed?: 'creator' | 'personal' | 'custom';
 }
 
+export interface ProviderToolDefinition {
+  name: string;
+  description: string;
+  parameters: Record<string, unknown>;
+}
+
+export interface ProviderToolCallResult {
+  name: string;
+  args: Record<string, unknown>;
+}
+
 interface DirectChatResponse {
   text: string;
+  toolCalls?: ProviderToolCallResult[];
   modelUsed: string;
   requestedModel: string;
   finishReason: string | null;
@@ -853,6 +923,7 @@ export async function callCustomOpenAiChat(params: {
   messages: Array<{ role: 'user' | 'assistant'; content: string }>;
   expectJson?: boolean;
   jsonSchema?: Record<string, unknown> | null;
+  tools?: ProviderToolDefinition[];
   taskRole?: AiTaskType;
   temperature?: number;
   haltOnAuthorDowngrade?: boolean;
@@ -881,11 +952,14 @@ export async function callCustomOpenAiChat(params: {
     ? urlCheck.normalizedUrl
     : `${urlCheck.normalizedUrl}/chat/completions`;
 
-  const requestedModel = params.provider.customModelId || 'gpt-4o-mini';
+  const providerMeta = AI_PROVIDER_METADATA[params.provider.provider];
+  const requestedModel = params.provider.customModelId || providerMeta.defaultModelId || 'gpt-6.2-sol';
+  const customProfile = params.provider.customModels?.[requestedModel];
   const profile = resolveProviderCapabilityProfile({
     provider: params.provider.provider,
     baseUrl: urlCheck.normalizedUrl,
     modelId: requestedModel,
+    customProfile,
   });
 
   const chatMessages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }> = [];
@@ -902,13 +976,30 @@ export async function callCustomOpenAiChat(params: {
       ? '9Router'
       : profile.flavor === 'openrouter'
         ? 'OpenRouter'
-        : AI_PROVIDER_METADATA[params.provider.provider].shortName;
+        : providerMeta.shortName;
+
+  const supportsTools = customProfile?.supportsTools !== false;
+  const openAiToolsPayload =
+    Array.isArray(params.tools) && params.tools.length > 0 && supportsTools
+      ? params.tools.map((t) => ({
+          type: 'function',
+          function: {
+            name: t.name,
+            description: t.description,
+            parameters: t.parameters,
+          },
+        }))
+      : undefined;
 
   const executeAttempt = async (forceDowngradeJsonFormat: boolean) => {
     const rawPayload: Record<string, unknown> = {
       model: requestedModel,
       messages: chatMessages,
     };
+    if (openAiToolsPayload) {
+      rawPayload.tools = openAiToolsPayload;
+      rawPayload.tool_choice = 'auto';
+    }
     if (typeof params.temperature === 'number') {
       rawPayload.temperature = params.temperature;
     }
@@ -1049,7 +1140,15 @@ export async function callCustomOpenAiChat(params: {
 
       const choices = Array.isArray(parsed.choices) ? parsed.choices : [];
       const firstChoice = choices[0] as
-        | { finish_reason?: string | null; message?: { content?: string | Array<{ text?: string }> } }
+        | {
+            finish_reason?: string | null;
+            message?: {
+              content?: string | Array<{ text?: string }>;
+              tool_calls?: Array<{
+                function?: { name?: string; arguments?: string | Record<string, unknown> };
+              }>;
+            };
+          }
         | undefined;
       const finishReason =
         typeof firstChoice?.finish_reason === 'string' ? firstChoice.finish_reason : null;
@@ -1060,6 +1159,29 @@ export async function callCustomOpenAiChat(params: {
           : Array.isArray(rawContent)
             ? rawContent.map((p) => p?.text || '').join('')
             : '';
+
+      const rawToolCalls = Array.isArray(firstChoice?.message?.tool_calls)
+        ? firstChoice.message.tool_calls
+        : [];
+      const toolCalls: ProviderToolCallResult[] = rawToolCalls
+        .map((tc): ProviderToolCallResult | null => {
+          const fnName = String(tc?.function?.name || '').trim();
+          if (!fnName) return null;
+          let args: Record<string, unknown> = {};
+          const rawArgs = tc?.function?.arguments;
+          if (typeof rawArgs === 'string') {
+            try {
+              const p = JSON.parse(rawArgs);
+              if (p && typeof p === 'object' && !Array.isArray(p)) args = p as Record<string, unknown>;
+            } catch {
+              args = {};
+            }
+          } else if (rawArgs && typeof rawArgs === 'object' && !Array.isArray(rawArgs)) {
+            args = rawArgs as Record<string, unknown>;
+          }
+          return { name: fnName, args };
+        })
+        .filter((x): x is ProviderToolCallResult => Boolean(x));
 
       const usageObj = (parsed.usage || {}) as Record<string, unknown>;
       const promptTokens = Number(usageObj.prompt_tokens) || 0;
@@ -1093,6 +1215,7 @@ export async function callCustomOpenAiChat(params: {
 
       return {
         text: text.trim(),
+        ...(toolCalls.length > 0 ? { toolCalls } : {}),
         modelUsed: actualModel,
         requestedModel,
         finishReason,
@@ -1141,6 +1264,7 @@ export async function callAnthropicMessages(params: {
   systemInstruction?: string;
   messages: Array<{ role: 'user' | 'assistant'; content: string }>;
   expectJson?: boolean;
+  tools?: ProviderToolDefinition[];
   taskRole?: AiTaskType;
   haltOnAuthorDowngrade?: boolean;
   maxTokens?: number;
@@ -1171,10 +1295,12 @@ export async function callAnthropicMessages(params: {
 
   const requestedModel =
     params.provider.customModelId || AI_PROVIDER_METADATA.anthropic.defaultModelId;
+  const customProfile = params.provider.customModels?.[requestedModel];
   const profile = resolveProviderCapabilityProfile({
     provider: params.provider.provider,
     baseUrl: urlCheck.normalizedUrl,
     modelId: requestedModel,
+    customProfile,
   });
 
   const systemParts: string[] = [];
@@ -1189,6 +1315,16 @@ export async function callAnthropicMessages(params: {
     profile.supportsAnthropicCacheControl &&
     estimatedSystemTokens >= profile.minCachePrefixTokens;
 
+  const supportsTools = customProfile?.supportsTools !== false;
+  const anthropicToolsPayload =
+    Array.isArray(params.tools) && params.tools.length > 0 && supportsTools
+      ? params.tools.map((t) => ({
+          name: t.name,
+          description: t.description,
+          input_schema: t.parameters,
+        }))
+      : undefined;
+
   const maxRetries = Math.max(0, Math.min(3, params.maxRetries ?? 2));
   let useStructuredCacheSystem = shouldUseCacheControl;
   let lastError: unknown = null;
@@ -1202,6 +1338,9 @@ export async function callAnthropicMessages(params: {
         content: m.content,
       })),
     };
+    if (anthropicToolsPayload) {
+      bodyPayload.tools = anthropicToolsPayload;
+    }
     if (combinedSystem) {
       bodyPayload.system = withCacheControl
         ? [{ type: 'text', text: combinedSystem, cache_control: { type: 'ephemeral' } }]
@@ -1314,12 +1453,23 @@ export async function callAnthropicMessages(params: {
       }
 
       const contentBlocks = Array.isArray(parsed.content)
-        ? (parsed.content as Array<{ type?: string; text?: string }>)
+        ? (parsed.content as Array<{
+            type?: string;
+            text?: string;
+            name?: string;
+            input?: Record<string, unknown>;
+          }>)
         : [];
       const text = contentBlocks
         .filter((b) => b.type === 'text' && typeof b.text === 'string')
         .map((b) => b.text)
         .join('');
+      const toolCalls: ProviderToolCallResult[] = contentBlocks
+        .filter((b) => b.type === 'tool_use' && typeof b.name === 'string' && b.name.trim())
+        .map((b) => ({
+          name: String(b.name).trim(),
+          args: (b.input && typeof b.input === 'object' && !Array.isArray(b.input) ? b.input : {}) as Record<string, unknown>,
+        }));
 
       const usageObj = (parsed.usage || {}) as Record<string, unknown>;
       const cacheTelemetry = extractRealCacheTelemetry(usageObj);
@@ -1357,6 +1507,7 @@ export async function callAnthropicMessages(params: {
 
       return {
         text: text.trim(),
+        ...(toolCalls.length > 0 ? { toolCalls } : {}),
         modelUsed: actualModel,
         requestedModel,
         finishReason,
@@ -1401,6 +1552,7 @@ export async function callNonGoogleChatWithFallback(params: {
   messages: Array<{ role: 'user' | 'assistant'; content: string }>;
   expectJson?: boolean;
   jsonSchema?: Record<string, unknown> | null;
+  tools?: ProviderToolDefinition[];
   taskRole?: AiTaskType;
   temperature?: number;
   haltOnAuthorDowngrade?: boolean;
@@ -1418,6 +1570,7 @@ export async function callNonGoogleChatWithFallback(params: {
           systemInstruction: params.systemInstruction,
           messages: params.messages,
           expectJson: params.expectJson,
+          tools: params.tools,
           taskRole: params.taskRole,
           haltOnAuthorDowngrade: params.haltOnAuthorDowngrade,
           maxTokens: params.maxTokens,
@@ -1433,6 +1586,7 @@ export async function callNonGoogleChatWithFallback(params: {
           messages: params.messages,
           expectJson: params.expectJson,
           jsonSchema: params.jsonSchema,
+          tools: params.tools,
           taskRole: params.taskRole,
           temperature: params.temperature,
           haltOnAuthorDowngrade: params.haltOnAuthorDowngrade,
@@ -2720,3 +2874,208 @@ export async function transcribeAudioUnified(params: {
     clearTimeout(timer);
   }
 }
+
+export interface DiscoveredProviderModel {
+  id: string;
+  name: string;
+  contextLength?: number;
+  ownedBy?: string;
+}
+
+/**
+ * Live SSRF-protected discovery of available models from OpenAI-compatible gateways
+ * (AvalAI, GapGPT, MetisAI, TalkBot, Liara AI, OpenRouter, Direct OpenAI/DeepSeek/Grok),
+ * Anthropic `/models`, or Google AI Studio `/v1beta/models`.
+ */
+export async function probeProviderModelsLive(params: {
+  provider: AiProviderType;
+  baseUrl?: string;
+  apiKey?: string;
+}): Promise<{
+  ok: boolean;
+  models: DiscoveredProviderModel[];
+  baseUrlUsed: string;
+  error?: string;
+}> {
+  const meta = AI_PROVIDER_METADATA[params.provider];
+  const rawBaseUrl = (params.baseUrl || '').trim() || meta.defaultBaseUrl;
+  const urlCheck = validateCustomBaseUrl(rawBaseUrl);
+  if (!urlCheck.valid || !urlCheck.normalizedUrl) {
+    return {
+      ok: false,
+      models: [],
+      baseUrlUsed: rawBaseUrl,
+      error: urlCheck.error || 'آدرس Base URL معتبر نیست.',
+    };
+  }
+
+  try {
+    await assertPublicDestinationHost(urlCheck.normalizedUrl);
+  } catch (err) {
+    return {
+      ok: false,
+      models: [],
+      baseUrlUsed: urlCheck.normalizedUrl,
+      error: err instanceof Error ? err.message : 'آدرس Base URL به هاست داخلی/خصوصی متصل است.',
+    };
+  }
+
+  const effectiveKey =
+    (params.apiKey || '').trim() || getCreatorKeyForProvider(params.provider);
+  if (!effectiveKey) {
+    return {
+      ok: false,
+      models: [],
+      baseUrlUsed: urlCheck.normalizedUrl,
+      error: 'برای دریافت فهرست زنده مدل‌ها، ابتدا کلید API معتبر را وارد کنید.',
+    };
+  }
+
+  const cleanBase = urlCheck.normalizedUrl
+    .replace(/\/chat\/completions$/i, '')
+    .replace(/\/messages$/i, '')
+    .replace(/\/+$/, '');
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 12_000);
+
+  try {
+    const modelsMap = new Map<string, DiscoveredProviderModel>();
+
+    if (params.provider === 'google_aistudio' && cleanBase.includes('googleapis.com')) {
+      const endpoint = cleanBase.endsWith('/v1beta')
+        ? `${cleanBase}/models`
+        : `${cleanBase}/v1beta/models`;
+      const res = await fetch(`${endpoint}?pageSize=100`, {
+        method: 'GET',
+        redirect: 'error',
+        signal: controller.signal,
+        headers: {
+          'x-goog-api-key': effectiveKey,
+        },
+      });
+      const rawText = await res.text();
+      if (!res.ok) {
+        const friendly = formatFriendlyProviderErrorFa(rawText || res.statusText, 'Google AI Studio');
+        return { ok: false, models: [], baseUrlUsed: cleanBase, error: friendly.detailFa };
+      }
+      const parsed = JSON.parse(rawText) as {
+        models?: Array<{
+          name?: string;
+          displayName?: string;
+          inputTokenLimit?: number;
+          supportedGenerationMethods?: string[];
+        }>;
+      };
+      for (const m of parsed.models || []) {
+        const id = String(m.name || '').replace(/^models\//, '').trim();
+        if (!id) continue;
+        if (
+          Array.isArray(m.supportedGenerationMethods) &&
+          !m.supportedGenerationMethods.includes('generateContent')
+        ) {
+          continue;
+        }
+        modelsMap.set(id, {
+          id,
+          name: (m.displayName || id).trim(),
+          contextLength: typeof m.inputTokenLimit === 'number' ? m.inputTokenLimit : undefined,
+          ownedBy: 'google',
+        });
+      }
+    } else if (params.provider === 'anthropic') {
+      const endpoint = `${cleanBase}/models`;
+      const res = await fetch(endpoint, {
+        method: 'GET',
+        redirect: 'error',
+        signal: controller.signal,
+        headers: {
+          'x-api-key': effectiveKey,
+          'anthropic-version': '2023-06-01',
+        },
+      });
+      const rawText = await res.text();
+      if (!res.ok) {
+        const friendly = formatFriendlyProviderErrorFa(rawText || res.statusText, 'Anthropic');
+        return { ok: false, models: [], baseUrlUsed: cleanBase, error: friendly.detailFa };
+      }
+      const parsed = JSON.parse(rawText) as {
+        data?: Array<{ id?: string; display_name?: string; created_at?: string }>;
+      };
+      for (const m of parsed.data || []) {
+        const id = String(m.id || '').trim();
+        if (!id) continue;
+        modelsMap.set(id, {
+          id,
+          name: (m.display_name || id).trim(),
+          ownedBy: 'anthropic',
+        });
+      }
+    } else {
+      const endpoint = cleanBase.endsWith('/models') ? cleanBase : `${cleanBase}/models`;
+      const res = await fetch(endpoint, {
+        method: 'GET',
+        redirect: 'error',
+        signal: controller.signal,
+        headers: {
+          Authorization: `Bearer ${effectiveKey}`,
+        },
+      });
+      const rawText = await res.text();
+      if (isHtmlErrorPayload(res.headers.get('content-type') || '', rawText)) {
+        return {
+          ok: false,
+          models: [],
+          baseUrlUsed: cleanBase,
+          error: 'درگاه پاسخ HTML برگرداند؛ احتمالاً آدرس Base URL نیاز به `/v1` در انتها دارد.',
+        };
+      }
+      if (!res.ok) {
+        const friendly = formatFriendlyProviderErrorFa(rawText || res.statusText, meta.shortName);
+        return { ok: false, models: [], baseUrlUsed: cleanBase, error: friendly.detailFa };
+      }
+      const parsed = JSON.parse(rawText) as {
+        data?: Array<{
+          id?: string;
+          name?: string;
+          context_length?: number;
+          owned_by?: string;
+        }>;
+      };
+      for (const m of parsed.data || []) {
+        const id = String(m.id || '').trim();
+        if (!id) continue;
+        modelsMap.set(id, {
+          id,
+          name: (m.name || id).trim(),
+          contextLength: typeof m.context_length === 'number' ? m.context_length : undefined,
+          ownedBy: m.owned_by,
+        });
+      }
+    }
+
+    const models = Array.from(modelsMap.values())
+      .sort((a, b) => a.id.localeCompare(b.id))
+      .slice(0, 250);
+
+    return {
+      ok: true,
+      models,
+      baseUrlUsed: cleanBase,
+      ...(models.length === 0 ? { error: 'مدلی در پاسخ /models یافت نشد.' } : {}),
+    };
+  } catch (err) {
+    return {
+      ok: false,
+      models: [],
+      baseUrlUsed: cleanBase,
+      error:
+        err instanceof Error
+          ? err.message
+          : 'خطا در اتصال زنده به نقطه پایانی /models ارائه‌دهنده.',
+    };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+

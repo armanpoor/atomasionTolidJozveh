@@ -9,21 +9,22 @@ import {
   deleteProjectRecord,
   getProjectBundle,
   getProjectRevisionWithSnapshot,
+  insertContentUnitRecord,
   insertSourceFileWithUnits,
   listProjectRevisions,
   listUserProjects,
+  reassignUnitsOutlineNodeByPreviousNode,
   replaceProjectConflicts,
   restoreProjectFromRevisionSnapshot,
   saveAuditReportRecord,
   saveDedupResults,
   saveOutlineNodesForProject,
   updateConflictRecord,
+  updateContentUnitOutlineNode,
   updateOutlineNodesOrderAndApproval,
+  updateOutlineNodeWebEnrichment,
   updateProjectRecord,
 } from '../db/repository.ts';
-import { db } from '../db/index.ts';
-import { contentUnits, outlineNodes } from '../db/schema.ts';
-import { and, eq } from 'drizzle-orm';
 import {
   buildRevisionSnapshotPayload,
   isValidRevisionSnapshot,
@@ -32,13 +33,17 @@ import {
 } from '../lib/changeLogUtils.ts';
 import {
   type ChatProposal,
+  type ConflictDto,
   DEFAULT_DOCX_CONFIG,
   type DeepReviewFinding,
   type DeepReviewReportDto,
   type DocxExportConfig,
   type FileRole,
   type GoogleSearchMode,
+  type OutlineNodeDto,
+  type ParsedBook,
   type SourceFileFormat,
+  type ValidationDomain,
   type WebGroundingSource,
   type WorkflowMode,
 } from '../lib/bookTypes.ts';
@@ -55,7 +60,14 @@ import {
   runDeterministicLosslessDedup,
   tokenizeContent,
 } from '../lib/zeroLossPipeline.ts';
-import { buildEditorialSystemDirective } from '../lib/winolsMapGuide.ts';
+import {
+  buildEditorialSystemDirective,
+  extractWinolsMapGuides,
+} from '../lib/winolsMapGuide.ts';
+import {
+  buildStage5ComparativePieChartData,
+  computeStage5QualityMetrics,
+} from '../lib/stage5QualityMetrics.ts';
 import {
   type AiUsageDelta,
   extractAiUsageFromCheckpoint,
@@ -64,6 +76,7 @@ import {
 import {
   getGoogleModelMeta,
   normalizeGoogleModelId,
+  normalizeProviderType,
 } from '../lib/aiProviderConfig.ts';
 import {
   buildAntiDriftContract,
@@ -89,7 +102,9 @@ import {
   generateUnifiedTextOrJson,
   getCachedAiTaskResult,
   isNonGoogleProvider,
+  probeProviderModelsLive,
   probeProviderWithCreatorFallback,
+  type ProviderToolDefinition,
   type ResolvedServerAiProvider,
   resolveAiProviderFromRequest,
   resolveAudioRouteFromRequest,
@@ -104,12 +119,15 @@ import {
   executeHarnessStepForProject,
   initHarnessBlueprintForProject,
   resolveHarnessQuarantineItem,
+  retryQuarantinedSectionForProject,
   syncHarnessToBookSnapshot,
 } from './harnessOrchestrator.ts';
+import { extractHarnessStateFromCheckpoint } from '../lib/harness/harnessStore.ts';
 import {
   HarnessRunAbortedError,
   HarnessStepConflictError,
 } from '../lib/harness/orchestrationGuard.ts';
+import { resolveProviderCapabilityProfile } from '../lib/harness/providerGuard.ts';
 
 export function createGeminiClient(): GoogleGenAI | null {
   const apiKey = process.env.GEMINI_API_KEY;
@@ -719,6 +737,138 @@ function formatBundleForClient(bundle: NonNullable<Awaited<ReturnType<typeof get
   };
 }
 
+const CHAT_EDITOR_TOOLS_SPEC: ProviderToolDefinition[] = [
+  {
+    name: 'rename_chapter',
+    description: 'تغییر عنوان یکی از فصل‌های سند در ساختار فصل‌بندی.',
+    parameters: {
+      type: 'object',
+      properties: {
+        nodeId: { type: 'string', description: 'شناسه دقیق فصل (مثلاً node_...)' },
+        newTitle: { type: 'string', description: 'عنوان جدید فارسی فصل' },
+      },
+      required: ['nodeId', 'newTitle'],
+    },
+  },
+  {
+    name: 'move_chapter',
+    description: 'جابه‌جایی ترتیب یک فصل به موقعیت جدید (شروع از ۱).',
+    parameters: {
+      type: 'object',
+      properties: {
+        nodeId: { type: 'string', description: 'شناسه فصل' },
+        targetOrder: { type: 'integer', description: 'شماره ترتیب جدید از ۱ تا تعداد فصل‌ها' },
+      },
+      required: ['nodeId', 'targetOrder'],
+    },
+  },
+  {
+    name: 'split_chapter',
+    description: 'تقسیم یک فصل شلوغ به دو فصل مجزا بدون حذف هیچ محتوایی.',
+    parameters: {
+      type: 'object',
+      properties: {
+        nodeId: { type: 'string', description: 'شناسه فصل مبدأ' },
+        newChapterTitle: { type: 'string', description: 'عنوان فصل دوم جدید' },
+      },
+      required: ['nodeId', 'newChapterTitle'],
+    },
+  },
+  {
+    name: 'add_callout_box',
+    description: 'افزودن یک باکس نکته، هشدار، جمع‌بندی یا نکته مهندسی به یک فصل مشخص.',
+    parameters: {
+      type: 'object',
+      properties: {
+        nodeId: { type: 'string', description: 'شناسه فصل مقصد' },
+        variant: {
+          type: 'string',
+          description: 'یکی از: concept | warning | engineering | project | qa',
+        },
+        title: { type: 'string', description: 'عنوان باکس نکته' },
+        body: { type: 'string', description: 'متن فارسی داخل باکس' },
+      },
+      required: ['nodeId', 'title', 'body'],
+    },
+  },
+  {
+    name: 'add_comparison_table',
+    description: 'ایجاد و درج یک جدول مقایسه‌ای ساختاریافته در فصل انتخاب‌شده.',
+    parameters: {
+      type: 'object',
+      properties: {
+        nodeId: { type: 'string', description: 'شناسه فصل مقصد' },
+        caption: { type: 'string', description: 'عنوان جدول' },
+        headers: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'عناوین ستون‌ها',
+        },
+        rows: {
+          type: 'array',
+          items: {
+            type: 'array',
+            items: { type: 'string' },
+          },
+          description: 'ردیف‌های جدول',
+        },
+      },
+      required: ['nodeId', 'caption', 'headers', 'rows'],
+    },
+  },
+  {
+    name: 'insert_dictated_paragraph',
+    description: 'افزودن یک پاراگراف یا یادداشت جدید به فصل مشخص‌شده.',
+    parameters: {
+      type: 'object',
+      properties: {
+        nodeId: { type: 'string', description: 'شناسه فصل مقصد' },
+        sectionTitle: { type: 'string', description: 'عنوان زیربخش اختیاری' },
+        text: { type: 'string', description: 'متن فارسی پاراگراف جدید' },
+      },
+      required: ['nodeId', 'text'],
+    },
+  },
+];
+
+function buildChatProposalFromToolCall(
+  name: ChatProposal['action'],
+  args: Record<string, unknown>,
+  outlineNodes: Array<{ id: string; title: string }>
+): ChatProposal {
+  const nodeTitle =
+    outlineNodes.find((n) => n.id === args.nodeId)?.title || String(args.nodeId || '');
+  let title = 'پیشنهاد ویرایش سند';
+  let summary = JSON.stringify(args);
+  if (name === 'rename_chapter') {
+    title = `تغییر نام فصل به «${String(args.newTitle || '')}»`;
+    summary = `عنوان فصل «${nodeTitle}» به «${String(args.newTitle || '')}» تغییر می‌کند.`;
+  } else if (name === 'move_chapter') {
+    title = `جابه‌جایی فصل «${nodeTitle}» به جایگاه ${toPersianDigits(Number(args.targetOrder || 1))}`;
+    summary = `ترتیب فصل «${nodeTitle}» بدون حذف هیچ محتوایی تغییر می‌کند.`;
+  } else if (name === 'split_chapter') {
+    title = `تقسیم فصل «${nodeTitle}»`;
+    summary = `نیمه دوم فصل به فصل جدید «${String(args.newChapterTitle || '')}» منتقل می‌شود.`;
+  } else if (name === 'add_callout_box') {
+    title = `افزودن باکس نکته: ${String(args.title || '')}`;
+    summary = `درج باکس نکته در فصل «${nodeTitle}».`;
+  } else if (name === 'add_comparison_table') {
+    title = `درج جدول مقایسه‌ای: ${String(args.caption || '')}`;
+    summary = `جدول با ${toPersianDigits(Array.isArray(args.rows) ? args.rows.length : 0)} ردیف در فصل «${nodeTitle}» درج می‌شود.`;
+  } else if (name === 'insert_dictated_paragraph') {
+    title = `درج متن جدید در فصل «${nodeTitle}»`;
+    summary = String(args.text || '').slice(0, 140);
+  }
+  return {
+    id: `prop_${crypto.randomBytes(4).toString('hex')}`,
+    action: name,
+    title,
+    summary,
+    args,
+    applied: false,
+  };
+}
+
 const CHAT_EDITOR_TOOLS: FunctionDeclaration[] = [
   {
     name: 'rename_chapter',
@@ -927,6 +1077,30 @@ export function createProjectRouter(): Router {
     } catch (err) {
       res.status(500).json({
         error: err instanceof Error ? err.message : 'خطا در استعلام زنده وضعیت سهمیه هوش مصنوعی.',
+      });
+    }
+  });
+
+  // 0B. LIVE SSRF-SAFE /models DISCOVERY FOR CUSTOM / IRANIAN GATEWAYS & DIRECT PROVIDERS
+  router.post('/probe-models', async (req, res) => {
+    try {
+      const body = (req.body || {}) as {
+        provider?: string;
+        baseUrl?: string;
+        apiKey?: string;
+      };
+      const provider = normalizeProviderType(body.provider);
+      const result = await probeProviderModelsLive({
+        provider,
+        baseUrl: typeof body.baseUrl === 'string' ? body.baseUrl : undefined,
+        apiKey: typeof body.apiKey === 'string' ? body.apiKey : undefined,
+      });
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({
+        ok: false,
+        models: [],
+        error: err instanceof Error ? err.message : 'خطا در دریافت فهرست زنده مدل‌ها از درگاه.',
       });
     }
   });
@@ -1257,6 +1431,81 @@ export function createProjectRouter(): Router {
       res.json(formatBundleForClient(bundle));
     } catch (err) {
       res.status(500).json({ error: err instanceof Error ? err.message : 'خطا در دریافت جزئیات پروژه.' });
+    }
+  });
+
+  // 3.1 GET PROJECT QUALITY METRICS (STAGE 5 RECHARTS PIE CHART DATA)
+  router.get('/:id/quality-metrics', async (req, res) => {
+    try {
+      const user = (req as AuthRequest).user!;
+      const bundle = await getProjectBundle(req.params.id, user.uid);
+      if (!bundle) {
+        res.status(404).json({ error: 'پروژه موردنظر یافت نشد.' });
+        return;
+      }
+      const formatted = formatBundleForClient(bundle);
+      const rawSettings = (bundle.project.settingsJson || {}) as Partial<DocxExportConfig>;
+      const config: DocxExportConfig = {
+        ...DEFAULT_DOCX_CONFIG,
+        ...rawSettings,
+        optimization: {
+          ...DEFAULT_DOCX_CONFIG.optimization,
+          ...(rawSettings.optimization || {}),
+        },
+      };
+
+      const book =
+        bundle.project.bookSnapshotJson &&
+        typeof bundle.project.bookSnapshotJson === 'object' &&
+        Array.isArray((bundle.project.bookSnapshotJson as Record<string, unknown>).chapters)
+          ? (bundle.project.bookSnapshotJson as unknown as ParsedBook)
+          : assembleFinalBookAndAudit({
+              projectId: bundle.project.id,
+              projectTitle: bundle.project.title,
+              workflowMode: (bundle.project.workflowMode as WorkflowMode) || 'multi_merge',
+              config,
+              sourceFiles: formatted.sourceFiles as unknown as Parameters<typeof assembleFinalBookAndAudit>[0]['sourceFiles'],
+              units: formatted.contentUnits as unknown as Parameters<typeof assembleFinalBookAndAudit>[0]['units'],
+              clusters: formatted.dedupClusters as unknown as Parameters<typeof assembleFinalBookAndAudit>[0]['clusters'],
+              conflicts: formatted.conflicts as unknown as Parameters<typeof assembleFinalBookAndAudit>[0]['conflicts'],
+              outlineNodes: formatted.outlineNodes as unknown as Parameters<typeof assembleFinalBookAndAudit>[0]['outlineNodes'],
+            }).book;
+
+      const winolsGuideReport = extractWinolsMapGuides({
+        sourceFiles: (formatted.sourceFiles || []) as any,
+        units: (formatted.contentUnits || []) as any,
+      });
+      const harnessState = extractHarnessStateFromCheckpoint(
+        (bundle.project.checkpointJson || {}) as Record<string, unknown>
+      );
+      const deepReviewReport = ((bundle.project.checkpointJson || {}) as Record<string, unknown>)
+        .deepReviewReport as DeepReviewReportDto | null;
+      const validationDomain = (config.validationDomain as ValidationDomain) || 'ecu_winols';
+
+      const metrics = computeStage5QualityMetrics({
+        book,
+        outlineNodes: formatted.outlineNodes as unknown as OutlineNodeDto[],
+        auditReport: formatted.auditReport,
+        conflicts: formatted.conflicts as unknown as ConflictDto[],
+        winolsGuideReport,
+        harnessState,
+        deepReviewReport,
+        validationDomain,
+      });
+
+      const chartData = buildStage5ComparativePieChartData(metrics);
+
+      res.json({
+        projectId: bundle.project.id,
+        metrics,
+        chartData,
+        serverGeneratedAt: new Date().toISOString(),
+        validationDomain,
+      });
+    } catch (err) {
+      res.status(500).json({
+        error: err instanceof Error ? err.message : 'خطا در ارزیابی و ارسال شاخص‌های کیفیت سرور.',
+      });
     }
   });
 
@@ -1741,7 +1990,7 @@ export function createProjectRouter(): Router {
     }
   });
 
-  // 8. STAGE 3: SAVE HUMAN-IN-THE-LOOP OUTLINE EDITS (REORDER / RENAME / SPLIT / MERGE / APPROVE)
+  // 8. STAGE 3: SAVE HUMAN-IN-THE-LOOP OUTLINE EDITS (REORDER / RENAME / SPLIT / MERGE / DELETE / APPROVE)
   router.put('/:id/outline', async (req, res) => {
     try {
       const user = (req as AuthRequest).user!;
@@ -1764,6 +2013,7 @@ export function createProjectRouter(): Router {
           webEnrichmentJson?: Record<string, unknown> | null;
         }>;
         reassignments?: Array<{ fromNodeId: string; toNodeId: string }>;
+        validationDomain?: ValidationDomain;
       };
 
       const nodes = Array.isArray(body.nodes) ? body.nodes : [];
@@ -1771,6 +2021,9 @@ export function createProjectRouter(): Router {
         res.status(400).json({ error: 'فهرست فصل‌ها نمی‌تواند خالی باشد.' });
         return;
       }
+
+      const incomingIds = new Set(nodes.map((n) => n.id));
+      const explicitFromIds = new Set((body.reassignments || []).map((r) => r.fromNodeId));
 
       await updateOutlineNodesOrderAndApproval(
         projectId,
@@ -1789,12 +2042,54 @@ export function createProjectRouter(): Router {
       // Reassign units if chapters were merged
       if (Array.isArray(body.reassignments)) {
         for (const r of body.reassignments) {
-          await db
-            .update(contentUnits)
-            .set({ outlineNodeId: r.toNodeId })
-            .where(and(eq(contentUnits.projectId, projectId), eq(contentUnits.outlineNodeId, r.fromNodeId)));
+          await reassignUnitsOutlineNodeByPreviousNode(projectId, r.fromNodeId, r.toNodeId);
         }
       }
+
+      // Bug #27: Zero-loss safeguard for deleted nodes not covered by explicit reassignments
+      const fallbackTargetId = nodes[0].id;
+      let orphanedReassignedCount = 0;
+      for (const prevNode of bundle.outlineNodes) {
+        if (!incomingIds.has(prevNode.id) && !explicitFromIds.has(prevNode.id)) {
+          await reassignUnitsOutlineNodeByPreviousNode(projectId, prevNode.id, fallbackTargetId);
+          orphanedReassignedCount += 1;
+        }
+      }
+
+      // Sync validationDomain & mark any existing uncompleted harness blueprint dirty if outline mutated
+      const existingSettings = (bundle.project.settingsJson || {}) as Record<string, unknown>;
+      const existingCheckpoint = (bundle.project.checkpointJson || {}) as Record<string, unknown>;
+      const existingHarness = extractHarnessStateFromCheckpoint(existingCheckpoint);
+      const nextSettings: Record<string, unknown> = { ...existingSettings };
+      if (
+        body.validationDomain === 'ecu_winols' ||
+        body.validationDomain === 'general_persian_technical'
+      ) {
+        nextSettings.validationDomain = body.validationDomain;
+      }
+      if (existingHarness) {
+        if (
+          body.validationDomain === 'ecu_winols' ||
+          body.validationDomain === 'general_persian_technical'
+        ) {
+          existingHarness.blueprint.validationDomain = body.validationDomain;
+        }
+        const outlineSignatureChanged =
+          bundle.outlineNodes.length !== nodes.length ||
+          bundle.outlineNodes.some(
+            (oldN, i) => oldN.id !== nodes[i]?.id || oldN.title !== nodes[i]?.title?.trim()
+          );
+        if (outlineSignatureChanged) {
+          existingHarness.blueprint.approved = false;
+        }
+      }
+
+      await updateProjectRecord(projectId, user.uid, {
+        settingsJson: nextSettings,
+        checkpointJson: existingHarness
+          ? { ...existingCheckpoint, harnessState: existingHarness }
+          : existingCheckpoint,
+      });
 
       await recordProjectRevision({
         projectId,
@@ -1803,7 +2098,7 @@ export function createProjectRouter(): Router {
         actorName: user.name || (user.isGuest ? 'کاربر مهمان' : 'کاربر استودیو'),
         actionType: 'outline_updated',
         title: 'ویرایش ساختار و ترتیب فصل‌ها',
-        summary: `فهرست فصل‌بندی با ${toPersianDigits(nodes.length)} فصل ذخیره شد${Array.isArray(body.reassignments) && body.reassignments.length > 0 ? ` (${toPersianDigits(body.reassignments.length)} ادغام فصل)` : ''}.`,
+        summary: `فهرست فصل‌بندی با ${toPersianDigits(nodes.length)} فصل ذخیره شد${Array.isArray(body.reassignments) && body.reassignments.length > 0 ? ` (${toPersianDigits(body.reassignments.length)} ادغام فصل)` : ''}${orphanedReassignedCount > 0 ? ` · ${toPersianDigits(orphanedReassignedCount)} فصل حذفی با حفظ محتوا ادغام شد` : ''}.`,
       });
 
       const updated = await getProjectBundle(projectId, user.uid);
@@ -1846,19 +2141,15 @@ export function createProjectRouter(): Router {
         );
       }
 
-      // Optional isolated Google Search Enrichment when user chose 'conflicts_and_enrichment' or 'full_document_enrichment'
+      // Unified Web Search Enrichment across Google / OpenAI / Anthropic / Perplexity / Custom (Bug #26)
       const settings = (bundle.project.settingsJson || {}) as Partial<DocxExportConfig>;
       const searchMode: GoogleSearchMode = settings.googleSearchMode ?? 'conflicts_only';
       const finalizeProvider = resolveAiProviderFromRequest(req);
+      const searchRoute = resolveWebSearchRouteFromRequest(req);
       const finalizeModel = normalizeGoogleModelId(settings.aiModel);
-      const canRunFinalizeGoogle =
-        finalizeProvider.provider === 'google_aistudio' &&
-        !finalizeProvider.validationError &&
-        Boolean(finalizeProvider.apiKey || finalizeProvider.personalApiKey);
 
       if (
         (searchMode === 'conflicts_and_enrichment' || searchMode === 'full_document_enrichment') &&
-        canRunFinalizeGoogle &&
         bundle.outlineNodes.length > 0
       ) {
         const unenriched = bundle.outlineNodes.filter((n) => !n.webEnrichmentJson);
@@ -1869,41 +2160,28 @@ export function createProjectRouter(): Router {
           try {
             const chapterExcerpt = buildChapterExcerpt(bundle.contentUnits, node.id, 1800);
             const prompt = [
-              `با استفاده از جستجوی گوگل، متن فصل «${node.title}» از سند «${bundle.project.title}» را با اطلاعات مستند، استانداردهای به‌روز، نکات کلیدی جامانده و مثال‌های کاربردی به زبان فارسی روان تکمیل کن (۱ تا ۲ پاراگراف منسجم و علمی بدون تکرار متن موجود).`,
+              `با استفاده از جستجوی زنده وب، متن فصل «${node.title}» از سند «${bundle.project.title}» را با اطلاعات مستند، استانداردهای به‌روز، نکات کلیدی جامانده و مثال‌های کاربردی به زبان فارسی روان تکمیل کن (۱ تا ۲ پاراگراف منسجم و علمی بدون تکرار متن موجود).`,
               chapterExcerpt ? `خلاصه محتوای فعلی این فصل:\n${chapterExcerpt}` : '',
             ]
               .filter(Boolean)
               .join('\n\n');
 
-            const { result: gRes } = await executeWithGoogleClientFallback(
-              finalizeProvider,
-              (aiClient) =>
-                generateWithGroundingFallback(aiClient, prompt, ThinkingLevel.LOW, finalizeModel)
-            );
-            const summary = (gRes.text || '').trim();
-            await recordProjectAiUsage(
-              projectId,
-              user.uid,
-              extractUsageDeltaFromResponse(gRes, {
-                modelUsed: finalizeModel,
-                isGrounding: true,
-                fallbackPromptChars: prompt.length,
-                fallbackOutputChars: summary.length,
-              })
-            );
-            const sources = extractGroundingSources(gRes);
-            if (summary) {
-              await db
-                .update(outlineNodes)
-                .set({
-                  webEnrichmentJson: {
-                    title: node.title,
-                    summary,
-                    sources,
-                    checkedAt: new Date().toISOString(),
-                  },
-                })
-                .where(and(eq(outlineNodes.id, node.id), eq(outlineNodes.projectId, projectId)));
+            const searchOut = await executeUnifiedWebSearch({
+              primaryProvider: finalizeProvider,
+              searchRoute,
+              googleModel: finalizeModel,
+              prompt,
+              thinkingLevel: ThinkingLevel.LOW,
+            });
+            await recordProjectAiUsage(projectId, user.uid, searchOut.usageDelta);
+            if (searchOut.summary) {
+              await updateOutlineNodeWebEnrichment(projectId, node.id, {
+                title: node.title,
+                summary: searchOut.summary,
+                sources: searchOut.sources,
+                checkedAt: new Date().toISOString(),
+                providerLabel: searchOut.providerLabelFa,
+              });
             }
           } catch (gErr) {
             console.warn('Optional web enrichment skipped for node:', node.id, gErr);
@@ -1915,7 +2193,17 @@ export function createProjectRouter(): Router {
         }
       }
 
-      const finalBundle = await reassembleAndPersistProject(projectId, user.uid);
+      // Bug #26/Workflow unification: if verified Harness sections exist, compile from Harness IR instead of overwriting with raw concat!
+      const cp = (bundle.project.checkpointJson || {}) as Record<string, unknown>;
+      const existingHarness = extractHarnessStateFromCheckpoint(cp);
+      let finalBundle: ReturnType<typeof formatBundleForClient> | null = null;
+      if (existingHarness && Object.keys(existingHarness.sectionsIR).length > 0) {
+        const synced = await syncHarnessToBookSnapshot({ projectId, ownerUid: user.uid });
+        finalBundle = synced ? formatBundleForClient(synced.rawBundle) : null;
+      } else {
+        finalBundle = await reassembleAndPersistProject(projectId, user.uid);
+      }
+
       await recordProjectRevision({
         projectId,
         ownerUid: user.uid,
@@ -2008,6 +2296,7 @@ export function createProjectRouter(): Router {
       const eligibleUnits = formatted.contentUnits.filter(
         (u) =>
           u.status !== 'merged' &&
+          u.status !== 'merged_duplicate' &&
           (u.unitType === 'paragraph' || u.unitType === 'callout' || u.unitType === 'list')
       );
       const tokenCache = new Map(eligibleUnits.map((u) => [u.id, tokenizeContent(u.rawText)]));
@@ -2221,10 +2510,7 @@ export function createProjectRouter(): Router {
           providerLabel: searchOut.providerLabelFa,
         };
 
-        await db
-          .update(outlineNodes)
-          .set({ webEnrichmentJson })
-          .where(and(eq(outlineNodes.id, node.id), eq(outlineNodes.projectId, projectId)));
+        await updateOutlineNodeWebEnrichment(projectId, node.id, webEnrichmentJson);
 
         await recordProjectAiUsage(projectId, user.uid, searchOut.usageDelta);
 
@@ -2273,17 +2559,12 @@ export function createProjectRouter(): Router {
             lastSearchProviderLabel = searchOut.providerLabelFa;
             await recordProjectAiUsage(projectId, user.uid, searchOut.usageDelta);
             if (searchOut.summary) {
-              await db
-                .update(outlineNodes)
-                .set({
-                  webEnrichmentJson: {
-                    title: `تکمیل جامع از وب (${searchOut.providerLabelFa}) — ${node.title}`,
-                    summary: searchOut.summary,
-                    sources: searchOut.sources,
-                    checkedAt: new Date().toISOString(),
-                  },
-                })
-                .where(and(eq(outlineNodes.id, node.id), eq(outlineNodes.projectId, projectId)));
+              await updateOutlineNodeWebEnrichment(projectId, node.id, {
+                title: `تکمیل جامع از وب (${searchOut.providerLabelFa}) — ${node.title}`,
+                summary: searchOut.summary,
+                sources: searchOut.sources,
+                checkedAt: new Date().toISOString(),
+              });
               enrichedChaptersCount += 1;
             }
             if (i < nodes.length - 1) {
@@ -2728,7 +3009,97 @@ export function createProjectRouter(): Router {
         }>;
       };
 
+      const deepReviewJsonSchema: Record<string, unknown> = {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          overallScore: { type: 'integer' },
+          overallAssessment: { type: 'string' },
+          findings: {
+            type: 'array',
+            items: {
+              type: 'object',
+              additionalProperties: false,
+              properties: {
+                severity: { type: 'string' },
+                category: { type: 'string' },
+                chapterTitle: { type: 'string' },
+                issue: { type: 'string' },
+                fixApplied: { type: 'string' },
+              },
+              required: ['severity', 'category', 'chapterTitle', 'issue', 'fixApplied'],
+            },
+          },
+          titleRefinements: {
+            type: 'array',
+            items: {
+              type: 'object',
+              additionalProperties: false,
+              properties: {
+                nodeId: { type: 'string' },
+                newTitle: { type: 'string' },
+                rationale: { type: 'string' },
+              },
+              required: ['nodeId', 'newTitle', 'rationale'],
+            },
+          },
+          addedCallouts: {
+            type: 'array',
+            items: {
+              type: 'object',
+              additionalProperties: false,
+              properties: {
+                nodeId: { type: 'string' },
+                variant: { type: 'string' },
+                title: { type: 'string' },
+                body: { type: 'string' },
+                rationale: { type: 'string' },
+              },
+              required: ['nodeId', 'variant', 'title', 'body', 'rationale'],
+            },
+          },
+          addedTables: {
+            type: 'array',
+            items: {
+              type: 'object',
+              additionalProperties: false,
+              properties: {
+                nodeId: { type: 'string' },
+                caption: { type: 'string' },
+                headers: { type: 'array', items: { type: 'string' } },
+                rows: { type: 'array', items: { type: 'string' } },
+                rationale: { type: 'string' },
+              },
+              required: ['nodeId', 'caption', 'headers', 'rows', 'rationale'],
+            },
+          },
+          addedParagraphs: {
+            type: 'array',
+            items: {
+              type: 'object',
+              additionalProperties: false,
+              properties: {
+                nodeId: { type: 'string' },
+                sectionTitle: { type: 'string' },
+                text: { type: 'string' },
+                rationale: { type: 'string' },
+              },
+              required: ['nodeId', 'sectionTitle', 'text', 'rationale'],
+            },
+          },
+        },
+        required: ['overallScore', 'overallAssessment', 'findings'],
+      };
+
       const preferredDeepModel = normalizeGoogleModelId(deepTaskCtx.googleModel);
+      const deepCapProfile = isNonGoogleProvider(deepProvider)
+        ? resolveProviderCapabilityProfile({
+            provider: deepProvider.provider,
+            baseUrl: deepProvider.baseUrl,
+            modelId: deepProvider.customModelId,
+            customProfile: deepProvider.customModels?.[deepProvider.customModelId],
+          })
+        : null;
 
       // Resilient multi-tier reasoning ladder using configured Flagship/Primary model
       const reviewAttempts: Array<{
@@ -2743,7 +3114,7 @@ export function createProjectRouter(): Router {
                 model: deepProvider.customModelId,
                 level: ThinkingLevel.HIGH,
                 levelLabel: 'HIGH',
-                useSchema: false,
+                useSchema: Boolean(deepCapProfile?.supportsJsonSchema),
               },
             ]
           : preferredDeepModel === 'gemini-3.8-flash'
@@ -2813,6 +3184,7 @@ export function createProjectRouter(): Router {
             prompt,
             expectJson: true,
             googleResponseSchema: attempt.useSchema ? deepReviewSchema : undefined,
+            jsonSchema: attempt.useSchema ? deepReviewJsonSchema : undefined,
             enablePromptCaching: deepTaskCtx.enablePromptCaching,
             savedTokensByOptimization: digestWire.estimatedTokensSaved,
             usageFlags: { isDeepReview: true },
@@ -2923,7 +3295,7 @@ export function createProjectRouter(): Router {
           const targetNode = resolveTargetNode(co.nodeId);
           const unitId = `u_rev_co_${crypto.randomBytes(4).toString('hex')}`;
           const rawText = `${title}\n${bodyText}`;
-          await db.insert(contentUnits).values({
+          await insertContentUnitRecord({
             id: unitId,
             projectId,
             sourceFileId: defaultSourceFileId,
@@ -2978,7 +3350,7 @@ export function createProjectRouter(): Router {
           const targetNode = resolveTargetNode(tbl.nodeId);
           const unitId = `u_rev_tbl_${crypto.randomBytes(4).toString('hex')}`;
           const rawText = `${caption}\n${headers.join(' | ')}`;
-          await db.insert(contentUnits).values({
+          await insertContentUnitRecord({
             id: unitId,
             projectId,
             sourceFileId: defaultSourceFileId,
@@ -3013,7 +3385,7 @@ export function createProjectRouter(): Router {
           const targetNode = resolveTargetNode(para.nodeId);
           const unitId = `u_rev_p_${crypto.randomBytes(4).toString('hex')}`;
           const sectionTitle = String(para.sectionTitle || 'توضیح تکمیلی بازبینی عمیق').trim();
-          await db.insert(contentUnits).values({
+          await insertContentUnitRecord({
             id: unitId,
             projectId,
             sourceFileId: defaultSourceFileId,
@@ -3240,7 +3612,7 @@ export function createProjectRouter(): Router {
         `کانتکست فشرده پروژه:\n${chatWire.wireText}`,
       ].join('\n');
 
-      // Non-Google provider chat branch (Anthropic Claude Opus/Sonnet/Haiku, OpenAI, Custom OpenAI-compatible)
+      // Non-Google provider chat branch (Anthropic Claude, OpenAI, Custom OpenAI-compatible + full Tool Calling!)
       // Also supports hybrid Web Search when user enables web search in chat!
       if (isNonGoogleProvider(chatProvider)) {
         const searchRoute = resolveWebSearchRouteFromRequest(req);
@@ -3277,9 +3649,22 @@ export function createProjectRouter(): Router {
           provider: chatProvider,
           systemInstruction,
           messages: openAiMessages,
+          tools: CHAT_EDITOR_TOOLS_SPEC,
+          taskRole: 'editor_chat',
           enablePromptCaching: chatTaskCtx.enablePromptCaching,
         });
-        const reply = customRes.text || 'درخواست شما بررسی شد.';
+        const proposals: ChatProposal[] = (customRes.toolCalls || []).map((call) =>
+          buildChatProposalFromToolCall(
+            call.name as ChatProposal['action'],
+            call.args,
+            bundle.outlineNodes
+          )
+        );
+        const reply =
+          customRes.text ||
+          (proposals.length > 0
+            ? 'پیشنهاد ویرایش ساختاریافته زیر آماده شد. با زدن دکمه «تأیید و اعمال روی سند» بلافاصله در سند و پایگاه داده ثبت می‌شود.'
+            : 'درخواست شما بررسی شد.');
         const fallbackPrompt = Math.ceil((systemInstruction.length + message.length) / 3);
         const fallbackOutput = Math.ceil(reply.length / 3);
         const updatedChatUsage = await recordProjectAiUsage(projectId, user.uid, {
@@ -3300,7 +3685,7 @@ export function createProjectRouter(): Router {
 
         res.json({
           reply,
-          proposals: [],
+          proposals,
           groundingSources,
           modelUsed: customRes.modelUsed,
           tierUsed: chatTaskCtx.tierLabelFa,
@@ -3343,45 +3728,14 @@ export function createProjectRouter(): Router {
       );
       const { response, resolvedModel } = chatGen;
 
-      const proposals: ChatProposal[] = [];
       const fnCalls = response.functionCalls || [];
-      for (const call of fnCalls) {
-        const name = call.name as ChatProposal['action'];
-        const args = (call.args || {}) as Record<string, unknown>;
-        const nodeTitle =
-          bundle.outlineNodes.find((n) => n.id === args.nodeId)?.title || String(args.nodeId || '');
-
-        let title = 'پیشنهاد ویرایش سند';
-        let summary = JSON.stringify(args);
-        if (name === 'rename_chapter') {
-          title = `تغییر نام فصل به «${String(args.newTitle || '')}»`;
-          summary = `عنوان فصل «${nodeTitle}» به «${String(args.newTitle || '')}» تغییر می‌کند.`;
-        } else if (name === 'move_chapter') {
-          title = `جابه‌جایی فصل «${nodeTitle}» به جایگاه ${toPersianDigits(Number(args.targetOrder || 1))}`;
-          summary = `ترتیب فصل «${nodeTitle}» بدون حذف هیچ محتوایی تغییر می‌کند.`;
-        } else if (name === 'split_chapter') {
-          title = `تقسیم فصل «${nodeTitle}»`;
-          summary = `نیمه دوم فصل به فصل جدید «${String(args.newChapterTitle || '')}» منتقل می‌شود.`;
-        } else if (name === 'add_callout_box') {
-          title = `افزودن باکس نکته: ${String(args.title || '')}`;
-          summary = `درج باکس نکته در فصل «${nodeTitle}».`;
-        } else if (name === 'add_comparison_table') {
-          title = `درج جدول مقایسه‌ای: ${String(args.caption || '')}`;
-          summary = `جدول با ${toPersianDigits(Array.isArray(args.rows) ? args.rows.length : 0)} ردیف در فصل «${nodeTitle}» درج می‌شود.`;
-        } else if (name === 'insert_dictated_paragraph') {
-          title = `درج متن جدید در فصل «${nodeTitle}»`;
-          summary = String(args.text || '').slice(0, 140);
-        }
-
-        proposals.push({
-          id: `prop_${crypto.randomBytes(4).toString('hex')}`,
-          action: name,
-          title,
-          summary,
-          args,
-          applied: false,
-        });
-      }
+      const proposals: ChatProposal[] = fnCalls.map((call) =>
+        buildChatProposalFromToolCall(
+          call.name as ChatProposal['action'],
+          (call.args || {}) as Record<string, unknown>,
+          bundle.outlineNodes
+        )
+      );
 
       const groundingSources = extractGroundingSources(response);
       const reply =
@@ -3511,10 +3865,7 @@ export function createProjectRouter(): Router {
           );
           const half = Math.ceil(sourceUnits.length / 2);
           for (const u of sourceUnits.slice(half)) {
-            await db
-              .update(contentUnits)
-              .set({ outlineNodeId: newNodeId })
-              .where(and(eq(contentUnits.id, u.id), eq(contentUnits.projectId, projectId)));
+            await updateContentUnitOutlineNode(projectId, u.id, newNodeId);
           }
         }
       } else if (
@@ -3571,7 +3922,7 @@ export function createProjectRouter(): Router {
 
         if (rawText) {
           const sectionSuffix = args.sectionTitle ? ` > ${String(args.sectionTitle)}` : '';
-          await db.insert(contentUnits).values({
+          await insertContentUnitRecord({
             id: unitId,
             projectId,
             sourceFileId: defaultSourceFileId,
@@ -3763,12 +4114,21 @@ export function createProjectRouter(): Router {
     try {
       const user = (req as AuthRequest).user!;
       const { id: projectId } = req.params;
-      const body = (req.body || {}) as { budgetCapUsd?: number; forceReset?: boolean };
+      const body = (req.body || {}) as {
+        budgetCapUsd?: number;
+        forceReset?: boolean;
+        validationDomain?: ValidationDomain;
+      };
       const result = await initHarnessBlueprintForProject({
         req,
         projectId,
         ownerUid: user.uid,
         budgetCapUsd: typeof body.budgetCapUsd === 'number' ? body.budgetCapUsd : undefined,
+        validationDomain:
+          body.validationDomain === 'general_persian_technical' ||
+          body.validationDomain === 'ecu_winols'
+            ? body.validationDomain
+            : undefined,
         forceReset: Boolean(body.forceReset),
       });
       if (!result) {
@@ -3793,7 +4153,11 @@ export function createProjectRouter(): Router {
     try {
       const user = (req as AuthRequest).user!;
       const { id: projectId } = req.params;
-      const body = (req.body || {}) as { budgetCapUsd?: number; glossaryEntries?: unknown[] };
+      const body = (req.body || {}) as {
+        budgetCapUsd?: number;
+        glossaryEntries?: unknown[];
+        validationDomain?: ValidationDomain;
+      };
       const result = await approveHarnessBlueprintForProject({
         req,
         projectId,
@@ -3802,6 +4166,11 @@ export function createProjectRouter(): Router {
         glossaryEntries: Array.isArray(body.glossaryEntries)
           ? (body.glossaryEntries as any)
           : undefined,
+        validationDomain:
+          body.validationDomain === 'general_persian_technical' ||
+          body.validationDomain === 'ecu_winols'
+            ? body.validationDomain
+            : undefined,
         actorName: user.name || (user.isGuest ? 'کاربر مهمان' : 'کاربر استودیو'),
       });
       if (!result) {
@@ -3927,6 +4296,75 @@ export function createProjectRouter(): Router {
       res.status(500).json({
         error: err instanceof Error ? err.message : 'خطا در تعیین‌تکلیف زیربخش قرنطینه‌شده.',
       });
+    }
+  });
+
+  // 19B. DOMAIN-SPECIFIC AI HARNESS: RETRY QUARANTINED SUBSECTION WITH FLAGSHIP ESCALATION (GATE 2)
+  router.post('/:id/harness/quarantine/:sectionId/retry', async (req, res) => {
+    const retryAbortController = new AbortController();
+    const onClientDisconnect = () => {
+      if (!res.writableEnded) {
+        retryAbortController.abort();
+      }
+    };
+    req.on('close', onClientDisconnect);
+
+    try {
+      const user = (req as AuthRequest).user!;
+      const { id: projectId, sectionId } = req.params;
+      const body = (req.body || {}) as { allowBudgetOverride?: boolean };
+      const result = await retryQuarantinedSectionForProject({
+        req,
+        projectId,
+        ownerUid: user.uid,
+        sectionId,
+        allowBudgetOverride: Boolean(body.allowBudgetOverride),
+        abortSignal: retryAbortController.signal,
+        actorName: user.name || (user.isGuest ? 'کاربر مهمان' : 'کاربر استودیو'),
+      });
+      if (!result) {
+        if (!res.writableEnded) {
+          res.status(404).json({ error: 'پروژه موردنظر یافت نشد.' });
+        }
+        return;
+      }
+      if (!res.writableEnded) {
+        res.json({
+          ok: true,
+          done: result.done,
+          pausedByBudgetCap: Boolean(result.pausedByBudgetCap),
+          sectionId: result.sectionId,
+          outcome: result.outcome,
+          layer1: result.layer1,
+          layer2: result.layer2,
+          harnessState: result.harnessState,
+          bundle: formatBundleForClient(result.rawBundle),
+        });
+      }
+    } catch (err) {
+      if (res.writableEnded) return;
+      if (err instanceof HarnessStepConflictError) {
+        res.status(409).json({
+          ok: false,
+          code: err.code,
+          error: err.message,
+          activeStepLock: err.existingLock,
+        });
+        return;
+      }
+      if (err instanceof HarnessRunAbortedError) {
+        res.status(499).json({
+          ok: false,
+          code: err.code,
+          error: err.message,
+        });
+        return;
+      }
+      res.status(500).json({
+        error: err instanceof Error ? err.message : 'خطا در بازنویسی مجدد زیربخش با مدل پرچمدار.',
+      });
+    } finally {
+      req.off('close', onClientDisconnect);
     }
   });
 

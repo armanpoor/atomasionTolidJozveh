@@ -265,11 +265,7 @@ export function parseMarkdownDocument(rawContent: string, fileName: string): Par
     }
   }
 
-  // If the attached book has its signature heading / content
-  if (rawContent.includes('مجلد یکم — مهندسی کالیبراسیون')) {
-    bookTitle = 'کتاب مرجع مهندسی کالیبراسیون و ریمپ ایسیو';
-    bookSubtitle = 'دوره جامع چهارروزه تیونینگ، عیب‌یابی، الگوخوانی WinOLS و کالیبراسیون موتورهای اتمسفریک و پرخوران';
-  }
+  // Title and subtitle remain strictly derived from the uploaded document headings or file name.
 
   const volumes: VolumeNode[] = [];
   const chapters: ChapterNode[] = [];

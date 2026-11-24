@@ -28,10 +28,19 @@ function openHarnessDb(): Promise<IDBDatabase> {
   });
 }
 
-export async function saveHarnessStateLocal(state: HarnessState): Promise<void> {
+function buildScopedStorageKey(projectId: string, ownerUid?: string | null): string {
+  const uid = (ownerUid || '').trim();
+  return uid ? `${uid}::${projectId}` : projectId;
+}
+
+export async function saveHarnessStateLocal(
+  state: HarnessState,
+  ownerUid?: string | null
+): Promise<void> {
   if (!state?.projectId) return;
-  const clone: HarnessState = JSON.parse(JSON.stringify(state));
-  memoryFallbackStore.set(state.projectId, clone);
+  const scopedKey = buildScopedStorageKey(state.projectId, ownerUid);
+  const clone: HarnessState & { _storageKey?: string } = JSON.parse(JSON.stringify(state));
+  memoryFallbackStore.set(scopedKey, clone);
 
   if (!hasIndexedDb()) return;
   try {
@@ -39,7 +48,7 @@ export async function saveHarnessStateLocal(state: HarnessState): Promise<void> 
     await new Promise<void>((resolve, reject) => {
       const tx = db.transaction(STORE_NAME, 'readwrite');
       const store = tx.objectStore(STORE_NAME);
-      store.put(clone);
+      store.put({ ...clone, projectId: scopedKey });
       tx.oncomplete = () => resolve();
       tx.onerror = () => reject(tx.error || new Error('IndexedDB write failed'));
     });
@@ -49,10 +58,15 @@ export async function saveHarnessStateLocal(state: HarnessState): Promise<void> 
   }
 }
 
-export async function loadHarnessStateLocal(projectId: string): Promise<HarnessState | null> {
+export async function loadHarnessStateLocal(
+  projectId: string,
+  ownerUid?: string | null
+): Promise<HarnessState | null> {
   if (!projectId) return null;
+  const scopedKey = buildScopedStorageKey(projectId, ownerUid);
+  const hasUid = Boolean((ownerUid || '').trim());
   if (!hasIndexedDb()) {
-    const mem = memoryFallbackStore.get(projectId);
+    const mem = hasUid ? memoryFallbackStore.get(scopedKey) : memoryFallbackStore.get(projectId);
     return mem ? JSON.parse(JSON.stringify(mem)) : null;
   }
 
@@ -61,31 +75,40 @@ export async function loadHarnessStateLocal(projectId: string): Promise<HarnessS
     const loaded = await new Promise<HarnessState | null>((resolve, reject) => {
       const tx = db.transaction(STORE_NAME, 'readonly');
       const store = tx.objectStore(STORE_NAME);
-      const req = store.get(projectId);
+      const req = store.get(scopedKey);
       req.onsuccess = () => resolve((req.result as HarnessState | undefined) || null);
       req.onerror = () => reject(req.error || new Error('IndexedDB read failed'));
     });
     db.close();
     if (loaded) {
-      memoryFallbackStore.set(projectId, loaded);
-      return loaded;
+      const restored = { ...loaded, projectId };
+      memoryFallbackStore.set(scopedKey, restored);
+      return restored;
     }
   } catch {
     // Fall back to in-memory cache
   }
 
-  const mem = memoryFallbackStore.get(projectId);
+  const mem = hasUid ? memoryFallbackStore.get(scopedKey) : memoryFallbackStore.get(projectId);
   return mem ? JSON.parse(JSON.stringify(mem)) : null;
 }
 
-export async function clearHarnessStateLocal(projectId: string): Promise<void> {
-  memoryFallbackStore.delete(projectId);
+export async function clearHarnessStateLocal(
+  projectId: string,
+  ownerUid?: string | null
+): Promise<void> {
+  const hasUid = Boolean((ownerUid || '').trim());
+  const scopedKey = buildScopedStorageKey(projectId, ownerUid);
+  memoryFallbackStore.delete(scopedKey);
+  if (!hasUid) {
+    memoryFallbackStore.delete(projectId);
+  }
   if (!hasIndexedDb()) return;
   try {
     const db = await openHarnessDb();
     await new Promise<void>((resolve, reject) => {
       const tx = db.transaction(STORE_NAME, 'readwrite');
-      tx.objectStore(STORE_NAME).delete(projectId);
+      tx.objectStore(STORE_NAME).delete(scopedKey);
       tx.oncomplete = () => resolve();
       tx.onerror = () => reject(tx.error || new Error('IndexedDB delete failed'));
     });
@@ -140,8 +163,12 @@ export function reconcileHarnessStates(
   const cloudTs = Date.parse(cloudState.updatedAt || '') || 0;
   const localTs = Date.parse(localState.updatedAt || '') || 0;
 
-  // Prefer the state with higher progress if blueprint version matches; break ties by timestamp (cloud wins exact ties)
-  const sameBlueprint = cloudState.blueprint.version === localState.blueprint.version;
+  const sameBlueprint =
+    cloudState.blueprint.version === localState.blueprint.version &&
+    (!cloudState.blueprint.sourceCorpusHash ||
+      !localState.blueprint.sourceCorpusHash ||
+      cloudState.blueprint.sourceCorpusHash === localState.blueprint.sourceCorpusHash);
+
   let primary = cloudState;
   let secondary = localState;
 
@@ -161,7 +188,7 @@ export function reconcileHarnessStates(
     return primary;
   }
 
-  // Merge any verified sections from secondary that are still pending/drafted in primary
+  // Merge any verified sections from secondary AND keep resolved quarantine status
   const mergedSectionsIR = { ...primary.sectionsIR };
   const mergedBySectionId = { ...primary.coverageLedger.bySectionId };
   const mergedByChunkId = { ...primary.coverageLedger.byChunkId };
@@ -183,9 +210,24 @@ export function reconcileHarnessStates(
     }
   }
 
+  const resolvedQuarantineBySec = new Map<string, (typeof primary.quarantineQueue)[number]>();
+  for (const q of [...(primary.quarantineQueue || []), ...(secondary.quarantineQueue || [])]) {
+    if (q.resolved) {
+      resolvedQuarantineBySec.set(q.sectionId, q);
+    }
+  }
+  const mergedQuarantine = (primary.quarantineQueue || []).map((q) => {
+    const resolvedQ = resolvedQuarantineBySec.get(q.sectionId);
+    if (resolvedQ && !q.resolved) {
+      return resolvedQ;
+    }
+    return q;
+  });
+
   return {
     ...primary,
     sectionsIR: mergedSectionsIR,
+    quarantineQueue: mergedQuarantine,
     coverageLedger: {
       bySectionId: mergedBySectionId,
       byChunkId: mergedByChunkId,

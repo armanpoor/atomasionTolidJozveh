@@ -14,7 +14,10 @@ export const isSqlConfigured = (): boolean =>
       process.env.SQL_DB_NAME
   );
 
-export const createPool = () => {
+export const createPool = (): Pool | null => {
+  if (!isSqlConfigured()) {
+    return null;
+  }
   if (!global._postgresPool) {
     global._postgresPool = new Pool({
       host: process.env.SQL_HOST,
@@ -32,6 +35,38 @@ export const createPool = () => {
   return global._postgresPool;
 };
 
-const pool = createPool();
+type DrizzleDb = ReturnType<typeof drizzle<typeof schema>>;
 
-export const db = drizzle(pool, { schema });
+function createMockDbProxy(): DrizzleDb {
+  const noOp = {
+    findMany: async () => [],
+    findFirst: async () => null,
+    findUnique: async () => null,
+    create: async (d: { data?: unknown }) => d?.data ?? {},
+    update: async (d: { data?: unknown }) => d?.data ?? {},
+    delete: async () => ({}),
+  };
+  return new Proxy(
+    {},
+    {
+      get: (_, prop) =>
+        prop === 'query' ? new Proxy({}, { get: () => noOp }) : async () => [],
+    }
+  ) as unknown as DrizzleDb;
+}
+
+let db: DrizzleDb;
+try {
+  const pool = createPool();
+  if (pool) {
+    db = drizzle(pool, { schema });
+  } else {
+    console.warn('[AI Studio] SQL database not configured — using in-memory repository store');
+    db = createMockDbProxy();
+  }
+} catch {
+  console.warn('[AI Studio] Database not connected — using mock');
+  db = createMockDbProxy();
+}
+
+export { db };

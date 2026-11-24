@@ -24,6 +24,7 @@ import {
   ModelTierId,
   MULTI_TIER_RECIPES,
   MultiTierRoutingConfig,
+  OPENAI_COMPATIBLE_GATEWAY_TEMPLATES,
   TierModelSlotConfig,
   TokenOptimizationMode,
 } from '../lib/aiProviderConfig';
@@ -163,8 +164,14 @@ export const MultiTierRoutingPanel: React.FC<MultiTierRoutingPanelProps> = ({
           flagship: tr.tiers.flagship.modelId,
         },
         taskTierMap: tr.taskTierMap,
+        customProfiles: draft.customModels,
       }),
-    [tr]
+    [tr, draft.customModels]
+  );
+
+  const customModelsList = useMemo(
+    () => Object.values(draft.customModels || {}),
+    [draft.customModels]
   );
 
   return (
@@ -285,7 +292,7 @@ export const MultiTierRoutingPanel: React.FC<MultiTierRoutingPanelProps> = ({
           {TIER_ORDER.map((tierId) => {
             const meta = MODEL_TIER_METADATA[tierId];
             const slot = tr.tiers[tierId];
-            const pricing = lookupModelPricing(slot.modelId);
+            const pricing = lookupModelPricing(slot.modelId, draft.customModels);
             const inheritedKeyPresent = Boolean(draft.providers?.[slot.provider]?.apiKey?.trim());
             const showTierKey = visibleKeys[tierId];
 
@@ -314,7 +321,7 @@ export const MultiTierRoutingPanel: React.FC<MultiTierRoutingPanelProps> = ({
                   </div>
                 </div>
 
-                {/* Quick model presets for this tier */}
+                {/* Quick model presets + user-registered custom models for this tier */}
                 <div className="flex flex-wrap gap-1.5">
                   {meta.recommendedModels.map((preset) => {
                     const activePreset =
@@ -340,6 +347,66 @@ export const MultiTierRoutingPanel: React.FC<MultiTierRoutingPanelProps> = ({
                       </button>
                     );
                   })}
+                  {customModelsList.map((cm) => {
+                    const activeCustom = slot.modelId === cm.modelId;
+                    return (
+                      <button
+                        key={`${tierId}-custom-${cm.modelId}`}
+                        type="button"
+                        onClick={() => updateTierSlot(tierId, { modelId: cm.modelId })}
+                        className={`rounded-lg border px-2 py-1 font-mono text-[10.5px] font-semibold transition-colors cursor-pointer ${
+                          activeCustom
+                            ? 'border-[#14532D] bg-[#F2F7F4] text-[#14532D]'
+                            : 'border-[#CBD5E1] bg-white text-[#1E3A5F] hover:bg-[#EEF3F8]'
+                        }`}
+                        dir="ltr"
+                      >
+                        {cm.displayName || cm.modelId}
+                      </button>
+                    );
+                  })}
+                </div>
+
+                {/* Optional Per-Tier Base URL & Gateway Quick Templates */}
+                <div className="grid grid-cols-1 sm:grid-cols-12 gap-2 items-center">
+                  <div className="sm:col-span-6 space-y-1">
+                    <label
+                      htmlFor={`tier-${tierId}-baseurl`}
+                      className="block text-[10px] font-bold text-[#57534E]"
+                    >
+                      آدرس Base URL این سطح (اختیاری — برای درگاه‌های ایرانی یا پروکسی)
+                    </label>
+                    <input
+                      id={`tier-${tierId}-baseurl`}
+                      type="url"
+                      dir="ltr"
+                      placeholder={AI_PROVIDER_METADATA[slot.provider].defaultBaseUrl}
+                      value={slot.baseUrl}
+                      onChange={(e) => updateTierSlot(tierId, { baseUrl: e.target.value })}
+                      className="w-full rounded-lg border border-[#D6D0C4] bg-[#FAF9F6] px-2.5 py-1 font-mono text-[10.5px] text-[#1A1816] focus:border-[#1E3A5F] focus:bg-white focus:outline-none"
+                    />
+                  </div>
+                  <div className="sm:col-span-6 flex flex-wrap gap-1 pt-3" dir="ltr">
+                    {OPENAI_COMPATIBLE_GATEWAY_TEMPLATES.slice(0, 6).map((gw) => (
+                      <button
+                        key={`${tierId}-gw-${gw.baseUrl}`}
+                        type="button"
+                        onClick={() =>
+                          updateTierSlot(tierId, {
+                            provider: 'custom_openai',
+                            baseUrl: gw.baseUrl,
+                          })
+                        }
+                        className={`rounded border px-1.5 py-0.5 text-[9.5px] font-semibold cursor-pointer ${
+                          slot.baseUrl.replace(/\/+$/, '') === gw.baseUrl
+                            ? 'border-[#1E3A5F] bg-[#1E3A5F] text-white'
+                            : 'border-[#D6D0C4] bg-[#FAF9F6] text-[#44403C] hover:bg-[#EEF3F8]'
+                        }`}
+                      >
+                        {gw.label.split(' ')[0]}
+                      </button>
+                    ))}
+                  </div>
                 </div>
 
                 <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">

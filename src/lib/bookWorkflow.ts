@@ -37,11 +37,11 @@ export const BOOK_WORKFLOW_STAGES: readonly BookWorkflowStageMeta[] = [
   {
     stage: 3,
     key: 'outline',
-    titleFa: '۳. چیدمان و ویرایش فصل‌بندی',
-    shortTitleFa: '۳. فصل‌بندی',
+    titleFa: '۳. تأیید فهرست و اجرای هارنس',
+    shortTitleFa: '۳. فصل‌بندی و هارنس',
     singleResponsibilityFa:
-      'فقط مرتب‌سازی، نام‌گذاری و ادغام فصل‌ها پیش از ساخت و صفحه‌آرایی نهایی کتاب.',
-    nextActionLabelFa: 'اجرای مرحله ۴: صفحه‌آرایی و ساخت پیش‌نمایش کتاب',
+      'گیت ۱ (تأیید فهرست فصل‌ها و دامنه فنی) ← اجرای پیوسته هارنس بدون توقف ← گیت ۲ (رفع بخش‌های قرنطینه).',
+    nextActionLabelFa: 'تأیید نقشه راه (Blueprint) و اجرای هارنس کتاب',
   },
   {
     stage: 4,
@@ -49,7 +49,7 @@ export const BOOK_WORKFLOW_STAGES: readonly BookWorkflowStageMeta[] = [
     titleFa: '۴. صفحه‌آرایی، کادربندی و غنی‌سازی',
     shortTitleFa: '۴. صفحه‌آرایی',
     singleResponsibilityFa:
-      'بازبینی پیش‌نمایش کادربندی‌شده کتاب و اجرای اختیاری و جداگانه «بازبینی عمیق» یا «تکمیل گوگل».',
+      'بازبینی پیش‌نمایش کادربندی‌شده کتاب (A4) و اجرای اختیاری بازبینی عمیق یا تکمیل گوگل.',
     nextActionLabelFa: 'ادامه به مرحله ۵: تأیید نهایی و دریافت خروجی',
   },
   {

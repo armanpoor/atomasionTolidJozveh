@@ -8,13 +8,16 @@ import type {
   SectionNode,
   SourceFileDto,
   TableIndexEntry,
+  ValidationDomain,
 } from '../bookTypes.ts';
 import { extractEcuPlatforms, extractTechnicalEntities } from '../ecuTechnicalIntegrity.ts';
 import { toPersianDigits } from '../formatParsers.ts';
+import { estimateTokens } from '../tokenOptimizer.ts';
 import { deterministicHash } from '../zeroLossPipeline.ts';
 import {
   auditMasterBlueprint,
   autoSplitOversizedBlueprintSections,
+  chunkSourceTextStructureAware,
   computeSourceCorpusFingerprint,
   DEFAULT_MAX_SECTION_INPUT_TOKENS,
 } from './chunkingAndBlueprint.ts';
@@ -38,6 +41,22 @@ function countWords(text: string): number {
   return cleaned.split(/\s+/).filter(Boolean).length;
 }
 
+const SINGLE_UNIT_SPLIT_THRESHOLD_TOKENS = 2200;
+
+export function resolveChunkIdsForUnit(
+  unitId: string,
+  chunksMap: Map<string, HarnessSourceChunk>
+): string[] {
+  if (chunksMap.has(unitId)) return [unitId];
+  const ids: string[] = [];
+  for (let p = 1; ; p++) {
+    const pid = `${unitId}_p${p}`;
+    if (!chunksMap.has(pid)) break;
+    ids.push(pid);
+  }
+  return ids;
+}
+
 export function buildSourceChunksMap(
   contentUnits: ContentUnitDto[],
   sourceFiles: SourceFileDto[]
@@ -45,10 +64,26 @@ export function buildSourceChunksMap(
   const fileNameById = new Map(sourceFiles.map((f) => [f.id, f.fileName]));
   const map = new Map<string, HarnessSourceChunk>();
   for (const u of contentUnits) {
+    const fileName = fileNameById.get(u.sourceFileId) || 'منبع ورودی';
     const meta = (u.metadataJson || {}) as Record<string, unknown>;
+    if (estimateTokens(u.rawText) > SINGLE_UNIT_SPLIT_THRESHOLD_TOKENS) {
+      const split = chunkSourceTextStructureAware({
+        text: u.rawText,
+        baseId: u.id,
+        fileName,
+        headingPath: u.headingPath,
+        maxTokensPerChunk: 1800,
+      });
+      if (split.length > 1) {
+        for (const sc of split) {
+          map.set(sc.id, sc);
+        }
+        continue;
+      }
+    }
     map.set(u.id, {
       id: u.id,
-      fileName: fileNameById.get(u.sourceFileId) || 'منبع ورودی',
+      fileName,
       headingPath: u.headingPath,
       unitType: u.unitType,
       text: u.rawText,
@@ -81,8 +116,10 @@ export function buildInitialHarnessState(params: {
   enablePromptCaching?: boolean;
   existingVersion?: number;
   maxSectionInputTokens?: number;
+  validationDomain?: ValidationDomain;
 }): HarnessState {
   const now = new Date().toISOString();
+  const validationDomain: ValidationDomain = params.validationDomain || 'ecu_winols';
   const budgetCapUsd =
     typeof params.budgetCapUsd === 'number' && params.budgetCapUsd > 0
       ? params.budgetCapUsd
@@ -91,13 +128,18 @@ export function buildInitialHarnessState(params: {
     params.maxSectionInputTokens ?? DEFAULT_MAX_SECTION_INPUT_TOKENS;
 
   const activeUnits = params.contentUnits
-    .filter((u) => u.status !== 'merged_duplicate' && u.rawText.trim().length > 0)
+    .filter(
+      (u) =>
+        u.status !== 'merged' &&
+        u.status !== 'merged_duplicate' &&
+        u.rawText.trim().length > 0
+    )
     .sort((a, b) => a.unitOrder - b.unitOrder);
 
   const chunksMap = buildSourceChunksMap(activeUnits, params.sourceFiles);
-  const allActiveChunks = activeUnits
-    .map((u) => chunksMap.get(u.id))
-    .filter((c): c is HarnessSourceChunk => Boolean(c));
+  const expandUnitChunkIds = (units: ContentUnitDto[]): string[] =>
+    units.flatMap((u) => resolveChunkIdsForUnit(u.id, chunksMap));
+  const allActiveChunks = Array.from(chunksMap.values());
 
   const sortedNodes = [...params.outlineNodes].sort((a, b) => a.nodeOrder - b.nodeOrder);
   const topChapters = sortedNodes.filter((n) => n.level <= 1 || !n.parentId);
@@ -140,7 +182,7 @@ export function buildInitialHarnessState(params: {
         chapterTitle: 'فصل ۱: محتوای یکپارچه سند',
         sectionOrder: secOrder,
         title: `بخش ${toPersianDigits(secOrder)}`,
-        sourceChunkIds: slice.map((u) => u.id),
+        sourceChunkIds: expandUnitChunkIds(slice),
         sourceWordCount,
         estimatedInputTokens: 0,
         estimatedOutputTokens: 0,
@@ -166,7 +208,7 @@ export function buildInitialHarnessState(params: {
             chapterTitle: ch.title,
             sectionOrder: secOrder,
             title: `مقدمه و کلیات ${ch.title}`,
-            sourceChunkIds: chDirectUnits.map((u) => u.id),
+            sourceChunkIds: expandUnitChunkIds(chDirectUnits),
             sourceWordCount: chDirectUnits.reduce((acc, u) => acc + countWords(u.rawText), 0),
             estimatedInputTokens: 0,
             estimatedOutputTokens: 0,
@@ -183,7 +225,7 @@ export function buildInitialHarnessState(params: {
             chapterTitle: ch.title,
             sectionOrder: secOrder,
             title: child.title,
-            sourceChunkIds: childUnits.map((u) => u.id),
+            sourceChunkIds: expandUnitChunkIds(childUnits),
             sourceWordCount: childUnits.reduce((acc, u) => acc + countWords(u.rawText), 0),
             estimatedInputTokens: 0,
             estimatedOutputTokens: 0,
@@ -200,7 +242,7 @@ export function buildInitialHarnessState(params: {
             chapterTitle: ch.title,
             sectionOrder: 1,
             title: ch.title,
-            sourceChunkIds: chDirectUnits.map((u) => u.id),
+            sourceChunkIds: expandUnitChunkIds(chDirectUnits),
             sourceWordCount: chDirectUnits.reduce((acc, u) => acc + countWords(u.rawText), 0),
             estimatedInputTokens: 0,
             estimatedOutputTokens: 0,
@@ -217,7 +259,7 @@ export function buildInitialHarnessState(params: {
               chapterTitle: ch.title,
               sectionOrder: subIdx,
               title: `${ch.title} (بخش ${toPersianDigits(subIdx)})`,
-              sourceChunkIds: subUnits.map((u) => u.id),
+              sourceChunkIds: expandUnitChunkIds(subUnits),
               sourceWordCount: subUnits.reduce((acc, u) => acc + countWords(u.rawText), 0),
               estimatedInputTokens: 0,
               estimatedOutputTokens: 0,
@@ -238,7 +280,7 @@ export function buildInitialHarnessState(params: {
         chapterTitle: 'ضمیمه: مطالب تکمیلی و تفکیک‌نشده',
         sectionOrder: 1,
         title: 'نکات تکمیلی استخراج‌شده از منابع',
-        sourceChunkIds: unassignedUnits.map((u) => u.id),
+        sourceChunkIds: expandUnitChunkIds(unassignedUnits),
         sourceWordCount: unassignedUnits.reduce((acc, u) => acc + countWords(u.rawText), 0),
         estimatedInputTokens: 0,
         estimatedOutputTokens: 0,
@@ -323,7 +365,7 @@ export function buildInitialHarnessState(params: {
   };
 
   // Estimate cost using actual 3-tier pricing & Prompt Caching
-  const prefixText = buildImmutableCachedPrefix(glossary);
+  const prefixText = buildImmutableCachedPrefix(glossary, { validationDomain });
   const costEstimate = estimateHarnessRunCost({
     blueprint: { sections: blueprintSections },
     authorModelId: params.authorModelId || 'gemini-4-hydrogen',
@@ -343,7 +385,9 @@ export function buildInitialHarnessState(params: {
   }
 
   // Initialize CoverageLedger
-  const unitWordMap = new Map(activeUnits.map((u) => [u.id, countWords(u.rawText)]));
+  const chunkWordMap = new Map(
+    allActiveChunks.map((c) => [c.id, c.wordCount || countWords(c.text)])
+  );
   const coverageLedger: CoverageLedger = {
     byChunkId: {},
     bySectionId: {},
@@ -366,7 +410,7 @@ export function buildInitialHarnessState(params: {
         sectionId: sec.sectionId,
         chapterId: sec.chapterId,
         status: 'pending',
-        wordCount: unitWordMap.get(chunkId) || 0,
+        wordCount: chunkWordMap.get(chunkId) || 0,
         updatedAt: now,
       };
     }
@@ -387,6 +431,7 @@ export function buildInitialHarnessState(params: {
     estimatedTotalCostUsd: costEstimate.estimatedCostWithCacheUsd,
     estimatedSavingsPercent: costEstimate.savingsPercent,
     sections: blueprintSections,
+    validationDomain,
     sourceCorpusHash: corpusFingerprint.sourceCorpusHash,
     chunkContentHashes: corpusFingerprint.chunkContentHashes,
     blueprintAudit,
@@ -586,11 +631,16 @@ export function convertHarnessStateToParsedBook(params: {
   );
 
   const tableIndex: TableIndexEntry[] = [];
-  let globalTableCounter = 0;
+  const chunksMapForFallback = buildSourceChunksMap(contentUnits, sourceFiles);
+  for (const [cid, chunk] of chunksMapForFallback.entries()) {
+    chunkToFileName.set(cid, chunk.fileName);
+    chunkTextById.set(cid, chunk.text);
+  }
 
   const chapters: ChapterNode[] = sortedChapters.map(([chapterId, group], idx) => {
     const chapterNumber = idx + 1;
     const chapterFileNames = new Set<string>();
+    let chapterTableCounter = 0;
 
     const sections: SectionNode[] = group.sections
       .sort((a, b) => a.sectionOrder - b.sectionOrder)
@@ -621,8 +671,8 @@ export function convertHarnessStateToParsedBook(params: {
             chapterFileNames.add(fn);
           }
           if (blk.type === 'table') {
-            globalTableCounter += 1;
-            const tableNumber = `${toPersianDigits(chapterNumber)}-${toPersianDigits(globalTableCounter)}`;
+            chapterTableCounter += 1;
+            const tableNumber = `${toPersianDigits(chapterNumber)}-${toPersianDigits(chapterTableCounter)}`;
             tableIndex.push({
               tableNumber,
               caption: blk.caption || `جدول ${tableNumber}`,
@@ -650,7 +700,10 @@ export function convertHarnessStateToParsedBook(params: {
       chapterNumber,
       title: group.chapterTitle,
       volumeIndex: 1,
-      volumeTitle: 'جلد اول — نسخه تدوین‌شده با هارنس تخصصی ECU',
+      volumeTitle:
+        harnessState.blueprint.validationDomain === 'general_persian_technical'
+          ? 'جلد اول — نسخه تدوین‌شده با هارنس تخصصی'
+          : 'جلد اول — نسخه تدوین‌شده با هارنس تخصصی ECU',
       meta: [
         {
           label: 'تعداد زیربخش',
@@ -667,13 +720,58 @@ export function convertHarnessStateToParsedBook(params: {
     };
   });
 
-  const glossary: GlossaryEntry[] = harnessState.glossary.entries.map((entry) => ({
-    term: entry.canonicalTerm,
-    definition:
-      entry.definitionFa ||
-      (entry.faEquivalents.length ? entry.faEquivalents.join('، ') : entry.canonicalTerm),
-    chapters: [1],
+  // Bug #19 fix: resolve actual chapter numbers for each glossary entry from IR/chunks
+  const chapterChunkIndex = new Map<string, number>();
+  sortedChapters.forEach(([, group], idx) => {
+    const chNum = idx + 1;
+    for (const bpSec of group.sections) {
+      for (const cid of bpSec.sourceChunkIds) {
+        chapterChunkIndex.set(cid, chNum);
+      }
+    }
+  });
+  const chapterSearchCorpus = chapters.map((ch) => ({
+    chapterNumber: ch.chapterNumber,
+    upperText: `${ch.title} ${ch.sections
+      .map((s) =>
+        `${s.title} ${s.blocks
+          .map((b) =>
+            b.type === 'paragraph' || b.type === 'subheading'
+              ? b.text
+              : b.type === 'callout'
+                ? `${b.title} ${b.paragraphs.join(' ')}`
+                : b.type === 'table'
+                  ? `${b.caption || ''} ${b.headers.join(' ')} ${b.rows.flat().join(' ')}`
+                  : ''
+          )
+          .join(' ')}`
+      )
+      .join(' ')}`.toUpperCase(),
   }));
+
+  const glossary: GlossaryEntry[] = harnessState.glossary.entries.map((entry) => {
+    const matchedChapters = new Set<number>();
+    for (const cid of entry.sourceChunkIds || []) {
+      const chNum = chapterChunkIndex.get(cid);
+      if (chNum) matchedChapters.add(chNum);
+    }
+    const termUpper = entry.canonicalTerm.trim().toUpperCase();
+    if (termUpper.length >= 2) {
+      for (const cc of chapterSearchCorpus) {
+        if (cc.upperText.includes(termUpper)) {
+          matchedChapters.add(cc.chapterNumber);
+        }
+      }
+    }
+    const sortedMatched = Array.from(matchedChapters).sort((a, b) => a - b);
+    return {
+      term: entry.canonicalTerm,
+      definition:
+        entry.definitionFa ||
+        (entry.faEquivalents.length ? entry.faEquivalents.join('، ') : entry.canonicalTerm),
+      chapters: sortedMatched.length > 0 ? sortedMatched : [1],
+    };
+  });
 
   return {
     title: existingBook?.title || projectTitle || 'جزوه تخصصی ECU و WinOLS',

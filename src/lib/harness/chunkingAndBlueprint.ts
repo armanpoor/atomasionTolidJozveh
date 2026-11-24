@@ -482,11 +482,32 @@ export function autoSplitOversizedBlueprintSections(params: {
   const result: BlueprintSection[] = [];
 
   for (const sec of params.sections) {
-    const secChunks = sec.sourceChunkIds
+    let secChunks = sec.sourceChunkIds
       .map((id) => params.chunkById.get(id))
       .filter((c): c is HarnessSourceChunk => Boolean(c));
 
-    const totalTokens = secChunks.reduce((acc, c) => acc + estimateTokens(c.text), 0);
+    let totalTokens = secChunks.reduce((acc, c) => acc + estimateTokens(c.text), 0);
+
+    // Bug #13 fix: If a single giant chunk exceeds maxTokens, split it structure-aware first
+    if (totalTokens > maxTokens && secChunks.length === 1) {
+      const mono = secChunks[0];
+      const splitChunks = chunkSourceTextStructureAware({
+        text: mono.text,
+        baseId: mono.id,
+        fileName: mono.fileName,
+        headingPath: mono.headingPath,
+        maxTokensPerChunk: Math.max(800, Math.floor(maxTokens * 0.65)),
+      });
+      if (splitChunks.length > 1) {
+        params.chunkById.delete(mono.id);
+        for (const sc of splitChunks) {
+          params.chunkById.set(sc.id, sc);
+        }
+        secChunks = splitChunks;
+        totalTokens = secChunks.reduce((acc, c) => acc + estimateTokens(c.text), 0);
+      }
+    }
+
     if (totalTokens <= maxTokens || secChunks.length <= 1) {
       const platforms = new Set<string>();
       for (const c of secChunks) {
@@ -496,6 +517,7 @@ export function autoSplitOversizedBlueprintSections(params: {
       }
       result.push({
         ...sec,
+        sourceChunkIds: secChunks.map((c) => c.id),
         ecuPlatformTags: Array.from(platforms).sort(),
       });
       continue;

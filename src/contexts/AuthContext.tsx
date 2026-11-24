@@ -7,6 +7,7 @@ import React, {
   useState,
 } from 'react';
 import {
+  GoogleAuthProvider,
   User,
   onAuthStateChanged,
   signInWithPopup,
@@ -33,7 +34,10 @@ interface AuthContextValue {
   signingIn: boolean;
   enteringGuest: boolean;
   authError: string | null;
+  workspaceAccessToken: string | null;
+  hasWorkspaceAccess: boolean;
   signInWithGoogle: () => Promise<void>;
+  connectGoogleWorkspace: () => Promise<string | null>;
   enterGuestMode: () => Promise<void>;
   signOut: () => Promise<void>;
   getIdToken: (forceRefresh?: boolean) => Promise<string>;
@@ -54,8 +58,10 @@ function mapFirebaseUser(fbUser: User): AppSessionUser {
 export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [firebaseUser, setFirebaseUser] = useState<User | null>(null);
   const [guestUser, setGuestUser] = useState<AppSessionUser | null>(null);
-  // Keep server-signed guest session token strictly in memory (never in localStorage/sessionStorage)
+  // Keep server-signed guest session token and Google Workspace OAuth access token strictly in memory
   const guestTokenRef = useRef<string | null>(null);
+  const workspaceTokenRef = useRef<string | null>(null);
+  const [workspaceAccessToken, setWorkspaceAccessToken] = useState<string | null>(null);
 
   const [loading, setLoading] = useState(true);
   const [signingIn, setSigningIn] = useState(false);
@@ -117,6 +123,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
           console.error('Failed to sync user workspace profile:', err);
         }
       } else {
+        workspaceTokenRef.current = null;
+        setWorkspaceAccessToken(null);
         setLoading(false);
         // Optional ?guest=1 or ?autostart=1 support for direct guest entry
         if (!autoGuestAttemptedRef.current && typeof window !== 'undefined') {
@@ -135,7 +143,11 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     setSigningIn(true);
     setAuthError(null);
     try {
-      await signInWithPopup(auth, googleAuthProvider);
+      const result = await signInWithPopup(auth, googleAuthProvider);
+      const credential = GoogleAuthProvider.credentialFromResult(result);
+      const accessToken = credential?.accessToken ?? null;
+      workspaceTokenRef.current = accessToken;
+      setWorkspaceAccessToken(accessToken);
       guestTokenRef.current = null;
       setGuestUser(null);
     } catch (err) {
@@ -154,8 +166,42 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }
   }, []);
 
+  const connectGoogleWorkspace = useCallback(async (): Promise<string | null> => {
+    setSigningIn(true);
+    setAuthError(null);
+    try {
+      const result = await signInWithPopup(auth, googleAuthProvider);
+      const credential = GoogleAuthProvider.credentialFromResult(result);
+      const accessToken = credential?.accessToken ?? null;
+      if (!accessToken) {
+        throw new Error('توکن دسترسی به Google Drive و Sheets دریافت نشد. لطفاً دوباره وارد شوید.');
+      }
+      workspaceTokenRef.current = accessToken;
+      setWorkspaceAccessToken(accessToken);
+      guestTokenRef.current = null;
+      setGuestUser(null);
+      return accessToken;
+    } catch (err) {
+      const code = (err as { code?: string })?.code;
+      if (code === 'auth/popup-closed-by-user') {
+        setAuthError('پنجره اتصال به گوگل بسته شد.');
+      } else if (code === 'auth/popup-blocked') {
+        setAuthError('مرورگر پنجره اتصال به گوگل را مسدود کرد.');
+      } else {
+        setAuthError(
+          err instanceof Error ? err.message : 'اتصال به Google Workspace با خطا مواجه شد.'
+        );
+      }
+      return null;
+    } finally {
+      setSigningIn(false);
+    }
+  }, []);
+
   const signOut = useCallback(async () => {
     setAuthError(null);
+    workspaceTokenRef.current = null;
+    setWorkspaceAccessToken(null);
     if (guestTokenRef.current || guestUser) {
       guestTokenRef.current = null;
       setGuestUser(null);
@@ -193,7 +239,10 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         signingIn,
         enteringGuest,
         authError,
+        workspaceAccessToken,
+        hasWorkspaceAccess: Boolean(workspaceAccessToken),
         signInWithGoogle,
+        connectGoogleWorkspace,
         enterGuestMode,
         signOut,
         getIdToken,

@@ -39,8 +39,43 @@ export interface ModelPricingEntry {
  * Curated multi-provider API pricing table (USD per 1M tokens) for transparent cost estimation
  * and Hard Cost Cap protection. Order matters: more specific patterns come before generic ones.
  */
+export interface CustomPricingOverride {
+  modelId: string;
+  displayName?: string;
+  inputPerMillionUsd: number;
+  outputPerMillionUsd: number;
+}
+
 export const MODEL_PRICING_CATALOG: readonly ModelPricingEntry[] = [
-  // Anthropic Claude family
+  // Anthropic Claude family (2026 + 2025)
+  {
+    pattern: 'claude-opus-5',
+    label: 'Claude Opus 5.5',
+    inputPerMillionUsd: 15.0,
+    outputPerMillionUsd: 75.0,
+    cachedInputDiscount: 0.1,
+  },
+  {
+    pattern: 'claude-fable-5',
+    label: 'Claude Fable 5.2',
+    inputPerMillionUsd: 8.0,
+    outputPerMillionUsd: 40.0,
+    cachedInputDiscount: 0.1,
+  },
+  {
+    pattern: 'claude-sonnet-5',
+    label: 'Claude Sonnet 5.5',
+    inputPerMillionUsd: 3.0,
+    outputPerMillionUsd: 15.0,
+    cachedInputDiscount: 0.1,
+  },
+  {
+    pattern: 'claude-haiku-5',
+    label: 'Claude Haiku 5.5',
+    inputPerMillionUsd: 0.8,
+    outputPerMillionUsd: 4.0,
+    cachedInputDiscount: 0.1,
+  },
   {
     pattern: 'claude-opus-4-1',
     label: 'Claude Opus 4.1',
@@ -98,7 +133,42 @@ export const MODEL_PRICING_CATALOG: readonly ModelPricingEntry[] = [
     cachedInputDiscount: 0.1,
   },
 
-  // OpenAI family
+  // OpenAI family (2026 + 2025)
+  {
+    pattern: 'gpt-6.2-astra',
+    label: 'GPT-6.2 Astra',
+    inputPerMillionUsd: 5.0,
+    outputPerMillionUsd: 20.0,
+    cachedInputDiscount: 0.25,
+  },
+  {
+    pattern: 'gpt-6.2-sol',
+    label: 'GPT-6.2 Sol',
+    inputPerMillionUsd: 1.5,
+    outputPerMillionUsd: 6.0,
+    cachedInputDiscount: 0.25,
+  },
+  {
+    pattern: 'gpt-6-luna',
+    label: 'GPT-6 Luna',
+    inputPerMillionUsd: 0.3,
+    outputPerMillionUsd: 1.2,
+    cachedInputDiscount: 0.25,
+  },
+  {
+    pattern: 'gpt-5-mini',
+    label: 'GPT-5 Mini',
+    inputPerMillionUsd: 0.25,
+    outputPerMillionUsd: 2.0,
+    cachedInputDiscount: 0.25,
+  },
+  {
+    pattern: 'gpt-5',
+    label: 'GPT-5',
+    inputPerMillionUsd: 1.25,
+    outputPerMillionUsd: 10.0,
+    cachedInputDiscount: 0.25,
+  },
   {
     pattern: 'gpt-4.1-nano',
     label: 'GPT-4.1 Nano',
@@ -156,7 +226,21 @@ export const MODEL_PRICING_CATALOG: readonly ModelPricingEntry[] = [
     cachedInputDiscount: 0.25,
   },
 
-  // Google Gemini family
+  // Google Gemini family (2026 + 2025)
+  {
+    pattern: 'gemini-4-carbon',
+    label: 'Gemini 4 Carbon',
+    inputPerMillionUsd: 1.5,
+    outputPerMillionUsd: 12.0,
+    cachedInputDiscount: 0.25,
+  },
+  {
+    pattern: 'gemini-4-argon',
+    label: 'Gemini 4 Argon',
+    inputPerMillionUsd: 0.5,
+    outputPerMillionUsd: 3.5,
+    cachedInputDiscount: 0.25,
+  },
   {
     pattern: 'gemini-4-neon',
     label: 'Gemini 4 Neon',
@@ -179,6 +263,13 @@ export const MODEL_PRICING_CATALOG: readonly ModelPricingEntry[] = [
     cachedInputDiscount: 0.25,
   },
   {
+    pattern: 'gemini-3.1-pro',
+    label: 'Gemini 3.1 Pro',
+    inputPerMillionUsd: 1.25,
+    outputPerMillionUsd: 10.0,
+    cachedInputDiscount: 0.25,
+  },
+  {
     pattern: 'gemini-2.5-pro',
     label: 'Gemini 2.5 Pro',
     inputPerMillionUsd: 1.25,
@@ -193,7 +284,21 @@ export const MODEL_PRICING_CATALOG: readonly ModelPricingEntry[] = [
     cachedInputDiscount: 0.25,
   },
 
-  // DeepSeek / Perplexity / Groq / Llama
+  // DeepSeek / Qwen / xAI / Perplexity / Groq
+  {
+    pattern: 'deepseek-v4-pro',
+    label: 'DeepSeek V4 Pro',
+    inputPerMillionUsd: 0.6,
+    outputPerMillionUsd: 2.4,
+    cachedInputDiscount: 0.25,
+  },
+  {
+    pattern: 'deepseek-flash',
+    label: 'DeepSeek Flash',
+    inputPerMillionUsd: 0.14,
+    outputPerMillionUsd: 0.55,
+    cachedInputDiscount: 0.25,
+  },
   {
     pattern: 'deepseek-reasoner',
     label: 'DeepSeek Reasoner (R1)',
@@ -213,6 +318,20 @@ export const MODEL_PRICING_CATALOG: readonly ModelPricingEntry[] = [
     label: 'DeepSeek Chat (V3)',
     inputPerMillionUsd: 0.27,
     outputPerMillionUsd: 1.1,
+    cachedInputDiscount: 0.25,
+  },
+  {
+    pattern: 'qwen4-max',
+    label: 'Qwen 4 Max',
+    inputPerMillionUsd: 1.2,
+    outputPerMillionUsd: 4.8,
+    cachedInputDiscount: 0.25,
+  },
+  {
+    pattern: 'grok-4.7',
+    label: 'Grok 4.7',
+    inputPerMillionUsd: 2.0,
+    outputPerMillionUsd: 8.0,
     cachedInputDiscount: 0.25,
   },
   {
@@ -241,10 +360,33 @@ export const MODEL_PRICING_CATALOG: readonly ModelPricingEntry[] = [
   },
 ] as const;
 
-export function lookupModelPricing(modelId?: string | null): ModelPricingEntry {
-  const normalized = String(modelId || '')
-    .trim()
-    .toLowerCase();
+export function lookupModelPricing(
+  modelId?: string | null,
+  customProfiles?: Record<string, CustomPricingOverride> | null
+): ModelPricingEntry {
+  const raw = String(modelId || '').trim();
+  const normalized = raw.toLowerCase();
+  if (raw && customProfiles) {
+    const customMatch =
+      customProfiles[raw] ||
+      customProfiles[normalized] ||
+      Object.values(customProfiles).find(
+        (p) => p?.modelId?.trim().toLowerCase() === normalized
+      );
+    if (
+      customMatch &&
+      Number.isFinite(customMatch.inputPerMillionUsd) &&
+      Number.isFinite(customMatch.outputPerMillionUsd)
+    ) {
+      return {
+        pattern: normalized,
+        label: customMatch.displayName?.trim() || raw,
+        inputPerMillionUsd: Math.max(0, customMatch.inputPerMillionUsd),
+        outputPerMillionUsd: Math.max(0, customMatch.outputPerMillionUsd),
+        cachedInputDiscount: 0.25,
+      };
+    }
+  }
   if (normalized) {
     for (const entry of MODEL_PRICING_CATALOG) {
       if (normalized.includes(entry.pattern)) {
@@ -254,7 +396,7 @@ export function lookupModelPricing(modelId?: string | null): ModelPricingEntry {
   }
   return {
     pattern: 'default',
-    label: modelId?.trim() || 'مدل استاندارد',
+    label: raw || 'مدل استاندارد',
     inputPerMillionUsd: 0.5,
     outputPerMillionUsd: 2.0,
     cachedInputDiscount: 0.25,
@@ -271,6 +413,7 @@ export function computeCallCostUsd(params: {
   reasoningTokens?: number;
   cachedInputTokens?: number;
   cacheCreationInputTokens?: number;
+  customProfiles?: Record<string, CustomPricingOverride> | null;
 }): number {
   return computeDetailedCallCostUsd(params).totalCostUsd;
 }
@@ -297,8 +440,9 @@ export function computeDetailedCallCostUsd(params: {
   reasoningTokens?: number;
   cachedInputTokens?: number;
   cacheCreationInputTokens?: number;
+  customProfiles?: Record<string, CustomPricingOverride> | null;
 }): DetailedCallCostBreakdown {
-  const pricing = lookupModelPricing(params.modelId);
+  const pricing = lookupModelPricing(params.modelId, params.customProfiles);
   const prompt = Math.max(0, Number(params.promptTokens) || 0);
   const cached = Math.min(prompt, Math.max(0, Number(params.cachedInputTokens) || 0));
   const cacheWrite = Math.min(
@@ -1112,6 +1256,7 @@ export function estimateMultiTierPipelineCost(params: {
   enablePromptCaching: boolean;
   tierModels: Record<ModelTierId, string>;
   taskTierMap: Partial<Record<AiTaskType, ModelTierId>>;
+  customProfiles?: Record<string, CustomPricingOverride> | null;
 }): PipelineCostEstimate {
   const words = Math.max(800, params.documentWords || 4000);
   const chapters = Math.max(3, params.chapterCount || 8);
@@ -1178,6 +1323,7 @@ export function estimateMultiTierPipelineCost(params: {
       promptTokens: profile.rawPrompt,
       outputTokens: profile.rawOutput,
       cachedInputTokens: 0,
+      customProfiles: params.customProfiles,
     });
 
     const optPrompt = Math.max(250, Math.round(profile.rawPrompt * compressionFactor));
@@ -1195,6 +1341,7 @@ export function estimateMultiTierPipelineCost(params: {
       promptTokens: optPrompt,
       outputTokens: optOutput,
       cachedInputTokens: cachedTokens,
+      customProfiles: params.customProfiles,
     });
 
     routedOptimizedCostUsd += taskCost;

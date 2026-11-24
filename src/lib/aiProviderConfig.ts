@@ -84,6 +84,17 @@ export interface MultiTierRoutingConfig {
   taskTierMap: Record<AiTaskType, ModelTierId>;
 }
 
+export interface CustomModelProfile {
+  modelId: string;
+  displayName?: string;
+  inputPerMillionUsd: number;
+  outputPerMillionUsd: number;
+  contextWindow?: number;
+  supportsJsonSchema?: boolean;
+  supportsPromptCaching?: boolean;
+  supportsTools?: boolean;
+}
+
 export interface AiProviderConfig {
   provider: AiProviderType;
   /**
@@ -100,6 +111,8 @@ export interface AiProviderConfig {
   audioRoute?: AudioTranscribeRouteConfig;
   /** Multi-Tier Cost-Smart Routing (Economy / Balanced / Flagship) + Anti-Drift & Token Optimization */
   tierRouting?: MultiTierRoutingConfig;
+  /** User-defined pricing & capability overrides for custom / Iranian / local models */
+  customModels?: Record<string, CustomModelProfile>;
   /** Legacy mirrors kept synced for backwards compatibility */
   personalGoogleApiKey: string;
   customBaseUrl: string;
@@ -172,9 +185,14 @@ export interface AudioProviderMetadata {
 }
 
 export const OPENAI_COMPATIBLE_GATEWAY_TEMPLATES: readonly BaseUrlGatewayTemplate[] = [
+  { label: 'AvalAI (آوال‌ای‌آی)', baseUrl: 'https://api.avalai.ir/v1' },
+  { label: 'GapGPT (گپ‌جی‌پی‌تی)', baseUrl: 'https://api.gapgpt.app/v1' },
+  { label: 'MetisAI (متیس)', baseUrl: 'https://api.metisai.ir/openai/v1' },
+  { label: 'TalkBot (تاک‌بات)', baseUrl: 'https://api.talkbot.ir/v1' },
+  { label: 'Liara AI (لیارا)', baseUrl: 'https://ai.liara.ir/api/v1' },
   { label: 'OpenRouter', baseUrl: 'https://openrouter.ai/api/v1' },
-  { label: 'Groq', baseUrl: 'https://api.groq.com/openai/v1' },
   { label: 'DeepSeek', baseUrl: 'https://api.deepseek.com/v1' },
+  { label: 'Groq', baseUrl: 'https://api.groq.com/openai/v1' },
   { label: 'Together AI', baseUrl: 'https://api.together.xyz/v1' },
   { label: 'Fireworks AI', baseUrl: 'https://api.fireworks.ai/inference/v1' },
   { label: 'Mistral AI', baseUrl: 'https://api.mistral.ai/v1' },
@@ -182,32 +200,55 @@ export const OPENAI_COMPATIBLE_GATEWAY_TEMPLATES: readonly BaseUrlGatewayTemplat
   { label: 'Cerebras', baseUrl: 'https://api.cerebras.ai/v1' },
   { label: 'SambaNova', baseUrl: 'https://api.sambanova.ai/v1' },
   { label: 'Perplexity', baseUrl: 'https://api.perplexity.ai' },
-  { label: 'AvalAI', baseUrl: 'https://api.avalai.ir/v1' },
-  { label: 'GapGPT', baseUrl: 'https://api.gapgpt.app/v1' },
 ] as const;
 
 export const AI_PROVIDER_METADATA: Record<AiProviderType, ProviderMetadata> = {
   google_aistudio: {
     id: 'google_aistudio',
-    nameFa: 'Google Gemini (AI Studio)',
+    nameFa: 'Google Gemini (AI Studio / پروکسی)',
     shortName: 'Gemini',
     defaultBaseUrl: 'https://generativelanguage.googleapis.com',
     defaultModelId: 'gemini-4-hydrogen',
     apiKeyPlaceholder: 'AIzaSy...',
     descriptionFa:
-      'مدل‌های منتخب Gemini 4 Hydrogen و Gemini 3.8 Flash + پشتیبانی از جستجوی زنده گوگل، تبدیل صوت و سهمیه سازنده',
+      'پشتیبانی کامل از تمام مدل‌های Gemini (از جمله سری ۴ Carbon/Argon/Neon/Hydrogen و 3.8 Flash) + انتخاب آزاد شناسه مدل، جستجوی زنده گوگل، تبدیل صوت و سهمیه سازنده',
     supportsGoogleSearch: true,
-    supportsLiveModelDiscovery: false,
+    supportsLiveModelDiscovery: true,
+    baseUrlTemplates: [
+      { label: 'Google Official', baseUrl: 'https://generativelanguage.googleapis.com' },
+      { label: 'AvalAI Gemini Proxy', baseUrl: 'https://api.avalai.ir/v1' },
+      { label: 'GapGPT Proxy', baseUrl: 'https://api.gapgpt.app/v1' },
+    ],
     presets: [
       {
-        label: 'Gemini 4 Hydrogen (هیدروژن ۴)',
+        label: 'Gemini 4 Carbon (پرچمدار ۲۰۲۶)',
+        baseUrl: 'https://generativelanguage.googleapis.com',
+        modelId: 'gemini-4-carbon',
+      },
+      {
+        label: 'Gemini 4 Argon (مهندسی دقیق)',
+        baseUrl: 'https://generativelanguage.googleapis.com',
+        modelId: 'gemini-4-argon',
+      },
+      {
+        label: 'Gemini 4 Neon (تعمق بالا)',
+        baseUrl: 'https://generativelanguage.googleapis.com',
+        modelId: 'gemini-4-neon',
+      },
+      {
+        label: 'Gemini 4 Hydrogen (هیدروژن ۴ — پیش‌فرض)',
         baseUrl: 'https://generativelanguage.googleapis.com',
         modelId: 'gemini-4-hydrogen',
       },
       {
-        label: 'Gemini 3.8 Flash (فلش ۳.۸)',
+        label: 'Gemini 3.8 Flash (فلش ۳.۸ — سریع و اقتصادی)',
         baseUrl: 'https://generativelanguage.googleapis.com',
         modelId: 'gemini-3.8-flash',
+      },
+      {
+        label: 'Gemini 3.1 Pro',
+        baseUrl: 'https://generativelanguage.googleapis.com',
+        modelId: 'gemini-3.1-pro',
       },
     ],
   },
@@ -216,44 +257,67 @@ export const AI_PROVIDER_METADATA: Record<AiProviderType, ProviderMetadata> = {
     nameFa: 'OpenAI (سازگار با /v1/models)',
     shortName: 'OpenAI',
     defaultBaseUrl: 'https://api.openai.com/v1',
-    defaultModelId: '',
+    defaultModelId: 'gpt-6.2-sol',
     apiKeyPlaceholder: 'sk-proj-...',
     descriptionFa:
-      'اتصال مستقیم به OpenAI یا هر درگاه سازگار با دریافت زنده لیست مدل‌های روز از مسیر /v1/models یا ورود دستی شناسه مدل (بدون هیچ مدل پیش‌فرض قدیمی)',
+      'اتصال مستقیم به OpenAI یا هر درگاه ایرانی/بین‌المللی سازگار با دریافت زنده لیست مدل‌ها از /models یا ورود آزاد هر شناسه مدل دلخواه',
     supportsGoogleSearch: false,
     supportsLiveModelDiscovery: true,
     baseUrlTemplates: [
       { label: 'OpenAI Official', baseUrl: 'https://api.openai.com/v1' },
       ...OPENAI_COMPATIBLE_GATEWAY_TEMPLATES,
     ],
+    presets: [
+      { label: 'GPT-6.2 Astra (پرچمدار استدلالی)', baseUrl: 'https://api.openai.com/v1', modelId: 'gpt-6.2-astra' },
+      { label: 'GPT-6.2 Sol (متعادل مهندسی)', baseUrl: 'https://api.openai.com/v1', modelId: 'gpt-6.2-sol' },
+      { label: 'GPT-6 Luna (سریع و اقتصادی)', baseUrl: 'https://api.openai.com/v1', modelId: 'gpt-6-luna' },
+      { label: 'GPT-5', baseUrl: 'https://api.openai.com/v1', modelId: 'gpt-5' },
+      { label: 'GPT-5 Mini', baseUrl: 'https://api.openai.com/v1', modelId: 'gpt-5-mini' },
+    ],
   },
   anthropic: {
     id: 'anthropic',
-    nameFa: 'Anthropic (Messages API + /v1/models)',
+    nameFa: 'Anthropic Claude (Messages API + /v1/models)',
     shortName: 'Anthropic',
     defaultBaseUrl: 'https://api.anthropic.com/v1',
-    defaultModelId: '',
+    defaultModelId: 'claude-sonnet-5-5',
     apiKeyPlaceholder: 'sk-ant-...',
     descriptionFa:
-      'اتصال به Anthropic با دریافت زنده لیست مدل‌های روز اکانت شما از مسیر /v1/models یا ورود مستقیم شناسه مدل دلخواه (بدون پیش‌فرض قدیمی)',
+      'اتصال به Anthropic (مستقیم یا پروکسی) با پشتیبانی از Prompt Caching و Tool Use، دریافت زنده مدل‌ها از /v1/models یا ورود آزاد هر شناسه مدل دلخواه',
     supportsGoogleSearch: false,
     supportsLiveModelDiscovery: true,
     baseUrlTemplates: [
       { label: 'Anthropic Official', baseUrl: 'https://api.anthropic.com/v1' },
+      { label: 'AvalAI Anthropic Proxy', baseUrl: 'https://api.avalai.ir/v1' },
+    ],
+    presets: [
+      { label: 'Claude Opus 5.5 (پرچمدار ۲۰۲۶)', baseUrl: 'https://api.anthropic.com/v1', modelId: 'claude-opus-5-5' },
+      { label: 'Claude Sonnet 5.5 (بهترین تعادل فارسی و فنی)', baseUrl: 'https://api.anthropic.com/v1', modelId: 'claude-sonnet-5-5' },
+      { label: 'Claude Haiku 5.5 (فوق‌سریع و اقتصادی)', baseUrl: 'https://api.anthropic.com/v1', modelId: 'claude-haiku-5-5' },
+      { label: 'Claude Fable 5.2 (مستندسازی عمیق)', baseUrl: 'https://api.anthropic.com/v1', modelId: 'claude-fable-5-2' },
+      { label: 'Claude Opus 4.1', baseUrl: 'https://api.anthropic.com/v1', modelId: 'claude-opus-4-1-20250805' },
+      { label: 'Claude Opus 4', baseUrl: 'https://api.anthropic.com/v1', modelId: 'claude-opus-4-20250514' },
+      { label: 'Claude Sonnet 4', baseUrl: 'https://api.anthropic.com/v1', modelId: 'claude-sonnet-4-20250514' },
     ],
   },
   custom_openai: {
     id: 'custom_openai',
-    nameFa: 'هر ارائه‌دهنده OpenAI-Compatible (سفارشی)',
+    nameFa: 'درگاه‌های ایرانی و بین‌المللی (OpenAI-Compatible)',
     shortName: 'OpenAI-Compatible',
-    defaultBaseUrl: 'https://openrouter.ai/api/v1',
-    defaultModelId: '',
-    apiKeyPlaceholder: 'sk-or-... / gsk_... / Bearer token',
+    defaultBaseUrl: 'https://api.avalai.ir/v1',
+    defaultModelId: 'deepseek-v4-pro',
+    apiKeyPlaceholder: 'aa-... / sk-or-... / Bearer token',
     descriptionFa:
-      'پشتیبانی کامل از هر سرور یا درگاه OpenAI-Compatible (مانند OpenRouter، Groq، DeepSeek، Together، Fireworks، Mistral، xAI، Cerebras، AvalAI، vLLM، LiteLLM و سرور شخصی) با استعلام زنده لیست مدل‌ها از /models و انتخاب آزاد شناسه مدل',
+      'پشتیبانی کامل از تمام درگاه‌های ایرانی (AvalAI، GapGPT، MetisAI، TalkBot، Liara AI)، OpenRouter، DeepSeek، Groq، vLLM و سرور اختصاصی با کشف زنده مدل‌ها از /models و انتخاب آزاد هر مدل دلخواه',
     supportsGoogleSearch: false,
     supportsLiveModelDiscovery: true,
     baseUrlTemplates: OPENAI_COMPATIBLE_GATEWAY_TEMPLATES,
+    presets: [
+      { label: 'DeepSeek V4 Pro', baseUrl: 'https://api.deepseek.com/v1', modelId: 'deepseek-v4-pro' },
+      { label: 'DeepSeek Flash', baseUrl: 'https://api.deepseek.com/v1', modelId: 'deepseek-flash' },
+      { label: 'Qwen 4 Max', baseUrl: 'https://openrouter.ai/api/v1', modelId: 'qwen/qwen4-max' },
+      { label: 'Grok 4.7', baseUrl: 'https://api.x.ai/v1', modelId: 'grok-4.7' },
+    ],
   },
 };
 
@@ -312,7 +376,7 @@ export const WEB_SEARCH_PROVIDER_METADATA: Record<WebSearchProviderType, WebSear
     nameFa: 'Anthropic Web Search (ابزار بومی جستجو)',
     shortName: 'Anthropic Search',
     defaultBaseUrl: 'https://api.anthropic.com/v1',
-    defaultModelId: '',
+    defaultModelId: 'claude-sonnet-5-5',
     apiKeyPlaceholder: 'sk-ant-... (در صورت خالی بودن از کلید Anthropic اصلی استفاده می‌شود)',
     descriptionFa:
       'استفاده مستقیم از ابزار بومی web_search در API رسمی Anthropic همراه با ارجاع منابع — شناسه مدل را از /v1/models دریافت یا وارد کنید.',
@@ -324,10 +388,10 @@ export const WEB_SEARCH_PROVIDER_METADATA: Record<WebSearchProviderType, WebSear
     nameFa: 'OpenAI / OpenRouter Online Search (سازگار با OpenAI)',
     shortName: 'OpenAI-Compatible Search',
     defaultBaseUrl: 'https://openrouter.ai/api/v1',
-    defaultModelId: '',
+    defaultModelId: 'gpt-6.2-sol',
     apiKeyPlaceholder: 'sk-... یا sk-or-...',
     descriptionFa:
-      'پشتیبانی از هر مدل جستجوگر آنلاین در OpenAI، OpenRouter یا درگاه‌های OpenAI-Compatible — بدون هیچ مدل پیش‌فرض قدیمی.',
+      'پشتیبانی از هر مدل جستجوگر آنلاین در OpenAI، OpenRouter یا درگاه‌های OpenAI-Compatible.',
     needsOwnApiKey: true,
     supportsLiveModelDiscovery: true,
     baseUrlTemplates: [
@@ -358,7 +422,7 @@ export const AUDIO_TRANSCRIBE_PROVIDER_METADATA: Record<
     defaultModelId: 'gemini-4-hydrogen',
     apiKeyPlaceholder: 'AIzaSy... (اختیاری در صورت فعال بودن سهمیه سازنده)',
     descriptionFa:
-      'تبدیل دقیق فایل‌های صوتی کارگاهی فارسی (MP3/WAV/M4A/OGG/WEBM) به متن با مدل‌های Gemini 4 Hydrogen و Gemini 3.8 Flash — بدون نیاز به کلید اضافه هنگام فعال بودن سهمیه سازنده.',
+      'تبدیل دقیق فایل‌های صوتی کارگاهی فارسی (MP3/WAV/M4A/OGG/WEBM) به متن با مدل‌های Gemini — بدون نیاز به کلید اضافه هنگام فعال بودن سهمیه سازنده.',
     needsOwnApiKey: false,
     presets: [
       { label: 'Gemini 4 Hydrogen (هیدروژن ۴)', baseUrl: 'https://generativelanguage.googleapis.com', modelId: 'gemini-4-hydrogen' },
@@ -370,19 +434,19 @@ export const AUDIO_TRANSCRIBE_PROVIDER_METADATA: Record<
     nameFa: 'OpenAI Audio Transcriptions (/audio/transcriptions)',
     shortName: 'OpenAI STT',
     defaultBaseUrl: 'https://api.openai.com/v1',
-    defaultModelId: '',
+    defaultModelId: 'whisper-1',
     apiKeyPlaceholder: 'sk-proj-... (در صورت خالی بودن از کلید OpenAI اصلی استفاده می‌شود)',
     descriptionFa:
-      'ارسال مستقیم فایل صوتی به استاندارد /audio/transcriptions با شناسه مدل دلخواه شما (بدون مدل پیش‌فرض قدیمی).',
+      'ارسال مستقیم فایل صوتی به استاندارد /audio/transcriptions با شناسه مدل دلخواه شما.',
     needsOwnApiKey: true,
     supportsLiveModelDiscovery: true,
   },
   groq_whisper: {
     id: 'groq_whisper',
     nameFa: 'Groq Audio (/openai/v1/audio/transcriptions)',
-    shortName: 'Groq STT',
+    shortName: 'Groq Whisper',
     defaultBaseUrl: 'https://api.groq.com/openai/v1',
-    defaultModelId: '',
+    defaultModelId: 'whisper-large-v3-turbo',
     apiKeyPlaceholder: 'gsk_...',
     descriptionFa:
       'تبدیل فوق‌سریع ویس‌های کارگاهی از طریق درگاه OpenAI-Compatible سرویس Groq — شناسه مدل صوتی روز را از لیست مدل‌ها دریافت یا وارد کنید.',
@@ -394,7 +458,7 @@ export const AUDIO_TRANSCRIBE_PROVIDER_METADATA: Record<
     nameFa: 'درگاه صوتی OpenAI-Compatible سفارشی (HTTPS)',
     shortName: 'STT سفارشی',
     defaultBaseUrl: 'https://api.avalai.ir/v1',
-    defaultModelId: '',
+    defaultModelId: 'whisper-1',
     apiKeyPlaceholder: 'کلید API درگاه صوتی شما...',
     descriptionFa:
       'هر سرویس یا پروکسی HTTPS سازگار با استاندارد OpenAI /audio/transcriptions — با قابلیت استعلام لیست مدل‌ها و ورود آزاد Model ID.',
@@ -443,33 +507,40 @@ export const MODEL_TIER_METADATA: Record<ModelTierId, ModelTierMetadata> = {
     id: 'economy',
     titleFa: 'سطح ۱ · اقتصادی و سریع (Economy)',
     badgeFa: 'اقتصادی',
-    descriptionFa: 'برای غربالگری تناقض‌ها، یکدست‌سازی عنوان فصل‌ها و پرسش‌های کوتاه — کمترین مصرف توکن و هزینه',
+    descriptionFa: 'برای غربالگری تناقض‌ها، خلاصه غلتان، داور لایه ۲ و پرسش‌های کوتاه — کمترین مصرف توکن و هزینه',
     accentHex: '#14532D',
     recommendedModels: [
       { provider: 'google_aistudio', modelId: 'gemini-3.8-flash', baseUrl: 'https://generativelanguage.googleapis.com', label: 'Gemini 3.8 Flash' },
-      { provider: 'google_aistudio', modelId: 'gemini-4-hydrogen', baseUrl: 'https://generativelanguage.googleapis.com', label: 'Gemini 4 Hydrogen' },
+      { provider: 'anthropic', modelId: 'claude-haiku-5-5', baseUrl: 'https://api.anthropic.com/v1', label: 'Claude Haiku 5.5' },
+      { provider: 'openai', modelId: 'gpt-6-luna', baseUrl: 'https://api.openai.com/v1', label: 'GPT-6 Luna' },
+      { provider: 'custom_openai', modelId: 'deepseek-flash', baseUrl: 'https://api.deepseek.com/v1', label: 'DeepSeek Flash' },
     ],
   },
   balanced: {
     id: 'balanced',
     titleFa: 'سطح ۲ · متعادل و مهندسی (Balanced)',
     badgeFa: 'متعادل',
-    descriptionFa: 'برای ادغام معنایی چندفایلی، بازچینی فهرست، جستجوی وب و چت سردبیر — بهترین تعادل دقت فنی و سرعت',
+    descriptionFa: 'برای ترمیم جراحی (Patch)، ادغام معنایی چندفایلی، جستجوی وب و چت سردبیر — بهترین تعادل دقت و هزینه',
     accentHex: '#1E3A5F',
     recommendedModels: [
+      { provider: 'anthropic', modelId: 'claude-sonnet-5-5', baseUrl: 'https://api.anthropic.com/v1', label: 'Claude Sonnet 5.5' },
+      { provider: 'google_aistudio', modelId: 'gemini-4-argon', baseUrl: 'https://generativelanguage.googleapis.com', label: 'Gemini 4 Argon' },
       { provider: 'google_aistudio', modelId: 'gemini-4-hydrogen', baseUrl: 'https://generativelanguage.googleapis.com', label: 'Gemini 4 Hydrogen' },
-      { provider: 'google_aistudio', modelId: 'gemini-3.8-flash', baseUrl: 'https://generativelanguage.googleapis.com', label: 'Gemini 3.8 Flash' },
+      { provider: 'openai', modelId: 'gpt-6.2-sol', baseUrl: 'https://api.openai.com/v1', label: 'GPT-6.2 Sol' },
+      { provider: 'custom_openai', modelId: 'deepseek-v4-pro', baseUrl: 'https://api.deepseek.com/v1', label: 'DeepSeek V4 Pro' },
     ],
   },
   flagship: {
     id: 'flagship',
     titleFa: 'سطح ۳ · پرچمدار و استدلال عمیق (Flagship)',
     badgeFa: 'پرچمدار',
-    descriptionFa: 'فقط برای بازبینی عمیق نهایی، تحلیل جداول پیچیده WinOLS و نگارش مرجع — حداکثر کیفیت بدون هدررفت توکن',
+    descriptionFa: 'برای نگارش زیربخش‌های هارنس، بازبینی عمیق و نجات بخش‌های قرنطینه — حداکثر دقت علمی و فارسی',
     accentHex: '#7C2D12',
     recommendedModels: [
-      { provider: 'google_aistudio', modelId: 'gemini-4-hydrogen', baseUrl: 'https://generativelanguage.googleapis.com', label: 'Gemini 4 Hydrogen' },
-      { provider: 'google_aistudio', modelId: 'gemini-3.8-flash', baseUrl: 'https://generativelanguage.googleapis.com', label: 'Gemini 3.8 Flash' },
+      { provider: 'anthropic', modelId: 'claude-opus-5-5', baseUrl: 'https://api.anthropic.com/v1', label: 'Claude Opus 5.5' },
+      { provider: 'google_aistudio', modelId: 'gemini-4-carbon', baseUrl: 'https://generativelanguage.googleapis.com', label: 'Gemini 4 Carbon' },
+      { provider: 'openai', modelId: 'gpt-6.2-astra', baseUrl: 'https://api.openai.com/v1', label: 'GPT-6.2 Astra' },
+      { provider: 'google_aistudio', modelId: 'gemini-4-neon', baseUrl: 'https://generativelanguage.googleapis.com', label: 'Gemini 4 Neon' },
     ],
   },
 };
@@ -586,10 +657,64 @@ export interface MultiTierRecipe {
  */
 export const MULTI_TIER_RECIPES: readonly MultiTierRecipe[] = [
   {
+    id: 'nov2026_optimal_hybrid',
+    titleFa: 'پیشنهاد طلایی ۲۰۲۶: Claude Sonnet 5.5 + Gemini 3.8 Flash + Claude Opus 5.5',
+    subtitleFa: 'بهترین تعادل نثر فارسی، دقت فنی صفر-توهم، Prompt Caching (-۹۰٪) و هزینه بهینه برای تولید کتاب کامل',
+    badgeFa: 'بهترین عملکرد ۲۰۲۶',
+    primaryProvider: 'anthropic',
+    tiers: {
+      economy: {
+        provider: 'google_aistudio',
+        baseUrl: 'https://generativelanguage.googleapis.com',
+        modelId: 'gemini-3.8-flash',
+      },
+      balanced: {
+        provider: 'anthropic',
+        baseUrl: 'https://api.anthropic.com/v1',
+        modelId: 'claude-sonnet-5-5',
+      },
+      flagship: {
+        provider: 'anthropic',
+        baseUrl: 'https://api.anthropic.com/v1',
+        modelId: 'claude-opus-5-5',
+      },
+    },
+    taskTierMap: { ...DEFAULT_TASK_TIER_MAP },
+    optimizationMode: 'balanced_pro',
+    enablePromptCaching: true,
+  },
+  {
+    id: 'gemini_4_flagship_trio',
+    titleFa: 'ترکیب تمام‌گوگل ۲۰۲۶ (Gemini 4 Carbon / Argon + Flash 3.8)',
+    subtitleFa: 'مناسب برای بهره‌گیری کامل از کانتکست میلیونی گوگل، JSON Schema سخت‌گیرانه و جستجوی زنده بومی',
+    badgeFa: 'کانتکست میلیونی',
+    primaryProvider: 'google_aistudio',
+    tiers: {
+      economy: {
+        provider: 'google_aistudio',
+        baseUrl: 'https://generativelanguage.googleapis.com',
+        modelId: 'gemini-3.8-flash',
+      },
+      balanced: {
+        provider: 'google_aistudio',
+        baseUrl: 'https://generativelanguage.googleapis.com',
+        modelId: 'gemini-4-argon',
+      },
+      flagship: {
+        provider: 'google_aistudio',
+        baseUrl: 'https://generativelanguage.googleapis.com',
+        modelId: 'gemini-4-carbon',
+      },
+    },
+    taskTierMap: { ...DEFAULT_TASK_TIER_MAP },
+    optimizationMode: 'balanced_pro',
+    enablePromptCaching: true,
+  },
+  {
     id: 'gemini_optimal_duo',
-    titleFa: 'ترکیب پیش‌فرض Gemini (Hydrogen 4 + Flash 3.8)',
-    subtitleFa: 'کاملاً سازگار با سهمیه سازنده (App Owner): کارهای سریع با Flash 3.8 و بازبینی عمیق با Hydrogen 4',
-    badgeFa: 'تنها پیش‌فرض داخلی',
+    titleFa: 'ترکیب پیش‌فرض سهمیه سازنده Gemini (Hydrogen 4 + Flash 3.8)',
+    subtitleFa: 'سازگار با سهمیه پیش‌فرض (App Owner): کارهای سریع با Flash 3.8 و بازبینی عمیق با Hydrogen 4',
+    badgeFa: 'سهمیه سازنده',
     primaryProvider: 'google_aistudio',
     tiers: {
       economy: {
@@ -613,26 +738,53 @@ export const MULTI_TIER_RECIPES: readonly MultiTierRecipe[] = [
     enablePromptCaching: false,
   },
   {
+    id: 'anthropic_golden_trio',
+    titleFa: 'ترکیب ۳ سطحی Anthropic Claude (Haiku + Sonnet + Opus)',
+    subtitleFa: 'کارهای سبک روی Haiku، ممیزی/چت روی Sonnet و بازبینی عمیق روی Opus با فعال‌سازی کامل Prompt Caching',
+    badgeFa: 'تمام‌کلود',
+    primaryProvider: 'anthropic',
+    tiers: {
+      economy: {
+        provider: 'anthropic',
+        baseUrl: 'https://api.anthropic.com/v1',
+        modelId: 'claude-3-5-haiku-20241022',
+      },
+      balanced: {
+        provider: 'anthropic',
+        baseUrl: 'https://api.anthropic.com/v1',
+        modelId: 'claude-sonnet-4-20250514',
+      },
+      flagship: {
+        provider: 'anthropic',
+        baseUrl: 'https://api.anthropic.com/v1',
+        modelId: 'claude-opus-4-1-20250805',
+      },
+    },
+    taskTierMap: { ...DEFAULT_TASK_TIER_MAP },
+    optimizationMode: 'balanced_pro',
+    enablePromptCaching: true,
+  },
+  {
     id: 'custom_openai_flexible',
-    titleFa: 'الگوی ۳ سطحی OpenAI-Compatible (انتخاب آزاد مدل‌های روز)',
-    subtitleFa: 'هر ۳ سطح را به درگاه OpenAI-Compatible فعلی شما متصل می‌کند تا مدل‌های روز را از لیست زنده /models انتخاب کنید',
-    badgeFa: 'بدون مدل پیش‌فرض قدیمی',
+    titleFa: 'الگوی ۳ سطحی درگاه ایرانی / OpenAI-Compatible (انتخاب آزاد)',
+    subtitleFa: 'هر ۳ سطح را به درگاه AvalAI / GapGPT / OpenRouter / سرور اختصاصی شما متصل می‌کند با انتخاب آزاد هر مدل',
+    badgeFa: 'درگاه آزاد / ایرانی',
     primaryProvider: 'custom_openai',
     tiers: {
       economy: {
         provider: 'custom_openai',
-        baseUrl: 'https://openrouter.ai/api/v1',
-        modelId: '',
+        baseUrl: 'https://api.avalai.ir/v1',
+        modelId: 'deepseek-flash',
       },
       balanced: {
         provider: 'custom_openai',
-        baseUrl: 'https://openrouter.ai/api/v1',
-        modelId: '',
+        baseUrl: 'https://api.avalai.ir/v1',
+        modelId: 'deepseek-v4-pro',
       },
       flagship: {
         provider: 'custom_openai',
-        baseUrl: 'https://openrouter.ai/api/v1',
-        modelId: '',
+        baseUrl: 'https://api.avalai.ir/v1',
+        modelId: 'claude-opus-5-5',
       },
     },
     taskTierMap: { ...DEFAULT_TASK_TIER_MAP },
@@ -642,7 +794,7 @@ export const MULTI_TIER_RECIPES: readonly MultiTierRecipe[] = [
   {
     id: 'hybrid_gemini_and_custom',
     titleFa: 'ترکیب هیبریدی: کارهای سبک با Gemini Flash 3.8 + پرچمدار سفارشی شما',
-    subtitleFa: 'مراحل سبک و پرتکرار روی Gemini 3.8 Flash/Hydrogen 4 و مرحله نگارش/بازبینی نهایی روی مدل دلخواه شما در تب ۱',
+    subtitleFa: 'مراحل سبک روی Gemini 3.8 Flash و مرحله نگارش/بازبینی نهایی روی مدل دلخواه شما در تب ۱',
     badgeFa: 'هیبریدی اقتصادی',
     primaryProvider: 'custom_openai',
     tiers: {
@@ -658,7 +810,7 @@ export const MULTI_TIER_RECIPES: readonly MultiTierRecipe[] = [
       },
       flagship: {
         provider: 'custom_openai',
-        baseUrl: 'https://openrouter.ai/api/v1',
+        baseUrl: 'https://api.avalai.ir/v1',
         modelId: '',
       },
     },
@@ -918,12 +1070,14 @@ export function resolveTierSlotForTask(
   const tr = getEffectiveTierRouting(config);
   if (!tr.enabled) {
     const active = getActiveProviderCredentials(config);
+    const activeGoogleModel =
+      config.providers?.google_aistudio?.modelId?.trim() || fallbackGoogleModel;
     return {
       tierUsed: 'primary',
       provider: config.provider,
       baseUrl: active.baseUrl,
       apiKey: active.apiKey,
-      modelId: config.provider === 'google_aistudio' ? fallbackGoogleModel : active.modelId,
+      modelId: config.provider === 'google_aistudio' ? activeGoogleModel : active.modelId,
     };
   }
 
@@ -941,7 +1095,8 @@ export function resolveTierSlotForTask(
     apiKey: slot.apiKey.trim() || inheritedKey,
     modelId:
       slot.modelId.trim() ||
-      (slot.provider === 'google_aistudio' ? meta.defaultModelId : inheritedModelId),
+      inheritedModelId ||
+      (slot.provider === 'google_aistudio' ? meta.defaultModelId : ''),
   };
 }
 
@@ -1148,6 +1303,42 @@ export interface GoogleModelOption {
  */
 export const GOOGLE_MODEL_OPTIONS: readonly GoogleModelOption[] = [
   {
+    id: 'gemini-4-carbon',
+    shortName: 'Carbon 4',
+    displayName: 'Gemini 4 Carbon',
+    labelFa: 'Gemini 4 Carbon (کربن ۴ — پرچمدار ۲۰۲۶)',
+    descriptionFa: 'قدرتمندترین مدل گوگل در سال ۲۰۲۶ برای فصل‌بندی، ممیزی فنی عمیق و نجات بخش‌های پیچیده',
+    supportsXHigh: true,
+    softBudgetTokens: 250_000,
+    softRequestCap: 25,
+    inputRatePerMillionUsd: 1.5,
+    outputRatePerMillionUsd: 12.0,
+  },
+  {
+    id: 'gemini-4-argon',
+    shortName: 'Argon 4',
+    displayName: 'Gemini 4 Argon',
+    labelFa: 'Gemini 4 Argon (آرگون ۴ — مهندسی دقیق)',
+    descriptionFa: 'تعادل عالی بین استدلال عمیق، پیروی از Schema و هزینه مناسب برای کتاب‌سازی طولانی',
+    supportsXHigh: true,
+    softBudgetTokens: 300_000,
+    softRequestCap: 30,
+    inputRatePerMillionUsd: 0.5,
+    outputRatePerMillionUsd: 3.5,
+  },
+  {
+    id: 'gemini-4-neon',
+    shortName: 'Neon 4',
+    displayName: 'Gemini 4 Neon',
+    labelFa: 'Gemini 4 Neon (نئون ۴ — پرظرفیت)',
+    descriptionFa: 'مناسب تحلیل جداول WinOLS، مراجع سنگین و استدلال چندمرحله‌ای',
+    supportsXHigh: true,
+    softBudgetTokens: 250_000,
+    softRequestCap: 25,
+    inputRatePerMillionUsd: 1.25,
+    outputRatePerMillionUsd: 10.0,
+  },
+  {
     id: 'gemini-4-hydrogen',
     shortName: 'Hydrogen 4',
     displayName: 'Gemini 4 Hydrogen',
@@ -1178,17 +1369,28 @@ export const ALLOWED_GOOGLE_MODEL_IDS = new Set<string>(
 );
 
 export function normalizeGoogleModelId(raw?: string | null): AiModelId {
-  if (raw === 'gemini-3.8-flash' || raw === 'gemini-3.1-flash-lite') {
-    return 'gemini-3.8-flash';
-  }
-  return 'gemini-4-hydrogen';
+  const cleaned = sanitizeCustomModelId(raw || '');
+  if (!cleaned) return 'gemini-4-hydrogen';
+  if (cleaned === 'gemini-3.1-flash-lite') return 'gemini-3.8-flash';
+  return cleaned;
 }
 
 export function getGoogleModelMeta(modelId?: string | null): GoogleModelOption {
   const normalized = normalizeGoogleModelId(modelId);
-  return (
-    GOOGLE_MODEL_OPTIONS.find((m) => m.id === normalized) || GOOGLE_MODEL_OPTIONS[0]
-  );
+  const found = GOOGLE_MODEL_OPTIONS.find((m) => m.id === normalized);
+  if (found) return found;
+  return {
+    id: normalized,
+    shortName: normalized,
+    displayName: normalized,
+    labelFa: `${normalized} (مدل سفارشی)`,
+    descriptionFa: 'مدل اختصاصی یا جدید انتخاب‌شده توسط کاربر',
+    supportsXHigh: true,
+    softBudgetTokens: 300_000,
+    softRequestCap: 35,
+    inputRatePerMillionUsd: 0.5,
+    outputRatePerMillionUsd: 2.5,
+  };
 }
 
 export type LiveQuotaHealth =

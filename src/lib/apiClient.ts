@@ -6,11 +6,14 @@ import {
   ProjectBundleDto,
   ProjectSummaryDto,
   SourceFileFormat,
+  ValidationDomain,
   WorkflowMode,
 } from './bookTypes';
 import {
   AiProviderConfig,
+  AiProviderType,
   AiQuotaProbeResponse,
+  DiscoveredProviderModel,
   getActiveProviderCredentials,
   getEffectiveAudioRoute,
   getEffectiveTierRouting,
@@ -23,6 +26,10 @@ import {
   parseNdjsonBuffer,
 } from './deepReviewStream';
 import type { ProjectRevisionDto } from './changeLogUtils';
+import type {
+  Stage5ComparativePieItem,
+  Stage5QualityMetrics,
+} from './stage5QualityMetrics';
 import type {
   GlossaryTermEntry,
   HarnessState,
@@ -59,8 +66,14 @@ function buildProviderHeaders(config?: AiProviderConfig | null): Record<string, 
   if (creds.apiKey.trim()) {
     headers['X-AI-Api-Key'] = creds.apiKey.trim();
   }
-  if (config.provider !== 'google_aistudio' && creds.modelId.trim()) {
+  if (creds.modelId.trim()) {
     headers['X-AI-Custom-Model'] = creds.modelId.trim();
+  }
+  if (config.customModels && Object.keys(config.customModels).length > 0) {
+    const encodedCustomModels = encodeUtf8Base64(JSON.stringify(config.customModels));
+    if (encodedCustomModels) {
+      headers['X-AI-Custom-Models'] = encodedCustomModels;
+    }
   }
 
   // Forward Slot 2: Independent Web Search route headers (session-memory only)
@@ -177,6 +190,22 @@ export class ApiClient {
     );
   }
 
+  probeProviderModels(payload: {
+    provider: AiProviderType;
+    baseUrl?: string;
+    apiKey?: string;
+  }) {
+    return this.request<{
+      ok: boolean;
+      models: DiscoveredProviderModel[];
+      baseUrlUsed?: string;
+      error?: string;
+    }>('/api/projects/probe-models', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+  }
+
   listProjects() {
     return this.request<{ projects: ProjectSummaryDto[] }>('/api/projects');
   }
@@ -266,6 +295,16 @@ export class ApiClient {
     });
   }
 
+  getProjectQualityMetrics(projectId: string) {
+    return this.request<{
+      projectId: string;
+      metrics: Stage5QualityMetrics;
+      chartData: Stage5ComparativePieItem[];
+      serverGeneratedAt: string;
+      validationDomain?: ValidationDomain;
+    }>(`/api/projects/${encodeURIComponent(projectId)}/quality-metrics`);
+  }
+
   ingestFilesBatch(
     projectId: string,
     payload: {
@@ -310,6 +349,7 @@ export class ApiClient {
         webEnrichmentJson?: Record<string, unknown> | null;
       }>;
       reassignments?: Array<{ fromNodeId: string; toNodeId: string }>;
+      validationDomain?: ValidationDomain;
     }
   ) {
     return this.request<ProjectBundleDto>(
@@ -543,7 +583,7 @@ export class ApiClient {
 
   initHarnessBlueprint(
     projectId: string,
-    payload?: { budgetCapUsd?: number; forceReset?: boolean }
+    payload?: { budgetCapUsd?: number; forceReset?: boolean; validationDomain?: ValidationDomain }
   ) {
     return this.request<{
       ok: boolean;
@@ -563,7 +603,11 @@ export class ApiClient {
 
   approveHarnessBlueprint(
     projectId: string,
-    payload?: { budgetCapUsd?: number; glossaryEntries?: GlossaryTermEntry[] }
+    payload?: {
+      budgetCapUsd?: number;
+      glossaryEntries?: GlossaryTermEntry[];
+      validationDomain?: ValidationDomain;
+    }
   ) {
     return this.request<{
       ok: boolean;
@@ -619,6 +663,32 @@ export class ApiClient {
       {
         method: 'POST',
         body: JSON.stringify(payload),
+      }
+    );
+  }
+
+  retryQuarantineFlagship(
+    projectId: string,
+    sectionId: string,
+    payload?: { allowBudgetOverride?: boolean },
+    requestOptions?: { signal?: AbortSignal }
+  ) {
+    return this.request<{
+      ok: boolean;
+      done: boolean;
+      pausedByBudgetCap?: boolean;
+      sectionId?: string;
+      outcome?: 'verified' | 'quarantined' | 'budget_paused' | 'completed';
+      layer1?: Layer1AuditResult;
+      layer2?: Layer2AuditResult;
+      harnessState: HarnessState;
+      bundle: ProjectBundleDto;
+    }>(
+      `/api/projects/${encodeURIComponent(projectId)}/harness/quarantine/${encodeURIComponent(sectionId)}/retry`,
+      {
+        method: 'POST',
+        body: JSON.stringify(payload || {}),
+        signal: requestOptions?.signal,
       }
     );
   }

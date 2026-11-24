@@ -68,15 +68,15 @@ service cloud.firestore {
         && data.email is string && data.email.size() <= 200
         && data.defaultWorkflowMode is string && data.defaultWorkflowMode.size() <= 32
         && data.defaultWorkflowMode in ['single_polish', 'multi_merge', 'master_update', 'raw_synthesis']
-        && data.defaultAiModel is string && data.defaultAiModel.size() <= 48
-        && data.defaultAiModel in ['gemini-4-hydrogen', 'gemini-3.1-flash-lite']
+        && data.defaultAiModel is string && data.defaultAiModel.size() >= 1 && data.defaultAiModel.size() <= 120
+        && data.defaultAiModel.matches('^[a-zA-Z0-9._:/-]+$')
         && data.defaultThinkingLevel is string && data.defaultThinkingLevel.size() <= 16
         && data.defaultThinkingLevel in ['MINIMAL', 'LOW', 'MEDIUM', 'HIGH', 'XHIGH']
         && data.defaultFontFamily is string && data.defaultFontFamily.size() >= 1 && data.defaultFontFamily.size() <= 64
         && data.defaultPageSize is string && data.defaultPageSize.size() <= 8
         && data.defaultPageSize in ['A4', 'B5']
         && data.googleSearchMode is string && data.googleSearchMode.size() <= 32
-        && data.googleSearchMode in ['off', 'conflicts_only', 'conflicts_and_enrichment']
+        && data.googleSearchMode in ['off', 'conflicts_only', 'conflicts_and_enrichment', 'full_document_enrichment']
         && data.createdAt is timestamp
         && data.updatedAt is timestamp;
     }

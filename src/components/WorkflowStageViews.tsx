@@ -7,7 +7,9 @@ import {
   Eye,
   FileAudio,
   FileCode,
+  FileSpreadsheet,
   FileText,
+  FolderOpen,
   Layers,
   Loader2,
   Mic,
@@ -20,17 +22,23 @@ import {
   AiModelId,
   AuditReportDto,
   ConflictDto,
+  DeepReviewReportDto,
   DocxExportConfig,
+  OutlineNodeDto,
   ParsedBook,
   ProjectBundleDto,
   ProjectSummaryDto,
   SourceFileDto,
+  ValidationDomain,
   WorkflowMode,
 } from '../lib/bookTypes';
 import type { AiQuotaProbeResponse } from '../lib/aiProviderConfig';
+import type { HarnessState } from '../lib/harness/types';
+import type { WinolsExtractionReport } from '../lib/winolsMapGuide';
 import { BOOK_WORKFLOW_STAGES, WorkflowProgressSnapshot } from '../lib/bookWorkflow';
 import { toPersianDigits } from '../lib/formatParsers';
 import { ProjectsDashboardWidget } from './ProjectsDashboardWidget';
+import { Stage5QualityDashboard } from './Stage5QualityDashboard';
 
 interface StageIngestViewProps {
   projects: ProjectSummaryDto[];
@@ -54,6 +62,7 @@ interface StageIngestViewProps {
   onGoToStage2: () => void;
   onLoadDemoFiles: () => void;
   onOpenMobileSidebar: () => void;
+  onOpenGoogleDriveImport?: () => void;
 }
 
 const ROLE_LABELS: Record<string, string> = {
@@ -84,6 +93,7 @@ export const StageIngestView: React.FC<StageIngestViewProps> = ({
   onGoToStage2,
   onLoadDemoFiles,
   onOpenMobileSidebar,
+  onOpenGoogleDriveImport,
 }) => {
   const audioInputRef = useRef<HTMLInputElement | null>(null);
   const totalWords = sourceFiles.reduce((sum, f) => sum + (f.wordCount || 0), 0);
@@ -213,6 +223,17 @@ export const StageIngestView: React.FC<StageIngestViewProps> = ({
               </button>
             )}
 
+            {onOpenGoogleDriveImport && (
+              <button
+                type="button"
+                onClick={onOpenGoogleDriveImport}
+                className="inline-flex min-h-[44px] items-center gap-2 rounded-xl border border-[#C6D5E6] bg-[#EEF3F8] px-5 py-2.5 text-xs sm:text-sm font-bold text-[#1E3A5F] hover:bg-[#DFEAF5] cursor-pointer"
+              >
+                <FolderOpen className="h-4 w-4" />
+                افزودن از Google Drive / Sheets
+              </button>
+            )}
+
             <button
               type="button"
               onClick={onOpenMobileSidebar}
@@ -274,23 +295,35 @@ export const StageIngestView: React.FC<StageIngestViewProps> = ({
           </p>
         </div>
 
-        {queuedFilesCount > 0 && (
-          <button
-            type="button"
-            disabled={processing}
-            onClick={() => void onRunStage1Ingest()}
-            className="inline-flex min-h-[40px] items-center gap-1.5 rounded-lg border border-[#1E3A5F] bg-[#EEF3F8] px-3.5 py-2 text-xs font-bold text-[#1E3A5F] hover:bg-[#DFEAF5] disabled:opacity-50 cursor-pointer"
-          >
-            {processing ? (
-              <Loader2 className="h-4 w-4 animate-spin" />
-            ) : (
-              <Upload className="h-4 w-4" />
-            )}
-            <span>
-              جایگزینی و استخراج {toPersianDigits(queuedFilesCount)} فایل جدید صف
-            </span>
-          </button>
-        )}
+        <div className="flex flex-wrap items-center gap-2">
+          {onOpenGoogleDriveImport && (
+            <button
+              type="button"
+              onClick={onOpenGoogleDriveImport}
+              className="inline-flex min-h-[40px] items-center gap-1.5 rounded-lg border border-[#C6D5E6] bg-white px-3.5 py-2 text-xs font-bold text-[#1E3A5F] hover:bg-[#EEF3F8] cursor-pointer"
+            >
+              <FolderOpen className="h-4 w-4" />
+              <span>افزودن از Google Drive / Sheets</span>
+            </button>
+          )}
+          {queuedFilesCount > 0 && (
+            <button
+              type="button"
+              disabled={processing}
+              onClick={() => void onRunStage1Ingest()}
+              className="inline-flex min-h-[40px] items-center gap-1.5 rounded-lg border border-[#1E3A5F] bg-[#EEF3F8] px-3.5 py-2 text-xs font-bold text-[#1E3A5F] hover:bg-[#DFEAF5] disabled:opacity-50 cursor-pointer"
+            >
+              {processing ? (
+                <Loader2 className="h-4 w-4 animate-spin" />
+              ) : (
+                <Upload className="h-4 w-4" />
+              )}
+              <span>
+                جایگزینی و استخراج {toPersianDigits(queuedFilesCount)} فایل جدید صف
+              </span>
+            </button>
+          )}
+        </div>
       </div>
 
       {/* Stage 1 KPIs */}
@@ -408,28 +441,52 @@ export const StageIngestView: React.FC<StageIngestViewProps> = ({
 
 interface StageExportViewProps {
   book: ParsedBook;
+  projectId?: string | null;
   auditReport: AuditReportDto | null;
   conflicts: ConflictDto[];
+  outlineNodes?: OutlineNodeDto[];
+  winolsGuideReport?: WinolsExtractionReport | null;
+  harnessState?: HarnessState | null;
+  deepReviewReport?: DeepReviewReportDto | null;
+  validationDomain?: ValidationDomain;
   config: DocxExportConfig;
   exportingDocx: boolean;
+  onFetchServerMetrics?: (projectId: string) => Promise<{
+    metrics: any;
+    chartData?: any;
+    serverGeneratedAt?: string;
+  }>;
   onDownloadDocx: () => Promise<void>;
   onDownloadMarkdown: () => void;
   onPrintPdf: () => void;
   onGoToStage4Preview: () => void;
   onGoToStage2Audit: () => void;
+  onGoToStage3Outline?: () => void;
+  onGoToStage4Winols?: () => void;
+  onOpenGoogleWorkspaceExport?: () => void;
 }
 
 export const StageExportView: React.FC<StageExportViewProps> = ({
   book,
+  projectId = null,
   auditReport,
   conflicts,
+  outlineNodes = [],
+  winolsGuideReport = null,
+  harnessState = null,
+  deepReviewReport = null,
+  validationDomain = 'ecu_winols',
   config,
   exportingDocx,
+  onFetchServerMetrics,
   onDownloadDocx,
   onDownloadMarkdown,
   onPrintPdf,
   onGoToStage4Preview,
   onGoToStage2Audit,
+  onGoToStage3Outline,
+  onGoToStage4Winols,
+  onOpenGoogleWorkspaceExport,
 }) => {
   const openConflicts = conflicts.filter((c) => c.status === 'open').length;
   const totalCallouts = book.chapters.reduce(
@@ -547,6 +604,23 @@ export const StageExportView: React.FC<StageExportViewProps> = ({
         </div>
       </div>
 
+      {/* Stage 5 Compact Quality & WinOLS Compliance Donut Dashboard */}
+      <Stage5QualityDashboard
+        book={book}
+        projectId={projectId}
+        outlineNodes={outlineNodes}
+        auditReport={auditReport}
+        conflicts={conflicts}
+        winolsGuideReport={winolsGuideReport}
+        harnessState={harnessState}
+        deepReviewReport={deepReviewReport}
+        validationDomain={validationDomain}
+        onFetchServerMetrics={onFetchServerMetrics}
+        onGoToStage2Audit={onGoToStage2Audit}
+        onGoToStage3Outline={onGoToStage3Outline}
+        onGoToStage4Winols={onGoToStage4Winols}
+      />
+
       {openConflicts > 0 && (
         <div className="flex items-start gap-2.5 rounded-xl border border-[#F2B8B5] bg-[#FEF3F2] px-4 py-3 text-xs text-[#9A2E1A]">
           <AlertTriangle className="h-4 w-4 shrink-0 mt-0.5" />
@@ -655,6 +729,32 @@ export const StageExportView: React.FC<StageExportViewProps> = ({
           </button>
         </div>
       </div>
+
+      {onOpenGoogleWorkspaceExport && (
+        <div className="rounded-xl border border-[#C7DDD0] bg-[#F2F7F4] p-4 sm:p-5 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+          <div className="flex items-start gap-3">
+            <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-[#14532D] text-white">
+              <FileSpreadsheet className="h-5 w-5" />
+            </div>
+            <div className="space-y-0.5">
+              <h4 className="text-xs sm:text-sm font-extrabold text-[#14532D]">
+                ارسال به Google Drive و ساخت گزارش در Google Sheets
+              </h4>
+              <p className="text-[11px] text-[#3F6B50] leading-5">
+                ذخیره فایل Word (.docx) یا Markdown در درایو شخصی، به‌همراه خروجی جدول ممیزی پوشش، فصل‌ها و نقشه‌های WinOLS در Google Sheets (با تأییدیه قبل از هر تغییر).
+              </p>
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={onOpenGoogleWorkspaceExport}
+            className="min-h-[42px] inline-flex items-center justify-center gap-2 rounded-xl bg-[#14532D] px-4 py-2 text-xs font-extrabold text-white hover:bg-[#0F3F22] cursor-pointer shrink-0 shadow-xs"
+          >
+            <FolderOpen className="h-4 w-4" />
+            <span>ارسال به Drive / Sheets</span>
+          </button>
+        </div>
+      )}
     </div>
   );
 };

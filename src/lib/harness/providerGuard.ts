@@ -66,18 +66,39 @@ export function detectProviderFlavor(params: {
 /**
  * Resolves the exact capability profile for a provider + baseUrl + modelId combination.
  */
+export interface CustomCapabilityOverride {
+  supportsJsonSchema?: boolean;
+  supportsPromptCaching?: boolean;
+  supportsTools?: boolean;
+}
+
 export function resolveProviderCapabilityProfile(params: {
   provider: AiProviderType;
   baseUrl?: string | null;
   modelId?: string | null;
+  customProfile?: CustomCapabilityOverride | null;
 }): ProviderCapabilityProfile {
   const modelId = (params.modelId || '').trim();
   const lowModel = modelId.toLowerCase();
   const flavor = detectProviderFlavor({ provider: params.provider, baseUrl: params.baseUrl });
   const isReasoning = isReasoningModelId(modelId);
+  const applyOverride = (base: ProviderCapabilityProfile): ProviderCapabilityProfile => {
+    if (!params.customProfile) return base;
+    return {
+      ...base,
+      supportsJsonSchema:
+        typeof params.customProfile.supportsJsonSchema === 'boolean'
+          ? params.customProfile.supportsJsonSchema
+          : base.supportsJsonSchema,
+      supportsPromptCaching:
+        typeof params.customProfile.supportsPromptCaching === 'boolean'
+          ? params.customProfile.supportsPromptCaching
+          : base.supportsPromptCaching,
+    };
+  };
 
   if (flavor === 'google_aistudio') {
-    return {
+    return applyOverride({
       flavor,
       provider: params.provider,
       modelId,
@@ -92,12 +113,12 @@ export function resolveProviderCapabilityProfile(params: {
       supportsReasoningEffort: false,
       supportsAnthropicCacheControl: false,
       reportsCacheTelemetryNatively: true,
-    };
+    });
   }
 
   if (flavor === 'anthropic') {
     const isHaiku = lowModel.includes('haiku');
-    return {
+    return applyOverride({
       flavor,
       provider: params.provider,
       modelId,
@@ -112,11 +133,11 @@ export function resolveProviderCapabilityProfile(params: {
       supportsReasoningEffort: false,
       supportsAnthropicCacheControl: true,
       reportsCacheTelemetryNatively: true,
-    };
+    });
   }
 
   if (flavor === 'openai') {
-    return {
+    return applyOverride({
       flavor,
       provider: params.provider,
       modelId,
@@ -131,16 +152,16 @@ export function resolveProviderCapabilityProfile(params: {
       supportsReasoningEffort: isReasoning,
       supportsAnthropicCacheControl: false,
       reportsCacheTelemetryNatively: true,
-    };
+    });
   }
 
   if (flavor === 'openrouter') {
-    return {
+    return applyOverride({
       flavor,
       provider: params.provider,
       modelId,
       isReasoningModel: isReasoning,
-      supportsPromptCaching: lowModel.includes('claude') || lowModel.includes('gpt-4') || lowModel.includes('gemini'),
+      supportsPromptCaching: lowModel.includes('claude') || lowModel.includes('gpt-4') || lowModel.includes('gpt-5') || lowModel.includes('gpt-6') || lowModel.includes('gemini'),
       minCachePrefixTokens: lowModel.includes('haiku') || lowModel.includes('gemini') ? 2048 : 1024,
       cacheTtlMs: 5 * 60 * 1000,
       supportsJsonSchema: false, // Safer fallback to json_object across heterogeneous OpenRouter backends
@@ -150,12 +171,11 @@ export function resolveProviderCapabilityProfile(params: {
       supportsReasoningEffort: isReasoning,
       supportsAnthropicCacheControl: false,
       reportsCacheTelemetryNatively: false,
-    };
+    });
   }
 
-  // 9Router and generic custom OpenAI-compatible proxies:
-  // Conservative compatibility mode: never assume json_schema, thinkingConfig, or cache_control support
-  return {
+  // 9Router and generic custom OpenAI-compatible proxies (including Iranian gateways):
+  return applyOverride({
     flavor,
     provider: params.provider,
     modelId,
@@ -170,7 +190,7 @@ export function resolveProviderCapabilityProfile(params: {
     supportsReasoningEffort: isReasoning,
     supportsAnthropicCacheControl: false,
     reportsCacheTelemetryNatively: false,
-  };
+  });
 }
 
 export interface RoleReasoningCap {
@@ -810,19 +830,29 @@ export function inferModelTierRank(modelId: string): number {
   const low = (modelId || '').toLowerCase();
   if (
     low.includes('opus') ||
+    low.includes('fable-5') ||
+    low.includes('gpt-6.2-astra') ||
+    low.includes('gemini-4-carbon') ||
     low.includes('gemini-4-neon') ||
+    low.includes('gemini-3.1-pro') ||
     low.includes('gemini-2.5-pro') ||
+    low.includes('qwen4-max') ||
     /(?:^|\/|-)(?:o3|o1)(?:$|-)/.test(low) ||
-    low.includes('gpt-4.1') && !low.includes('mini') && !low.includes('nano')
+    (low.includes('gpt-4.1') && !low.includes('mini') && !low.includes('nano'))
   ) {
     return 3; // Flagship
   }
   if (
     low.includes('sonnet') ||
+    low.includes('gpt-6.2-sol') ||
+    (low.includes('gpt-5') && !low.includes('mini') && !low.includes('nano')) ||
+    low.includes('gemini-4-argon') ||
     low.includes('gemini-4-hydrogen') ||
     (low.includes('gpt-4o') && !low.includes('mini')) ||
+    low.includes('deepseek-v4-pro') ||
     low.includes('deepseek-reasoner') ||
     low.includes('deepseek-r1') ||
+    low.includes('grok-4.7') ||
     low.includes('o4-mini') ||
     low.includes('o3-mini')
   ) {

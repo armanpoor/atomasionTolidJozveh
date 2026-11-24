@@ -28,12 +28,15 @@ import {
   AUDIO_TRANSCRIBE_PROVIDER_LIST,
   AUDIO_TRANSCRIBE_PROVIDER_METADATA,
   AudioTranscribeProviderType,
+  CustomModelProfile,
+  DiscoveredProviderModel,
   getActiveProviderCredentials,
   getEffectiveAudioRoute,
   getEffectiveTierRouting,
   getEffectiveWebSearchRoute,
   GOOGLE_MODEL_OPTIONS,
   normalizeKeyAuthMode,
+  OPENAI_COMPATIBLE_GATEWAY_TEMPLATES,
   resolveCapabilityRoutingPlan,
   sanitizeCustomModelId,
   validateCustomBaseUrl,
@@ -53,6 +56,16 @@ interface AiProviderModalProps {
   probing: boolean;
   onSaveProviderConfig: (next: AiProviderConfig, nextGoogleModel?: AiModelId) => void;
   onRunLiveProbe: (overrideConfig?: AiProviderConfig, overrideModel?: AiModelId) => Promise<void>;
+  onProbeModels?: (payload: {
+    provider: AiProviderType;
+    baseUrl?: string;
+    apiKey?: string;
+  }) => Promise<{
+    ok: boolean;
+    models: DiscoveredProviderModel[];
+    baseUrlUsed?: string;
+    error?: string;
+  }>;
 }
 
 type ModalCapabilityTab = 'primary' | 'tiers' | 'search' | 'audio';
@@ -77,6 +90,7 @@ export const AiProviderModal: React.FC<AiProviderModalProps> = ({
   probing,
   onSaveProviderConfig,
   onRunLiveProbe,
+  onProbeModels,
 }) => {
   const titleId = useId();
   const closeBtnRef = useRef<HTMLButtonElement | null>(null);
@@ -88,12 +102,20 @@ export const AiProviderModal: React.FC<AiProviderModalProps> = ({
   const [showSearchKey, setShowSearchKey] = useState(false);
   const [showAudioKey, setShowAudioKey] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
+  const [probingModels, setProbingModels] = useState(false);
+  const [discoveredModels, setDiscoveredModels] = useState<DiscoveredProviderModel[]>([]);
+  const [discoveryStatusMsg, setDiscoveryStatusMsg] = useState<string | null>(null);
+  const [modelFilterQuery, setModelFilterQuery] = useState('');
+  const [showCustomProfileForm, setShowCustomProfileForm] = useState(false);
 
   useEffect(() => {
     if (!open) return;
     setDraft(providerConfig);
     setDraftModel(aiModel);
     setFormError(null);
+    setDiscoveredModels([]);
+    setDiscoveryStatusMsg(null);
+    setModelFilterQuery('');
   }, [open, providerConfig, aiModel]);
 
   useEffect(() => {
@@ -163,7 +185,77 @@ export const AiProviderModal: React.FC<AiProviderModalProps> = ({
         provider: providerId,
       })
     );
+    setDiscoveredModels([]);
+    setDiscoveryStatusMsg(null);
     setFormError(null);
+  };
+
+  const activeModelIdValue =
+    draft.provider === 'google_aistudio'
+      ? draftModel || activeCreds.modelId || activeMeta.defaultModelId
+      : activeCreds.modelId;
+
+  const activeCustomProfile: CustomModelProfile = draft.customModels?.[activeModelIdValue] || {
+    modelId: activeModelIdValue,
+    inputPerMillionUsd: 0.5,
+    outputPerMillionUsd: 2.0,
+    contextWindow: 128000,
+    supportsJsonSchema: true,
+    supportsPromptCaching: false,
+    supportsTools: true,
+  };
+
+  const upsertCustomModelProfile = (patch: Partial<CustomModelProfile>) => {
+    const cleanId = activeModelIdValue.trim();
+    if (!cleanId) return;
+    setDraft((prev) => ({
+      ...prev,
+      customModels: {
+        ...(prev.customModels || {}),
+        [cleanId]: {
+          ...activeCustomProfile,
+          ...patch,
+          modelId: cleanId,
+        },
+      },
+    }));
+  };
+
+  const handleDiscoverModels = async () => {
+    if (!onProbeModels) return;
+    const effectiveUrl = (activeCreds.baseUrl.trim() || activeMeta.defaultBaseUrl).replace(/\/+$/, '');
+    const urlCheck = validateCustomBaseUrl(effectiveUrl);
+    if (!urlCheck.valid) {
+      setFormError(urlCheck.error || 'آدرس Base URL برای کشف مدل‌ها معتبر نیست.');
+      return;
+    }
+    setFormError(null);
+    setDiscoveryStatusMsg(null);
+    setProbingModels(true);
+    try {
+      const res = await onProbeModels({
+        provider: draft.provider,
+        baseUrl: effectiveUrl,
+        apiKey: activeCreds.apiKey.trim() || undefined,
+      });
+      if (!res.ok) {
+        setDiscoveredModels([]);
+        setDiscoveryStatusMsg(res.error || 'دریافت فهرست مدل‌ها از درگاه ناموفق بود.');
+      } else {
+        setDiscoveredModels(res.models || []);
+        setDiscoveryStatusMsg(
+          res.models.length > 0
+            ? `${toPersianDigits(res.models.length)} مدل زنده از درگاه کشف شد. روی هر مدل کلیک کنید تا جایگزین شود.`
+            : res.error || 'هیچ مدلی از درگاه برنگشت.'
+        );
+      }
+    } catch (err) {
+      setDiscoveryStatusMsg(
+        err instanceof Error ? err.message : 'خطا در استعلام زنده /models از درگاه.'
+      );
+    } finally {
+      setProbingModels(false);
+    }
   };
 
   const updateSearchRoute = (
@@ -230,8 +322,10 @@ export const AiProviderModal: React.FC<AiProviderModalProps> = ({
       return `حالت «کلید اختصاصی من» برای ${activeMeta.shortName} انتخاب شده است. لطفاً API Key خود را وارد کنید یا حالت «ابتدا سهمیه سازنده» را برگزینید.`;
     }
 
-    if (draft.provider !== 'google_aistudio' && !sanitizeCustomModelId(creds.modelId)) {
-      return `لطفاً شناسه مدل (Model ID) معتبر برای ${activeMeta.shortName} وارد کنید.`;
+    const activeChosenModel =
+      draft.provider === 'google_aistudio' ? draftModel || creds.modelId : creds.modelId;
+    if (!sanitizeCustomModelId(activeChosenModel)) {
+      return `لطفاً شناسه مدل (Model ID) معتبر برای ${activeMeta.shortName} وارد کنید (حروف انگلیسی، اعداد و ./_:-).`;
     }
 
     // Validate Web Search custom Base URL if non-default selected
@@ -287,7 +381,7 @@ export const AiProviderModal: React.FC<AiProviderModalProps> = ({
           apiKey: creds.apiKey.trim(),
           modelId:
             draft.provider === 'google_aistudio'
-              ? draftModel
+              ? draftModel.trim() || activeMeta.defaultModelId
               : creds.modelId.trim() || activeMeta.defaultModelId,
         },
       },
@@ -604,7 +698,43 @@ export const AiProviderModal: React.FC<AiProviderModalProps> = ({
                   </div>
                 </div>
 
-                {/* Quick Presets (Featuring Claude Opus 4.1, Opus 4, Sonnet 4, OpenRouter, etc.) */}
+                {/* Gateway Base URL Templates (Iranian & Global Proxies — preserves chosen Model ID) */}
+                {(activeMeta.baseUrlTemplates?.length ||
+                  draft.provider === 'openai' ||
+                  draft.provider === 'custom_openai') && (
+                  <div className="space-y-1.5 border-t border-[#EFECE4] pt-3">
+                    <div className="text-[11px] font-bold text-[#57534E]">
+                      درگاه‌های آماده (ایرانی و بین‌المللی — تغییر Base URL بدون حذف مدل):
+                    </div>
+                    <div className="flex flex-wrap gap-1.5">
+                      {(activeMeta.baseUrlTemplates && activeMeta.baseUrlTemplates.length > 0
+                        ? activeMeta.baseUrlTemplates
+                        : OPENAI_COMPATIBLE_GATEWAY_TEMPLATES
+                      ).map((gw) => {
+                        const isPicked =
+                          activeCreds.baseUrl.replace(/\/+$/, '') === gw.baseUrl.replace(/\/+$/, '');
+                        return (
+                          <button
+                            key={gw.label}
+                            type="button"
+                            onClick={() =>
+                              updateProviderField(draft.provider, { baseUrl: gw.baseUrl })
+                            }
+                            className={`rounded-md border px-2.5 py-1 text-[10.5px] font-semibold transition-colors cursor-pointer ${
+                              isPicked
+                                ? 'border-[#14532D] bg-[#14532D] text-white'
+                                : 'border-[#D6D0C4] bg-[#FAF9F6] text-[#1A1816] hover:bg-[#EEF3F8]'
+                            }`}
+                          >
+                            {gw.label}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+
+                {/* Quick Presets */}
                 {activeMeta.presets && activeMeta.presets.length > 0 && (
                   <div className="space-y-1.5 border-t border-[#EFECE4] pt-3">
                     <div className="text-[11px] font-bold text-[#57534E]">
@@ -612,19 +742,26 @@ export const AiProviderModal: React.FC<AiProviderModalProps> = ({
                     </div>
                     <div className="flex flex-wrap gap-1.5">
                       {activeMeta.presets.map((preset) => {
-                        const isPicked =
-                          activeCreds.modelId === preset.modelId &&
-                          activeCreds.baseUrl.replace(/\/+$/, '') === preset.baseUrl.replace(/\/+$/, '');
+                        const currentSelectedModel =
+                          draft.provider === 'google_aistudio' ? draftModel : activeCreds.modelId;
+                        const isPicked = currentSelectedModel === preset.modelId;
                         return (
                           <button
                             key={preset.label}
                             type="button"
-                            onClick={() =>
+                            onClick={() => {
+                              if (draft.provider === 'google_aistudio') {
+                                setDraftModel(preset.modelId);
+                              }
                               updateProviderField(draft.provider, {
-                                baseUrl: preset.baseUrl,
                                 modelId: preset.modelId,
-                              })
-                            }
+                                ...(preset.baseUrl &&
+                                (!activeCreds.baseUrl.trim() ||
+                                  activeCreds.baseUrl.trim() === activeMeta.defaultBaseUrl)
+                                  ? { baseUrl: preset.baseUrl }
+                                  : {}),
+                              });
+                            }}
                             className={`rounded-md border px-2.5 py-1 text-[11px] font-semibold transition-colors cursor-pointer ${
                               isPicked
                                 ? 'border-[#1E3A5F] bg-[#1E3A5F] text-white'
@@ -700,46 +837,230 @@ export const AiProviderModal: React.FC<AiProviderModalProps> = ({
                   </div>
                 </div>
 
-                {/* Model Selection */}
-                {draft.provider === 'google_aistudio' ? (
-                  <div className="space-y-1.5">
-                    <label htmlFor="modal-google-model" className="block font-bold text-[#1A1816]">
-                      انتخاب مدل Gemini (۲ مدل منتخب)
-                    </label>
-                    <select
-                      id="modal-google-model"
-                      value={draftModel}
-                      onChange={(e) => setDraftModel(e.target.value as AiModelId)}
-                      className="w-full rounded-lg border border-[#D6D0C4] bg-[#FAF9F6] px-3 py-2 text-xs text-[#1A1816]"
+                {/* Open Free-Text Model ID Input + Live /models Discovery + Custom Profile */}
+                <div className="space-y-2">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <label
+                      htmlFor={draft.provider === 'google_aistudio' ? 'modal-google-model' : 'provider-model-id'}
+                      className="font-bold text-[#1A1816]"
                     >
-                      {GOOGLE_MODEL_OPTIONS.map((m) => (
-                        <option key={m.id} value={m.id}>
-                          {m.labelFa}
-                        </option>
-                      ))}
-                    </select>
-                  </div>
-                ) : (
-                  <div className="space-y-1.5">
-                    <label htmlFor="provider-model-id" className="block font-bold text-[#1A1816]">
-                      شناسه مدل (Model ID)
+                      شناسه مدل (Model ID — انتخاب آزاد هر مدل جدید یا ایرانی)
                     </label>
-                    <input
-                      id="provider-model-id"
-                      type="text"
-                      dir="ltr"
-                      placeholder={activeMeta.defaultModelId}
-                      value={activeCreds.modelId}
-                      onChange={(e) =>
-                        updateProviderField(draft.provider, { modelId: e.target.value })
-                      }
-                      className="w-full rounded-lg border border-[#D6D0C4] bg-[#FAF9F6] px-3 py-2 font-mono text-xs text-[#1A1816] focus:border-[#1E3A5F] focus:bg-white focus:outline-none"
-                    />
-                    <p className="text-[11px] leading-5 text-[#57534E]">
-                      با انتخاب هر ارائه‌دهنده (مثل Claude Opus 4.1)، همچنان می‌توانید در تب‌های «جستجوی زنده اینترنت» و «تبدیل ویس به متن» موتورهای جداگانه تنظیم کنید.
-                    </p>
+                    {onProbeModels && (
+                      <button
+                        type="button"
+                        disabled={probingModels}
+                        onClick={() => void handleDiscoverModels()}
+                        className="inline-flex min-h-[30px] items-center gap-1.5 rounded-lg border border-[#1E3A5F]/40 bg-[#EEF3F8] px-2.5 py-1 text-[11px] font-bold text-[#1E3A5F] hover:bg-[#DFE9F4] disabled:opacity-50 cursor-pointer"
+                      >
+                        {probingModels ? (
+                          <Loader2 className="h-3 w-3 animate-spin" />
+                        ) : (
+                          <Search className="h-3 w-3" />
+                        )}
+                        <span>کشف زنده مدل‌ها (/models)</span>
+                      </button>
+                    )}
                   </div>
-                )}
+
+                  {draft.provider === 'google_aistudio' && (
+                    <div className="flex flex-wrap gap-1.5">
+                      {GOOGLE_MODEL_OPTIONS.map((m) => (
+                        <button
+                          key={m.id}
+                          type="button"
+                          onClick={() => {
+                            setDraftModel(m.id);
+                            updateProviderField('google_aistudio', { modelId: m.id });
+                          }}
+                          className={`rounded-md border px-2 py-1 text-[10.5px] font-semibold cursor-pointer ${
+                            draftModel === m.id
+                              ? 'border-[#1E3A5F] bg-[#1E3A5F] text-white'
+                              : 'border-[#D6D0C4] bg-[#FAF9F6] text-[#44403C] hover:bg-[#EEF3F8]'
+                          }`}
+                        >
+                          {m.labelFa}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+
+                  <input
+                    id={draft.provider === 'google_aistudio' ? 'modal-google-model' : 'provider-model-id'}
+                    type="text"
+                    dir="ltr"
+                    placeholder={activeMeta.defaultModelId}
+                    value={activeModelIdValue}
+                    onChange={(e) => {
+                      const val = e.target.value;
+                      if (draft.provider === 'google_aistudio') {
+                        setDraftModel(val);
+                      }
+                      updateProviderField(draft.provider, { modelId: val });
+                    }}
+                    className="w-full rounded-lg border border-[#D6D0C4] bg-[#FAF9F6] px-3 py-2 font-mono text-xs text-[#1A1816] focus:border-[#1E3A5F] focus:bg-white focus:outline-none"
+                  />
+
+                  {/* Live Discovered Models Drawer */}
+                  {(discoveryStatusMsg || discoveredModels.length > 0) && (
+                    <div className="rounded-lg border border-[#DCE5F0] bg-[#F8FAFC] p-2.5 space-y-2">
+                      {discoveryStatusMsg && (
+                        <div className="text-[11px] font-semibold text-[#1E3A5F]">
+                          {discoveryStatusMsg}
+                        </div>
+                      )}
+                      {discoveredModels.length > 0 && (
+                        <>
+                          <input
+                            type="text"
+                            dir="ltr"
+                            value={modelFilterQuery}
+                            onChange={(e) => setModelFilterQuery(e.target.value)}
+                            placeholder="Filter discovered models (e.g. claude, gpt, gemini, deepseek)..."
+                            className="w-full rounded border border-[#CBD5E1] bg-white px-2.5 py-1 font-mono text-[11px] text-[#1A1816] focus:border-[#1E3A5F] focus:outline-none"
+                          />
+                          <div className="flex flex-wrap gap-1.5 max-h-36 overflow-y-auto" dir="ltr">
+                            {discoveredModels
+                              .filter(
+                                (m) =>
+                                  !modelFilterQuery.trim() ||
+                                  m.id.toLowerCase().includes(modelFilterQuery.trim().toLowerCase()) ||
+                                  (m.name || '').toLowerCase().includes(modelFilterQuery.trim().toLowerCase())
+                              )
+                              .slice(0, 80)
+                              .map((m) => (
+                                <button
+                                  key={m.id}
+                                  type="button"
+                                  onClick={() => {
+                                    if (draft.provider === 'google_aistudio') {
+                                      setDraftModel(m.id);
+                                    }
+                                    updateProviderField(draft.provider, { modelId: m.id });
+                                  }}
+                                  className={`rounded border px-2 py-0.5 font-mono text-[10.5px] cursor-pointer ${
+                                    activeModelIdValue === m.id
+                                      ? 'border-[#14532D] bg-[#14532D] text-white'
+                                      : 'border-[#CBD5E1] bg-white text-[#1E3A5F] hover:bg-[#EEF3F8]'
+                                  }`}
+                                >
+                                  {m.id}
+                                  {m.contextLength ? ` (${Math.round(m.contextLength / 1000)}k)` : ''}
+                                </button>
+                              ))}
+                          </div>
+                        </>
+                      )}
+                    </div>
+                  )}
+
+                  {/* Collapsible Custom Pricing & Capabilities Form */}
+                  <div className="pt-1">
+                    <button
+                      type="button"
+                      onClick={() => setShowCustomProfileForm((v) => !v)}
+                      className="text-[11px] font-bold text-[#1E3A5F] hover:underline cursor-pointer"
+                    >
+                      {showCustomProfileForm
+                        ? 'بستن تنظیمات نرخ و قابلیت مدل سفارشی ▲'
+                        : 'تنظیم نرخ دلاری ($/1M) و قابلیت‌های این مدل (JSON Schema / Caching / Tools) ▼'}
+                    </button>
+
+                    {showCustomProfileForm && (
+                      <div className="mt-2 rounded-lg border border-[#E2DDD3] bg-[#FAF9F6] p-3 space-y-2.5">
+                        <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                          <label className="space-y-1 text-[10.5px] font-bold text-[#44403C]">
+                            <span>نرخ ورودی ($ / 1M توکن)</span>
+                            <input
+                              type="number"
+                              min="0"
+                              step="0.05"
+                              dir="ltr"
+                              value={activeCustomProfile.inputPerMillionUsd}
+                              onChange={(e) =>
+                                upsertCustomModelProfile({
+                                  inputPerMillionUsd: Math.max(0, Number(e.target.value) || 0),
+                                })
+                              }
+                              className="w-full rounded border border-[#D6D0C4] bg-white px-2 py-1 font-mono text-xs"
+                            />
+                          </label>
+                          <label className="space-y-1 text-[10.5px] font-bold text-[#44403C]">
+                            <span>نرخ خروجی ($ / 1M توکن)</span>
+                            <input
+                              type="number"
+                              min="0"
+                              step="0.05"
+                              dir="ltr"
+                              value={activeCustomProfile.outputPerMillionUsd}
+                              onChange={(e) =>
+                                upsertCustomModelProfile({
+                                  outputPerMillionUsd: Math.max(0, Number(e.target.value) || 0),
+                                })
+                              }
+                              className="w-full rounded border border-[#D6D0C4] bg-white px-2 py-1 font-mono text-xs"
+                            />
+                          </label>
+                          <label className="space-y-1 text-[10.5px] font-bold text-[#44403C]">
+                            <span>پنجره کانتکست (Context)</span>
+                            <input
+                              type="number"
+                              min="4096"
+                              step="4096"
+                              dir="ltr"
+                              value={activeCustomProfile.contextWindow ?? 128000}
+                              onChange={(e) =>
+                                upsertCustomModelProfile({
+                                  contextWindow: Math.max(4096, Number(e.target.value) || 128000),
+                                })
+                              }
+                              className="w-full rounded border border-[#D6D0C4] bg-white px-2 py-1 font-mono text-xs"
+                            />
+                          </label>
+                        </div>
+                        <div className="flex flex-wrap gap-3 text-[11px] text-[#334155]">
+                          <label className="inline-flex items-center gap-1.5 cursor-pointer">
+                            <input
+                              type="checkbox"
+                              checked={activeCustomProfile.supportsJsonSchema !== false}
+                              onChange={(e) =>
+                                upsertCustomModelProfile({ supportsJsonSchema: e.target.checked })
+                              }
+                              className="h-3.5 w-3.5 accent-[#1E3A5F]"
+                            />
+                            <span>پشتیبانی از Structured JSON Schema</span>
+                          </label>
+                          <label className="inline-flex items-center gap-1.5 cursor-pointer">
+                            <input
+                              type="checkbox"
+                              checked={Boolean(activeCustomProfile.supportsPromptCaching)}
+                              onChange={(e) =>
+                                upsertCustomModelProfile({ supportsPromptCaching: e.target.checked })
+                              }
+                              className="h-3.5 w-3.5 accent-[#1E3A5F]"
+                            />
+                            <span>پشتیبانی از Prompt Caching</span>
+                          </label>
+                          <label className="inline-flex items-center gap-1.5 cursor-pointer">
+                            <input
+                              type="checkbox"
+                              checked={activeCustomProfile.supportsTools !== false}
+                              onChange={(e) =>
+                                upsertCustomModelProfile({ supportsTools: e.target.checked })
+                              }
+                              className="h-3.5 w-3.5 accent-[#1E3A5F]"
+                            />
+                            <span>پشتیبانی از Tool Calling (چت سردبیر)</span>
+                          </label>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+
+                  <p className="text-[11px] leading-5 text-[#57534E]">
+                    می‌توانید هر شناسه مدلی را مستقیماً تایپ کنید و در تب‌های «جستجوی وب» و «تبدیل ویس» موتورهای جداگانه تنظیم نمایید.
+                  </p>
+                </div>
               </div>
 
               {/* Auth Decision & Active Live Probe Result */}

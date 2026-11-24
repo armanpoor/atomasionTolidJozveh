@@ -27,8 +27,9 @@
         },
         "defaultAiModel": {
           "type": "string",
-          "enum": ["gemini-4-hydrogen", "gemini-3.1-flash-lite"],
-          "maxLength": 48
+          "minLength": 1,
+          "maxLength": 120,
+          "pattern": "^[a-zA-Z0-9._:/-]+$"
         },
         "defaultThinkingLevel": {
           "type": "string",
@@ -46,7 +47,7 @@
         },
         "googleSearchMode": {
           "type": "string",
-          "enum": ["off", "conflicts_only", "conflicts_and_enrichment"],
+          "enum": ["off", "conflicts_only", "conflicts_and_enrichment", "full_document_enrichment"],
           "maxLength": 32
         },
         "createdAt": {

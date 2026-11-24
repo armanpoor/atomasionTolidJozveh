@@ -21,6 +21,7 @@ import {
   ContentUnitDto,
   OutlineNodeDto,
   SourceFileDto,
+  ValidationDomain,
 } from '../lib/bookTypes';
 import { toPersianDigits } from '../lib/formatParsers';
 import {
@@ -68,6 +69,8 @@ interface OutlineEditorViewProps {
   onEnrichAllWithGoogle: () => Promise<void>;
   onRunDeepReview: () => Promise<void>;
   harness?: UseHarnessRunnerResult;
+  validationDomain?: ValidationDomain;
+  onChangeValidationDomain?: (domain: ValidationDomain) => void;
   onOpenProviderSettings?: () => void;
 }
 
@@ -91,6 +94,8 @@ export const OutlineEditorView: React.FC<OutlineEditorViewProps> = ({
   onEnrichAllWithGoogle: _onEnrichAllWithGoogle,
   onRunDeepReview: _onRunDeepReview,
   harness,
+  validationDomain = 'ecu_winols',
+  onChangeValidationDomain,
   onOpenProviderSettings,
 }) => {
   const [draft, setDraft] = useState<OutlineNodeDto[]>(() =>
@@ -332,6 +337,23 @@ export const OutlineEditorView: React.FC<OutlineEditorViewProps> = ({
     setDirty(true);
   };
 
+  const handleDeleteChapter = (idx: number) => {
+    if (draft.length <= 1) return;
+    const removed = draft[idx];
+    const remaining = draft
+      .filter((_, i) => i !== idx)
+      .map((n, i) => ({ ...n, nodeOrder: i + 1 }));
+    const fallbackTarget = remaining[0];
+    setDraft(remaining);
+    if (removed && fallbackTarget) {
+      setPendingReassignments((prev) => [
+        ...prev,
+        { fromNodeId: removed.id, toNodeId: fallbackTarget.id },
+      ]);
+    }
+    setDirty(true);
+  };
+
   const handleManualSave = async () => {
     await flushCloudAutoSave(false);
   };
@@ -498,10 +520,52 @@ export const OutlineEditorView: React.FC<OutlineEditorViewProps> = ({
         <DeepReviewProgressBanner progress={deepReviewProgress} variant="card" />
       )}
 
+      {/* Dual-Mode Validation Domain Bar (Gate 1 Configuration) */}
+      {onChangeValidationDomain && (
+        <div className="rounded-xl border border-[#DCE5F0] bg-[#F4F7FB] px-4 py-3 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+          <div className="space-y-0.5">
+            <div className="text-xs font-extrabold text-[#1E3A5F]">
+              دروازه ۱ · پروفایل تخصصی اعتبارسنجی و ویراستاری کتاب
+            </div>
+            <p className="text-[11px] text-[#475569]">
+              {validationDomain === 'ecu_winols'
+                ? 'حالت تخصصی ECU / WinOLS: کنترل دقیق آدرس‌های هگز، کدهای DTC، جداول محور RPM×Load، واحدها و هشدارهای ایمنی'
+                : 'حالت متون فنی و آموزشی عمومی فارسی: ممیزی کامل اعداد، واحدها، فرمول‌ها، جداول و اصطلاحات بدون اعمال قیدهای ECU/WinOLS'}
+            </p>
+          </div>
+          <div className="flex flex-wrap items-center gap-1.5 shrink-0">
+            <button
+              type="button"
+              onClick={() => onChangeValidationDomain('ecu_winols')}
+              className={`rounded-lg border px-3 py-1.5 text-xs font-bold cursor-pointer transition-colors ${
+                validationDomain === 'ecu_winols'
+                  ? 'border-[#14532D] bg-[#14532D] text-white'
+                  : 'border-[#CBD5E1] bg-white text-[#334155] hover:bg-[#F8FAFC]'
+              }`}
+            >
+              تخصصی ECU / WinOLS
+            </button>
+            <button
+              type="button"
+              onClick={() => onChangeValidationDomain('general_persian_technical')}
+              className={`rounded-lg border px-3 py-1.5 text-xs font-bold cursor-pointer transition-colors ${
+                validationDomain === 'general_persian_technical'
+                  ? 'border-[#1E3A5F] bg-[#1E3A5F] text-white'
+                  : 'border-[#CBD5E1] bg-white text-[#334155] hover:bg-[#F8FAFC]'
+              }`}
+            >
+              عمومی فارسی و فنی
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* Domain-Specific AI Harness: Stage 3 HITL Gate, Cost Preview, Live Stepper & Quarantine Queue */}
       {harness && (
         <HarnessControlPanel
           harness={harness}
+          validationDomain={validationDomain}
+          onChangeValidationDomain={onChangeValidationDomain}
           onOpenProviderSettings={onOpenProviderSettings}
         />
       )}
@@ -635,6 +699,20 @@ export const OutlineEditorView: React.FC<OutlineEditorViewProps> = ({
                     className="flex h-9 w-8 items-center justify-center rounded-md text-[#57534E] hover:bg-[#F5F3EE] disabled:opacity-30 cursor-pointer"
                   >
                     <ArrowDown className="h-4 w-4" />
+                  </button>
+                  <button
+                    type="button"
+                    disabled={draft.length <= 1}
+                    onClick={() => handleDeleteChapter(idx)}
+                    aria-label="حذف فصل"
+                    title={
+                      draft.length <= 1
+                        ? 'حداقل یک فصل باید در ساختار کتاب باقی بماند'
+                        : 'حذف این فصل و انتقال خودکار تمام مطالب آن به فصل اول (بدون اتلاف)'
+                    }
+                    className="flex h-9 w-8 items-center justify-center rounded-md text-[#9A3412] hover:bg-[#FFF5F2] disabled:opacity-30 cursor-pointer"
+                  >
+                    <Trash2 className="h-4 w-4" />
                   </button>
                 </div>
               </div>

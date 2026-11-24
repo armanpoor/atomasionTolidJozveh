@@ -1,3 +1,6 @@
+import type { ValidationDomain } from '../bookTypes.ts';
+export type { ValidationDomain };
+
 export type SemanticBlockKind =
   | 'heading'
   | 'paragraph'
@@ -116,6 +119,8 @@ export interface MasterBlueprint {
   estimatedTotalCostUsd: number;
   estimatedSavingsPercent: number;
   sections: BlueprintSection[];
+  /** Validation & authoring domain ('ecu_winols' default or 'general_persian_technical') */
+  validationDomain?: ValidationDomain;
   /** Hash of the full ordered source corpus locked at HITL approval */
   sourceCorpusHash?: string | null;
   /** Per-chunk content hashes locked at HITL approval to catch Stage 1 mutations */
@@ -151,6 +156,8 @@ export interface LivingGlossary {
 
 export interface RollingSummaryEntry {
   sectionId: string;
+  chapterOrder?: number;
+  sectionOrder?: number;
   chapterTitle: string;
   sectionTitle: string;
   summaryText: string;

@@ -14,9 +14,10 @@ export type GoogleSearchMode =
 
 export type FileRole = 'standard' | 'master' | 'supplement';
 
-export type AiModelId = 'gemini-4-hydrogen' | 'gemini-3.8-flash';
+export type AiModelId = string;
 export type AiThinkingLevel = 'MINIMAL' | 'LOW' | 'MEDIUM' | 'HIGH' | 'XHIGH';
 export type ProcessingEngineMode = 'ai' | 'local';
+export type ValidationDomain = 'ecu_winols' | 'general_persian_technical';
 
 export interface UploadedSourceFile {
   id: string;
@@ -426,6 +427,7 @@ export interface DocxExportConfig {
   googleSearchMode: GoogleSearchMode;
   aiRewriteLevel: AiRewriteLevel;
   outputTone: OutputTonePreset;
+  validationDomain?: ValidationDomain;
   customStylePrompt: string;
   includeWinolsActionTables: boolean;
   includeCoverPage: boolean;
@@ -491,6 +493,7 @@ export const DEFAULT_DOCX_CONFIG: DocxExportConfig = {
   googleSearchMode: 'conflicts_only',
   aiRewriteLevel: 'light_polish',
   outputTone: 'workshop_practical',
+  validationDomain: 'ecu_winols',
   customStylePrompt: '',
   includeWinolsActionTables: true,
   includeCoverPage: true,

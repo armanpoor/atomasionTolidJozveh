@@ -16,6 +16,7 @@ import {
 } from './harnessStore.ts';
 import {
   buildInitialHarnessState,
+  buildSourceChunksMap,
   convertHarnessStateToParsedBook,
 } from './irToBookAdapter.ts';
 import {
@@ -43,6 +44,7 @@ import {
   markChargeAbortedZeroCost,
   markChargeUnreconciledTimeout,
   recordPendingChargeEntry,
+  replaceFullSectionBlocksAtomic,
   settleChargeEntry,
 } from './patchAndBudget.ts';
 import {
@@ -1950,6 +1952,394 @@ test('Package C.5: Append-Only Sliding-Window RollingSummary stays strictly with
   assert.equal(prov.lowEffortJudgeFlagged, false);
   assert.ok(prov.sourceChunkHashes['c1'] && prov.sourceChunkHashes['c2']);
 });
+
+test('Bug #13: buildSourceChunksMap & autoSplitOversizedBlueprintSections split giant monolith single units/chunks deterministically', () => {
+  const longBlock = Array.from({ length: 140 }, (_, i) =>
+    `پارامتر کالیبراسیون شماره ${i + 1} در ایسیو ME7.4.4 روی دور ${1500 + i * 25} RPM بررسی می‌شود.`
+  ).join('\n\n');
+
+  const chunksMap = buildSourceChunksMap(
+    [
+      {
+        id: 'mono-unit-1',
+        projectId: 'p-mono',
+        sourceFileId: 'f1',
+        outlineNodeId: 'sec-mono',
+        unitOrder: 1,
+        unitType: 'paragraph',
+        headingPath: 'فصل ۱',
+        rawText: longBlock,
+        normalizedHash: 'h-mono',
+        canonicalUnitId: null,
+        status: 'active',
+        metadataJson: null,
+      },
+    ],
+    [
+      {
+        id: 'f1',
+        projectId: 'p-mono',
+        fileName: 'mono.md',
+        format: 'md',
+        fileRole: 'standard',
+        sizeBytes: 10000,
+        wordCount: 1800,
+        unitCount: 1,
+        checksum: 'chk-mono',
+        uploadedAt: '2026-11-24T00:00:00.000Z',
+      },
+    ]
+  );
+
+  assert.ok(chunksMap.size > 1, `Expected oversized monolith unit to split into >1 chunks, got ${chunksMap.size}`);
+
+  // Also test single giant chunk inside autoSplitOversizedBlueprintSections directly
+  const singleChunkMap = new Map<string, HarnessSourceChunk>([
+    [
+      'giant-c1',
+      {
+        id: 'giant-c1',
+        fileName: 'mono.md',
+        headingPath: 'فصل ۱',
+        unitType: 'paragraph',
+        text: longBlock,
+        wordCount: 1800,
+        continuedFromChunkId: null,
+        continuesToChunkId: null,
+        ecuPlatformTags: ['ME7.4.4'],
+        contentHash: 'h-giant',
+      },
+    ],
+  ]);
+
+  const splitSections = autoSplitOversizedBlueprintSections({
+    sections: [
+      {
+        sectionId: 'sec-single-giant',
+        chapterId: 'ch-1',
+        chapterOrder: 1,
+        chapterTitle: 'فصل ۱',
+        sectionOrder: 1,
+        title: 'بخش بزرگ',
+        sourceChunkIds: ['giant-c1'],
+        sourceWordCount: 1800,
+        estimatedInputTokens: 0,
+        estimatedOutputTokens: 0,
+        estimatedCostUsd: 0,
+      },
+    ],
+    chunkById: singleChunkMap,
+    maxSectionInputTokens: 1200,
+  });
+
+  assert.ok(splitSections.length > 1, `Expected single giant chunk section to split into >1 sections, got ${splitSections.length}`);
+  assert.ok(splitSections.every((s) => s.sourceChunkIds.length > 0));
+});
+
+test('Bug #14, #16, #17: Layer1 Guard ignores range hyphens, table header stopwords, and structured pinout/DTC boilerplate repetition', () => {
+  const chunks: HarnessSourceChunk[] = [
+    {
+      id: 'c-range',
+      fileName: 'ecu.md',
+      headingPath: 'جدول پین‌اوت و بازه دور',
+      unitType: 'paragraph',
+      text: [
+        'در بازه دور 2000-4500 RPM و نسبت هوا به سوخت 14.7-12.5 AFR و فشار 1.2-1.8 bar جدول پایه‌ها به شرح زیر است:',
+        '| شماره پایه | کاربرد سنسور در سیستم |',
+        '| --- | --- |',
+        '| P0300 | پایه شماره یک در دسته سیم اصلی موتور برای سنسور دور |',
+        '| P0301 | پایه شماره دو در دسته سیم اصلی موتور برای سنسور اکسیژن جلو |',
+        '| P0302 | پایه شماره سه در دسته سیم اصلی موتور برای سنسور مپ |',
+        '| P0303 | پایه شماره چهار در دسته سیم اصلی موتور برای سنسور دما |',
+        '| P0304 | پایه شماره پنج در دسته سیم اصلی موتور برای سنسور اکسیژن |',
+      ].join('\n'),
+      wordCount: 105,
+      continuedFromChunkId: null,
+      continuesToChunkId: null,
+      ecuPlatformTags: ['ME7.4.4'],
+      contentHash: 'hc-range',
+    },
+  ];
+
+  const sectionIR: SemanticSectionIR = {
+    sectionId: 'sec-range',
+    chapterId: 'ch-1',
+    title: 'تحلیل بازه و پین‌اوت',
+    sourceChunkIds: ['c-range'],
+    generatedAt: '2026-11-24T00:00:00.000Z',
+    modelUsed: 'gemini-4-hydrogen',
+    tierUsed: 'flagship',
+    blocks: [
+      {
+        id: 'b-p1',
+        kind: 'paragraph',
+        text: 'در بازه 2000-4500 RPM مقدار نسبت سوخت 14.7-12.5 AFR و فشار 1.2-1.8 bar اعمال می‌شود.',
+        sourceChunkIds: ['c-range'],
+      },
+      {
+        id: 'b-tbl',
+        kind: 'table',
+        title: 'جدول خطاها و پایه‌ها',
+        headers: ['شماره پایه و کد', 'کاربرد در سیستم'],
+        rows: [
+          ['P0300', 'پایه شماره یک در دسته سیم اصلی موتور برای سنسور دور'],
+          ['P0301', 'پایه شماره دو در دسته سیم اصلی موتور برای سنسور اکسیژن جلو'],
+          ['P0302', 'پایه شماره سه در دسته سیم اصلی موتور برای سنسور مپ'],
+          ['P0303', 'پایه شماره چهار در دسته سیم اصلی موتور برای سنسور دما'],
+          ['P0304', 'پایه شماره پنج در دسته سیم اصلی موتور برای سنسور اکسیژن'],
+        ],
+        sourceChunkIds: ['c-range'],
+      },
+    ],
+  };
+
+  const audit = runLayer1DeterministicGuard(sectionIR, chunks, null, {
+    minWordRatio: 0.3,
+  });
+  const criticalErrors = audit.issues.filter((i) => i.severity === 'error');
+  assert.equal(
+    criticalErrors.length,
+    0,
+    `Expected zero false-positive errors, got: ${criticalErrors.map((e) => `${e.kind}:${e.messageFa}`).join('; ')}`
+  );
+
+  // Pinout enumerations sharing connector prefix 5 times should NOT trigger degenerate_repetition_detected
+  const pinoutText = Array.from(
+    { length: 5 },
+    (_, idx) => `${idx + 1}. پایه شماره ${idx + 10} از سوکت قهوه‌ای رنگ دسته سیم موتور متصل به رله دوبل`
+  ).join('\n');
+  assert.equal(detectDegenerateRepetition(pinoutText), null);
+});
+
+test('Dual-Mode Validation: general_persian_technical enforces numbers/units while skipping ECU map/DTC-only rules', () => {
+  const chunks: HarnessSourceChunk[] = [
+    {
+      id: 'c-gen',
+      fileName: 'general.md',
+      headingPath: 'فصل ۱',
+      unitType: 'paragraph',
+      text: 'در این شبکه ولتاژ استاندارد 220 V و فرکانس 50 Hz برای تغذیه صنعتی استفاده می‌شود.',
+      wordCount: 16,
+      continuedFromChunkId: null,
+      continuesToChunkId: null,
+      ecuPlatformTags: [],
+      contentHash: 'hc-gen',
+    },
+  ];
+
+  // Clean general output passes
+  const passIR: SemanticSectionIR = {
+    sectionId: 'sec-gen',
+    chapterId: 'ch-1',
+    title: 'تغذیه صنعتی',
+    sourceChunkIds: ['c-gen'],
+    generatedAt: '2026-11-24T00:00:00.000Z',
+    modelUsed: 'gemini-4-hydrogen',
+    tierUsed: 'flagship',
+    blocks: [
+      {
+        id: 'g1',
+        kind: 'paragraph',
+        text: 'در سیستم‌های صنعتی ولتاژ استاندارد 220 V با فرکانس نامی 50 Hz برقرار است.',
+        sourceChunkIds: ['c-gen'],
+      },
+    ],
+  };
+
+  const passAudit = runLayer1DeterministicGuard(passIR, chunks, null, {
+    validationDomain: 'general_persian_technical',
+  });
+  assert.equal(passAudit.passed, true);
+
+  // Hallucinated number/unit still caught in general mode
+  const badIR: SemanticSectionIR = {
+    ...passIR,
+    blocks: [
+      {
+        id: 'g-bad',
+        kind: 'paragraph',
+        text: 'ولتاژ استاندارد 220 V و جایگزین 240 V با فرکانس 50 Hz تایید شد.',
+        sourceChunkIds: ['c-gen'],
+      },
+    ],
+  };
+  const failAudit = runLayer1DeterministicGuard(badIR, chunks, null, {
+    validationDomain: 'general_persian_technical',
+  });
+  assert.equal(failAudit.passed, false);
+  assert.ok(failAudit.issues.some((i) => i.kind === 'hallucinated_technical_fact'));
+});
+
+test('Bug #18 & #19: replaceFullSectionBlocksAtomic replaces blocks safely and convertHarnessStateToParsedBook resets chapter tables & resolves glossary chapters', () => {
+  const originalIR: SemanticSectionIR = {
+    sectionId: 'sec-rw',
+    chapterId: 'ch-1',
+    title: 'بازنویسی کامل',
+    sourceChunkIds: ['u1'],
+    generatedAt: '2026-11-24T00:00:00.000Z',
+    modelUsed: 'gemini-3.8-flash',
+    tierUsed: 'balanced',
+    blocks: [
+      { id: 'old-1', kind: 'paragraph', text: 'متن ناقص', sourceChunkIds: ['u1'] },
+    ],
+  };
+
+  const replaced = replaceFullSectionBlocksAtomic({
+    originalIR,
+    rewrittenBlocks: [
+      { id: 'new-1', kind: 'paragraph', text: 'پاراگراف کامل بازنویسی‌شده', sourceChunkIds: ['u1'] },
+      { id: 'new-1', kind: 'callout_tip', title: 'نکته', text: 'نکته تکمیلی', sourceChunkIds: ['u1'] },
+    ],
+    meta: { modelUsed: 'claude-4-5-sonnet', tierUsed: 'flagship' },
+  });
+
+  assert.equal(replaced.blocks.length, 2);
+  assert.equal(replaced.blocks[0].id, 'new-1');
+  assert.notEqual(replaced.blocks[1].id, 'new-1', 'Duplicate block IDs must be deduplicated cleanly');
+  assert.equal(replaced.modelUsed, 'claude-4-5-sonnet');
+
+  // Bug #19: table index resets per chapter and glossary tracks real chapters
+  const harnessState = buildInitialHarnessState({
+    projectId: 'p-19',
+    outlineNodes: [
+      { id: 'ch-1', projectId: 'p-19', parentId: null, nodeOrder: 1, level: 1, title: 'فصل اول', summary: null, isApproved: true, webEnrichmentJson: null },
+      { id: 'ch-2', projectId: 'p-19', parentId: null, nodeOrder: 2, level: 1, title: 'فصل دوم', summary: null, isApproved: true, webEnrichmentJson: null },
+    ],
+    contentUnits: [
+      {
+        id: 'u1',
+        projectId: 'p-19',
+        sourceFileId: 'f1',
+        outlineNodeId: 'ch-1',
+        unitOrder: 1,
+        unitType: 'paragraph',
+        headingPath: 'فصل اول',
+        rawText: 'بررسی جدول اولیه در فصل یک.',
+        normalizedHash: 'h1',
+        canonicalUnitId: null,
+        status: 'active',
+        metadataJson: null,
+      },
+      {
+        id: 'u2',
+        projectId: 'p-19',
+        sourceFileId: 'f1',
+        outlineNodeId: 'ch-2',
+        unitOrder: 2,
+        unitType: 'paragraph',
+        headingPath: 'فصل دوم',
+        rawText: 'در ایسیو ME7.4.4 نقشه KFZW تنظیم می‌شود.',
+        normalizedHash: 'h2',
+        canonicalUnitId: null,
+        status: 'active',
+        metadataJson: null,
+      },
+    ],
+    sourceFiles: [
+      {
+        id: 'f1',
+        projectId: 'p-19',
+        fileName: 'ch.md',
+        format: 'md',
+        fileRole: 'standard',
+        sizeBytes: 500,
+        wordCount: 15,
+        unitCount: 2,
+        checksum: 'chk-f1',
+        uploadedAt: '2026-11-24T00:00:00.000Z',
+      },
+    ],
+  });
+
+  harnessState.sectionsIR['ch-1'] = {
+    sectionId: 'ch-1',
+    chapterId: 'ch-1',
+    title: 'فصل اول',
+    sourceChunkIds: ['u1'],
+    generatedAt: '2026-11-24T00:00:00.000Z',
+    modelUsed: 'gemini-4-hydrogen',
+    tierUsed: 'flagship',
+    blocks: [
+      { id: 't1', kind: 'table', title: 'جدول فصل اول', headers: ['A'], rows: [['1']], sourceChunkIds: ['u1'] },
+    ],
+  };
+  harnessState.sectionsIR['ch-2'] = {
+    sectionId: 'ch-2',
+    chapterId: 'ch-2',
+    title: 'فصل دوم',
+    sourceChunkIds: ['u2'],
+    generatedAt: '2026-11-24T00:00:00.000Z',
+    modelUsed: 'gemini-4-hydrogen',
+    tierUsed: 'flagship',
+    blocks: [
+      { id: 't2', kind: 'table', title: 'جدول فصل دوم', headers: ['B'], rows: [['ME7.4.4']], sourceChunkIds: ['u2'] },
+    ],
+  };
+
+  const book = convertHarnessStateToParsedBook({
+    harnessState,
+    projectTitle: 'تست فصل',
+    sourceFiles: [],
+    contentUnits: [],
+  });
+
+  assert.equal(book.tableIndex.length, 2);
+  assert.equal(book.tableIndex[0].tableNumber, '۱-۱');
+  assert.equal(book.tableIndex[1].tableNumber, '۲-۱');
+
+  const kfzwEntry = book.glossary.find((g) => g.term === 'KFZW');
+  assert.ok(kfzwEntry, 'KFZW should exist in extracted glossary');
+  assert.deepEqual(kfzwEntry.chapters, [2]);
+});
+
+test('Bug #10: saveHarnessStateLocal & loadHarnessStateLocal isolate projects across different ownerUids', async () => {
+  const baseState = buildInitialHarnessState({
+    projectId: 'shared-proj-id',
+    outlineNodes: [
+      { id: 'ch-1', projectId: 'shared-proj-id', parentId: null, nodeOrder: 1, level: 1, title: 'فصل تست', summary: null, isApproved: true, webEnrichmentJson: null },
+    ],
+    contentUnits: [
+      {
+        id: 'u1',
+        projectId: 'shared-proj-id',
+        sourceFileId: 'f1',
+        outlineNodeId: 'ch-1',
+        unitOrder: 1,
+        unitType: 'paragraph',
+        headingPath: null,
+        rawText: 'متن اختصاصی کاربر الف',
+        normalizedHash: 'ha',
+        canonicalUnitId: null,
+        status: 'active',
+        metadataJson: null,
+      },
+    ],
+    sourceFiles: [
+      {
+        id: 'f1',
+        projectId: 'shared-proj-id',
+        fileName: 'a.md',
+        format: 'md',
+        fileRole: 'standard',
+        sizeBytes: 100,
+        wordCount: 4,
+        unitCount: 1,
+        checksum: 'chk-a',
+        uploadedAt: '2026-11-24T00:00:00.000Z',
+      },
+    ],
+  });
+
+  await saveHarnessStateLocal(baseState, 'user-alice');
+  const loadedAlice = await loadHarnessStateLocal('shared-proj-id', 'user-alice');
+  const loadedBob = await loadHarnessStateLocal('shared-proj-id', 'user-bob');
+
+  assert.ok(loadedAlice !== null);
+  assert.equal(loadedBob, null, 'User Bob must never read User Alice local Harness cache');
+
+  await clearHarnessStateLocal('shared-proj-id', 'user-alice');
+});
+
 
 
 
