@@ -107,6 +107,27 @@ export interface AiProviderConfig {
   customModelId: string;
 }
 
+export interface DiscoveredProviderModel {
+  id: string;
+  name?: string;
+  ownedBy?: string;
+  contextLength?: number | null;
+  inputPerMillionUsd?: number | null;
+  outputPerMillionUsd?: number | null;
+}
+
+export interface ProviderModelsDiscoveryResponse {
+  provider: AiProviderType;
+  baseUrlUsed: string;
+  models: DiscoveredProviderModel[];
+  fetchedAt: string;
+}
+
+export interface BaseUrlGatewayTemplate {
+  label: string;
+  baseUrl: string;
+}
+
 export interface ProviderMetadata {
   id: AiProviderType;
   nameFa: string;
@@ -116,6 +137,9 @@ export interface ProviderMetadata {
   apiKeyPlaceholder: string;
   descriptionFa: string;
   supportsGoogleSearch: boolean;
+  supportsLiveModelDiscovery: boolean;
+  /** Optional quick Base URL templates (NEVER hardcodes a modelId) */
+  baseUrlTemplates?: readonly BaseUrlGatewayTemplate[];
   presets?: Array<{ label: string; baseUrl: string; modelId: string }>;
 }
 
@@ -128,6 +152,8 @@ export interface WebSearchProviderMetadata {
   apiKeyPlaceholder: string;
   descriptionFa: string;
   needsOwnApiKey: boolean;
+  supportsLiveModelDiscovery?: boolean;
+  baseUrlTemplates?: readonly BaseUrlGatewayTemplate[];
   presets?: Array<{ label: string; baseUrl: string; modelId: string }>;
 }
 
@@ -140,8 +166,25 @@ export interface AudioProviderMetadata {
   apiKeyPlaceholder: string;
   descriptionFa: string;
   needsOwnApiKey: boolean;
+  supportsLiveModelDiscovery?: boolean;
+  baseUrlTemplates?: readonly BaseUrlGatewayTemplate[];
   presets?: Array<{ label: string; baseUrl: string; modelId: string }>;
 }
+
+export const OPENAI_COMPATIBLE_GATEWAY_TEMPLATES: readonly BaseUrlGatewayTemplate[] = [
+  { label: 'OpenRouter', baseUrl: 'https://openrouter.ai/api/v1' },
+  { label: 'Groq', baseUrl: 'https://api.groq.com/openai/v1' },
+  { label: 'DeepSeek', baseUrl: 'https://api.deepseek.com/v1' },
+  { label: 'Together AI', baseUrl: 'https://api.together.xyz/v1' },
+  { label: 'Fireworks AI', baseUrl: 'https://api.fireworks.ai/inference/v1' },
+  { label: 'Mistral AI', baseUrl: 'https://api.mistral.ai/v1' },
+  { label: 'xAI (Grok)', baseUrl: 'https://api.x.ai/v1' },
+  { label: 'Cerebras', baseUrl: 'https://api.cerebras.ai/v1' },
+  { label: 'SambaNova', baseUrl: 'https://api.sambanova.ai/v1' },
+  { label: 'Perplexity', baseUrl: 'https://api.perplexity.ai' },
+  { label: 'AvalAI', baseUrl: 'https://api.avalai.ir/v1' },
+  { label: 'GapGPT', baseUrl: 'https://api.gapgpt.app/v1' },
+] as const;
 
 export const AI_PROVIDER_METADATA: Record<AiProviderType, ProviderMetadata> = {
   google_aistudio: {
@@ -151,110 +194,74 @@ export const AI_PROVIDER_METADATA: Record<AiProviderType, ProviderMetadata> = {
     defaultBaseUrl: 'https://generativelanguage.googleapis.com',
     defaultModelId: 'gemini-4-hydrogen',
     apiKeyPlaceholder: 'AIzaSy...',
-    descriptionFa: 'مدل‌های منتخب هیدروژن ۴ و فلش ۳.۸ + پشتیبانی از جستجوی زنده گوگل، تبدیل صوت و سهمیه سازنده',
+    descriptionFa:
+      'مدل‌های منتخب Gemini 4 Hydrogen و Gemini 3.8 Flash + پشتیبانی از جستجوی زنده گوگل، تبدیل صوت و سهمیه سازنده',
     supportsGoogleSearch: true,
+    supportsLiveModelDiscovery: false,
+    presets: [
+      {
+        label: 'Gemini 4 Hydrogen (هیدروژن ۴)',
+        baseUrl: 'https://generativelanguage.googleapis.com',
+        modelId: 'gemini-4-hydrogen',
+      },
+      {
+        label: 'Gemini 3.8 Flash (فلش ۳.۸)',
+        baseUrl: 'https://generativelanguage.googleapis.com',
+        modelId: 'gemini-3.8-flash',
+      },
+    ],
   },
   openai: {
     id: 'openai',
-    nameFa: 'OpenAI (GPT)',
+    nameFa: 'OpenAI (سازگار با /v1/models)',
     shortName: 'OpenAI',
     defaultBaseUrl: 'https://api.openai.com/v1',
-    defaultModelId: 'gpt-4.1',
+    defaultModelId: '',
     apiKeyPlaceholder: 'sk-proj-...',
-    descriptionFa: 'اتصال مستقیم به OpenAI (GPT-4.1 / GPT-4o / o4-mini) یا پروکسی‌های سازگار با Base URL دلخواه',
+    descriptionFa:
+      'اتصال مستقیم به OpenAI یا هر درگاه سازگار با دریافت زنده لیست مدل‌های روز از مسیر /v1/models یا ورود دستی شناسه مدل (بدون هیچ مدل پیش‌فرض قدیمی)',
     supportsGoogleSearch: false,
-    presets: [
-      { label: 'GPT-4.1 (دقت بالا)', baseUrl: 'https://api.openai.com/v1', modelId: 'gpt-4.1' },
-      { label: 'GPT-4o Mini (اقتصادی)', baseUrl: 'https://api.openai.com/v1', modelId: 'gpt-4o-mini' },
-      { label: 'o4-mini (استدلالی)', baseUrl: 'https://api.openai.com/v1', modelId: 'o4-mini' },
+    supportsLiveModelDiscovery: true,
+    baseUrlTemplates: [
+      { label: 'OpenAI Official', baseUrl: 'https://api.openai.com/v1' },
+      ...OPENAI_COMPATIBLE_GATEWAY_TEMPLATES,
     ],
   },
   anthropic: {
     id: 'anthropic',
-    nameFa: 'Anthropic (Claude Opus / Sonnet)',
+    nameFa: 'Anthropic (Messages API + /v1/models)',
     shortName: 'Anthropic',
     defaultBaseUrl: 'https://api.anthropic.com/v1',
-    defaultModelId: 'claude-opus-4-1-20250805',
+    defaultModelId: '',
     apiKeyPlaceholder: 'sk-ant-...',
-    descriptionFa: 'اتصال مستقیم به Anthropic Claude Opus 4.1، Opus 4 و Sonnet 4 (Messages API) با پشتیبانی از Base URL سفارشی',
+    descriptionFa:
+      'اتصال به Anthropic با دریافت زنده لیست مدل‌های روز اکانت شما از مسیر /v1/models یا ورود مستقیم شناسه مدل دلخواه (بدون پیش‌فرض قدیمی)',
     supportsGoogleSearch: false,
-    presets: [
-      {
-        label: 'Claude Opus 4.1 (قدرتمندترین)',
-        baseUrl: 'https://api.anthropic.com/v1',
-        modelId: 'claude-opus-4-1-20250805',
-      },
-      {
-        label: 'Claude Opus 4',
-        baseUrl: 'https://api.anthropic.com/v1',
-        modelId: 'claude-opus-4-20250514',
-      },
-      {
-        label: 'Claude Sonnet 4 (متعادل)',
-        baseUrl: 'https://api.anthropic.com/v1',
-        modelId: 'claude-sonnet-4-20250514',
-      },
-      {
-        label: 'Claude 3.7 Sonnet',
-        baseUrl: 'https://api.anthropic.com/v1',
-        modelId: 'claude-3-7-sonnet-latest',
-      },
-      {
-        label: 'Claude 3.5 Haiku (سریع)',
-        baseUrl: 'https://api.anthropic.com/v1',
-        modelId: 'claude-3-5-haiku-latest',
-      },
+    supportsLiveModelDiscovery: true,
+    baseUrlTemplates: [
+      { label: 'Anthropic Official', baseUrl: 'https://api.anthropic.com/v1' },
     ],
   },
   custom_openai: {
     id: 'custom_openai',
-    nameFa: 'درگاه سفارشی (OpenRouter / DeepSeek / Groq)',
-    shortName: 'سفارشی',
+    nameFa: 'هر ارائه‌دهنده OpenAI-Compatible (سفارشی)',
+    shortName: 'OpenAI-Compatible',
     defaultBaseUrl: 'https://openrouter.ai/api/v1',
-    defaultModelId: 'anthropic/claude-opus-4',
-    apiKeyPlaceholder: 'sk-or-...',
-    descriptionFa: 'اتصال به هر مدل دلخواه (از جمله Claude Opus، GPT، DeepSeek و Llama) از طریق OpenRouter، AvalAI، Groq یا سرور HTTPS شما',
+    defaultModelId: '',
+    apiKeyPlaceholder: 'sk-or-... / gsk_... / Bearer token',
+    descriptionFa:
+      'پشتیبانی کامل از هر سرور یا درگاه OpenAI-Compatible (مانند OpenRouter، Groq، DeepSeek، Together، Fireworks، Mistral، xAI، Cerebras، AvalAI، vLLM، LiteLLM و سرور شخصی) با استعلام زنده لیست مدل‌ها از /models و انتخاب آزاد شناسه مدل',
     supportsGoogleSearch: false,
-    presets: [
-      {
-        label: 'OpenRouter · Claude Opus 4',
-        baseUrl: 'https://openrouter.ai/api/v1',
-        modelId: 'anthropic/claude-opus-4',
-      },
-      {
-        label: 'OpenRouter · GPT-4.1',
-        baseUrl: 'https://openrouter.ai/api/v1',
-        modelId: 'openai/gpt-4.1',
-      },
-      {
-        label: 'DeepSeek Reasoner (R1)',
-        baseUrl: 'https://api.deepseek.com/v1',
-        modelId: 'deepseek-reasoner',
-      },
-      {
-        label: 'DeepSeek Chat',
-        baseUrl: 'https://api.deepseek.com/v1',
-        modelId: 'deepseek-chat',
-      },
-      {
-        label: 'Groq (Llama 3.3 70B)',
-        baseUrl: 'https://api.groq.com/openai/v1',
-        modelId: 'llama-3.3-70b-versatile',
-      },
-      {
-        label: 'AvalAI (درگاه ایرانی)',
-        baseUrl: 'https://api.avalai.ir/v1',
-        modelId: 'claude-sonnet-4-20250514',
-      },
-    ],
+    supportsLiveModelDiscovery: true,
+    baseUrlTemplates: OPENAI_COMPATIBLE_GATEWAY_TEMPLATES,
   },
 };
 
 export const AI_PROVIDER_LIST: readonly ProviderMetadata[] = [
   AI_PROVIDER_METADATA.google_aistudio,
-  AI_PROVIDER_METADATA.anthropic,
-  AI_PROVIDER_METADATA.openai,
   AI_PROVIDER_METADATA.custom_openai,
+  AI_PROVIDER_METADATA.openai,
+  AI_PROVIDER_METADATA.anthropic,
 ] as const;
 
 export const WEB_SEARCH_PROVIDER_METADATA: Record<WebSearchProviderType, WebSearchProviderMetadata> = {
@@ -277,7 +284,7 @@ export const WEB_SEARCH_PROVIDER_METADATA: Record<WebSearchProviderType, WebSear
     defaultModelId: 'gemini-4-hydrogen',
     apiKeyPlaceholder: 'AIzaSy... (اختیاری در صورت فعال بودن سهمیه سازنده)',
     descriptionFa:
-      'ایده‌آل برای ترکیب با Claude Opus یا GPT: نگارش و تحلیل با مدل اصلی شما انجام می‌شود، اما راستی‌آزمایی اینترنتی با Google Search Grounding (سهمیه سازنده یا کلید Gemini شما) اجرا می‌شود.',
+      'نگارش و تحلیل با مدل اصلی شما انجام می‌شود، اما راستی‌آزمایی اینترنتی با Google Search Grounding (مدل‌های Gemini 4 Hydrogen یا Gemini 3.8 Flash) اجرا می‌گردد.',
     needsOwnApiKey: false,
     presets: [
       { label: 'Gemini 4 Hydrogen + Google Search', baseUrl: 'https://generativelanguage.googleapis.com', modelId: 'gemini-4-hydrogen' },
@@ -286,50 +293,47 @@ export const WEB_SEARCH_PROVIDER_METADATA: Record<WebSearchProviderType, WebSear
   },
   perplexity_sonar: {
     id: 'perplexity_sonar',
-    nameFa: 'Perplexity Sonar (موتور جستجوی تخصصی)',
+    nameFa: 'Perplexity / درگاه جستجوی OpenAI-Compatible',
     shortName: 'Perplexity',
     defaultBaseUrl: 'https://api.perplexity.ai',
-    defaultModelId: 'sonar-pro',
+    defaultModelId: '',
     apiKeyPlaceholder: 'pplx-...',
     descriptionFa:
-      'جستجوی عمیق وب با استخراج خودکار لینک منابع معتبر (Citations) — بهترین مکمل پژوهشی در کنار Claude Opus.',
+      'جستجوی عمیق وب با استخراج خودکار لینک منابع معتبر (Citations) — شناسه مدل روز را از سرور دریافت یا دستی وارد کنید.',
     needsOwnApiKey: true,
-    presets: [
-      { label: 'Sonar Pro (پژوهش دقیق)', baseUrl: 'https://api.perplexity.ai', modelId: 'sonar-pro' },
-      { label: 'Sonar (سریع و اقتصادی)', baseUrl: 'https://api.perplexity.ai', modelId: 'sonar' },
-      { label: 'Sonar Reasoning Pro', baseUrl: 'https://api.perplexity.ai', modelId: 'sonar-reasoning-pro' },
+    supportsLiveModelDiscovery: true,
+    baseUrlTemplates: [
+      { label: 'Perplexity API', baseUrl: 'https://api.perplexity.ai' },
+      { label: 'OpenRouter', baseUrl: 'https://openrouter.ai/api/v1' },
     ],
   },
   anthropic_web_search: {
     id: 'anthropic_web_search',
-    nameFa: 'Anthropic Claude Web Search (بومی کلاد)',
-    shortName: 'Claude Search',
+    nameFa: 'Anthropic Web Search (ابزار بومی جستجو)',
+    shortName: 'Anthropic Search',
     defaultBaseUrl: 'https://api.anthropic.com/v1',
-    defaultModelId: 'claude-sonnet-4-20250514',
+    defaultModelId: '',
     apiKeyPlaceholder: 'sk-ant-... (در صورت خالی بودن از کلید Anthropic اصلی استفاده می‌شود)',
     descriptionFa:
-      'استفاده مستقیم از ابزار بومی web_search_20250305 در API رسمی Anthropic برای جستجوی آنلاین همراه با ارجاع منابع.',
+      'استفاده مستقیم از ابزار بومی web_search در API رسمی Anthropic همراه با ارجاع منابع — شناسه مدل را از /v1/models دریافت یا وارد کنید.',
     needsOwnApiKey: true,
-    presets: [
-      { label: 'Claude Sonnet 4 + Web Search', baseUrl: 'https://api.anthropic.com/v1', modelId: 'claude-sonnet-4-20250514' },
-      { label: 'Claude Opus 4.1 + Web Search', baseUrl: 'https://api.anthropic.com/v1', modelId: 'claude-opus-4-1-20250805' },
-    ],
+    supportsLiveModelDiscovery: true,
   },
   openai_web_search: {
     id: 'openai_web_search',
-    nameFa: 'OpenAI / OpenRouter Online Search',
-    shortName: 'OpenAI / OR Online',
-    defaultBaseUrl: 'https://api.openai.com/v1',
-    defaultModelId: 'gpt-4o-search-preview',
+    nameFa: 'OpenAI / OpenRouter Online Search (سازگار با OpenAI)',
+    shortName: 'OpenAI-Compatible Search',
+    defaultBaseUrl: 'https://openrouter.ai/api/v1',
+    defaultModelId: '',
     apiKeyPlaceholder: 'sk-... یا sk-or-...',
     descriptionFa:
-      'پشتیبانی از مدل‌های جستجوگر OpenAI (gpt-4o-search-preview) یا مدل‌های آنلاین OpenRouter با پسوند :online.',
+      'پشتیبانی از هر مدل جستجوگر آنلاین در OpenAI، OpenRouter یا درگاه‌های OpenAI-Compatible — بدون هیچ مدل پیش‌فرض قدیمی.',
     needsOwnApiKey: true,
-    presets: [
-      { label: 'OpenAI GPT-4o Search', baseUrl: 'https://api.openai.com/v1', modelId: 'gpt-4o-search-preview' },
-      { label: 'OpenAI GPT-4o Mini Search', baseUrl: 'https://api.openai.com/v1', modelId: 'gpt-4o-mini-search-preview' },
-      { label: 'OpenRouter Perplexity Online', baseUrl: 'https://openrouter.ai/api/v1', modelId: 'perplexity/sonar-pro' },
-      { label: 'OpenRouter GPT-4o :online', baseUrl: 'https://openrouter.ai/api/v1', modelId: 'openai/gpt-4o:online' },
+    supportsLiveModelDiscovery: true,
+    baseUrlTemplates: [
+      { label: 'OpenRouter', baseUrl: 'https://openrouter.ai/api/v1' },
+      { label: 'OpenAI Official', baseUrl: 'https://api.openai.com/v1' },
+      ...OPENAI_COMPATIBLE_GATEWAY_TEMPLATES.filter((t) => t.label !== 'OpenRouter'),
     ],
   },
 };
@@ -348,63 +352,55 @@ export const AUDIO_TRANSCRIBE_PROVIDER_METADATA: Record<
 > = {
   google_gemini_audio: {
     id: 'google_gemini_audio',
-    nameFa: 'Google Gemini Transcribe (تبدیل ویس فارسی)',
+    nameFa: 'Google Gemini Audio (تبدیل ویس فارسی)',
     shortName: 'Gemini Audio',
     defaultBaseUrl: 'https://generativelanguage.googleapis.com',
-    defaultModelId: 'gemini-3.5-transcribe',
+    defaultModelId: 'gemini-4-hydrogen',
     apiKeyPlaceholder: 'AIzaSy... (اختیاری در صورت فعال بودن سهمیه سازنده)',
     descriptionFa:
-      'تبدیل دقیق فایل‌های صوتی کارگاهی فارسی (MP3/WAV/M4A/OGG/WEBM) به متن همراه با شناخت اصطلاحات ECU و WinOLS — بدون نیاز به کلید اضافه هنگام فعال بودن سهمیه سازنده.',
+      'تبدیل دقیق فایل‌های صوتی کارگاهی فارسی (MP3/WAV/M4A/OGG/WEBM) به متن با مدل‌های Gemini 4 Hydrogen و Gemini 3.8 Flash — بدون نیاز به کلید اضافه هنگام فعال بودن سهمیه سازنده.',
     needsOwnApiKey: false,
     presets: [
-      { label: 'Gemini 3.5 Transcribe (تخصصی صوت)', baseUrl: 'https://generativelanguage.googleapis.com', modelId: 'gemini-3.5-transcribe' },
-      { label: 'Gemini 4 Hydrogen (چندرسانه‌ای)', baseUrl: 'https://generativelanguage.googleapis.com', modelId: 'gemini-4-hydrogen' },
+      { label: 'Gemini 4 Hydrogen (هیدروژن ۴)', baseUrl: 'https://generativelanguage.googleapis.com', modelId: 'gemini-4-hydrogen' },
+      { label: 'Gemini 3.8 Flash (فلش ۳.۸)', baseUrl: 'https://generativelanguage.googleapis.com', modelId: 'gemini-3.8-flash' },
     ],
   },
   openai_whisper: {
     id: 'openai_whisper',
-    nameFa: 'OpenAI Whisper / GPT-4o Transcribe',
+    nameFa: 'OpenAI Audio Transcriptions (/audio/transcriptions)',
     shortName: 'OpenAI STT',
     defaultBaseUrl: 'https://api.openai.com/v1',
-    defaultModelId: 'gpt-4o-transcribe',
+    defaultModelId: '',
     apiKeyPlaceholder: 'sk-proj-... (در صورت خالی بودن از کلید OpenAI اصلی استفاده می‌شود)',
     descriptionFa:
-      'ارسال مستقیم فایل صوتی به استاندارد /audio/transcriptions (مدل‌های gpt-4o-transcribe و whisper-1) با پرامپت تخصصی ریمپ.',
+      'ارسال مستقیم فایل صوتی به استاندارد /audio/transcriptions با شناسه مدل دلخواه شما (بدون مدل پیش‌فرض قدیمی).',
     needsOwnApiKey: true,
-    presets: [
-      { label: 'GPT-4o Transcribe (دقت بالا)', baseUrl: 'https://api.openai.com/v1', modelId: 'gpt-4o-transcribe' },
-      { label: 'Whisper-1 (استاندارد)', baseUrl: 'https://api.openai.com/v1', modelId: 'whisper-1' },
-    ],
+    supportsLiveModelDiscovery: true,
   },
   groq_whisper: {
     id: 'groq_whisper',
-    nameFa: 'Groq Whisper Large v3 Turbo (فوق‌سریع)',
-    shortName: 'Groq Whisper',
+    nameFa: 'Groq Audio (/openai/v1/audio/transcriptions)',
+    shortName: 'Groq STT',
     defaultBaseUrl: 'https://api.groq.com/openai/v1',
-    defaultModelId: 'whisper-large-v3-turbo',
+    defaultModelId: '',
     apiKeyPlaceholder: 'gsk_...',
     descriptionFa:
-      'تبدیل ویس‌های طولانی کارگاهی به متن فارسی با سرعت بسیار بالا و دقت عالی در اصطلاحات انگلیسی/فارسی (Whisper Large v3 Turbo).',
+      'تبدیل فوق‌سریع ویس‌های کارگاهی از طریق درگاه OpenAI-Compatible سرویس Groq — شناسه مدل صوتی روز را از لیست مدل‌ها دریافت یا وارد کنید.',
     needsOwnApiKey: true,
-    presets: [
-      { label: 'Whisper Large v3 Turbo (سریع)', baseUrl: 'https://api.groq.com/openai/v1', modelId: 'whisper-large-v3-turbo' },
-      { label: 'Whisper Large v3 (حداکثر دقت)', baseUrl: 'https://api.groq.com/openai/v1', modelId: 'whisper-large-v3' },
-    ],
+    supportsLiveModelDiscovery: true,
   },
   custom_whisper: {
     id: 'custom_whisper',
-    nameFa: 'سرور Whisper سفارشی (HTTPS)',
-    shortName: 'Whisper سفارشی',
+    nameFa: 'درگاه صوتی OpenAI-Compatible سفارشی (HTTPS)',
+    shortName: 'STT سفارشی',
     defaultBaseUrl: 'https://api.avalai.ir/v1',
-    defaultModelId: 'whisper-1',
+    defaultModelId: '',
     apiKeyPlaceholder: 'کلید API درگاه صوتی شما...',
     descriptionFa:
-      'هر سرویس یا پروکسی HTTPS سازگار با استاندارد OpenAI /audio/transcriptions (مانند AvalAI، Fireworks یا سرور اختصاصی شما).',
+      'هر سرویس یا پروکسی HTTPS سازگار با استاندارد OpenAI /audio/transcriptions — با قابلیت استعلام لیست مدل‌ها و ورود آزاد Model ID.',
     needsOwnApiKey: true,
-    presets: [
-      { label: 'AvalAI Whisper', baseUrl: 'https://api.avalai.ir/v1', modelId: 'whisper-1' },
-      { label: 'Fireworks Whisper v3', baseUrl: 'https://audio-prod.us-virginia-1.direct.fireworks.ai/v1', modelId: 'whisper-v3' },
-    ],
+    supportsLiveModelDiscovery: true,
+    baseUrlTemplates: OPENAI_COMPATIBLE_GATEWAY_TEMPLATES,
   },
 };
 
@@ -438,45 +434,42 @@ export interface ModelTierMetadata {
   recommendedModels: Array<{ provider: AiProviderType; modelId: string; baseUrl: string; label: string }>;
 }
 
+/**
+ * Only Gemini 4 Hydrogen and Gemini 3.8 Flash are provided as built-in model presets.
+ * For any OpenAI-compatible or Anthropic provider, users fetch live models from /models or type any current model ID.
+ */
 export const MODEL_TIER_METADATA: Record<ModelTierId, ModelTierMetadata> = {
   economy: {
     id: 'economy',
     titleFa: 'سطح ۱ · اقتصادی و سریع (Economy)',
     badgeFa: 'اقتصادی',
-    descriptionFa: 'برای غربالگری تناقض‌ها، یکدست‌سازی عنوان فصل‌ها و پرسش‌های کوتاه — تا ۱۵ برابر ارزان‌تر از مدل پرچمدار',
+    descriptionFa: 'برای غربالگری تناقض‌ها، یکدست‌سازی عنوان فصل‌ها و پرسش‌های کوتاه — کمترین مصرف توکن و هزینه',
     accentHex: '#14532D',
     recommendedModels: [
       { provider: 'google_aistudio', modelId: 'gemini-3.8-flash', baseUrl: 'https://generativelanguage.googleapis.com', label: 'Gemini 3.8 Flash' },
-      { provider: 'anthropic', modelId: 'claude-3-5-haiku-latest', baseUrl: 'https://api.anthropic.com/v1', label: 'Claude 3.5 Haiku' },
-      { provider: 'openai', modelId: 'gpt-4o-mini', baseUrl: 'https://api.openai.com/v1', label: 'GPT-4o Mini' },
-      { provider: 'custom_openai', modelId: 'deepseek-chat', baseUrl: 'https://api.deepseek.com/v1', label: 'DeepSeek Chat (V3)' },
+      { provider: 'google_aistudio', modelId: 'gemini-4-hydrogen', baseUrl: 'https://generativelanguage.googleapis.com', label: 'Gemini 4 Hydrogen' },
     ],
   },
   balanced: {
     id: 'balanced',
     titleFa: 'سطح ۲ · متعادل و مهندسی (Balanced)',
     badgeFa: 'متعادل',
-    descriptionFa: 'برای ادغام معنایی چندفایلی، بازچینی فهرست، جستجوی وب و چت سردبیر — بهترین تعادل دقت فنی و هزینه',
+    descriptionFa: 'برای ادغام معنایی چندفایلی، بازچینی فهرست، جستجوی وب و چت سردبیر — بهترین تعادل دقت فنی و سرعت',
     accentHex: '#1E3A5F',
     recommendedModels: [
       { provider: 'google_aistudio', modelId: 'gemini-4-hydrogen', baseUrl: 'https://generativelanguage.googleapis.com', label: 'Gemini 4 Hydrogen' },
-      { provider: 'anthropic', modelId: 'claude-sonnet-4-20250514', baseUrl: 'https://api.anthropic.com/v1', label: 'Claude Sonnet 4' },
-      { provider: 'openai', modelId: 'gpt-4.1', baseUrl: 'https://api.openai.com/v1', label: 'GPT-4.1' },
-      { provider: 'custom_openai', modelId: 'anthropic/claude-sonnet-4', baseUrl: 'https://openrouter.ai/api/v1', label: 'OpenRouter · Sonnet 4' },
+      { provider: 'google_aistudio', modelId: 'gemini-3.8-flash', baseUrl: 'https://generativelanguage.googleapis.com', label: 'Gemini 3.8 Flash' },
     ],
   },
   flagship: {
     id: 'flagship',
     titleFa: 'سطح ۳ · پرچمدار و استدلال عمیق (Flagship)',
     badgeFa: 'پرچمدار',
-    descriptionFa: 'فقط برای بازبینی عمیق نهایی، تحلیل جداول پیچیده WinOLS و کشف شکاف‌های تخصصی — تا حداکثر کیفیت بدون هدررفت توکن',
+    descriptionFa: 'فقط برای بازبینی عمیق نهایی، تحلیل جداول پیچیده WinOLS و نگارش مرجع — حداکثر کیفیت بدون هدررفت توکن',
     accentHex: '#7C2D12',
     recommendedModels: [
-      { provider: 'anthropic', modelId: 'claude-opus-4-1-20250805', baseUrl: 'https://api.anthropic.com/v1', label: 'Claude Opus 4.1' },
-      { provider: 'openai', modelId: 'o4-mini', baseUrl: 'https://api.openai.com/v1', label: 'OpenAI o4-mini' },
-      { provider: 'custom_openai', modelId: 'anthropic/claude-opus-4', baseUrl: 'https://openrouter.ai/api/v1', label: 'OpenRouter · Opus 4' },
-      { provider: 'custom_openai', modelId: 'deepseek-reasoner', baseUrl: 'https://api.deepseek.com/v1', label: 'DeepSeek R1' },
       { provider: 'google_aistudio', modelId: 'gemini-4-hydrogen', baseUrl: 'https://generativelanguage.googleapis.com', label: 'Gemini 4 Hydrogen' },
+      { provider: 'google_aistudio', modelId: 'gemini-3.8-flash', baseUrl: 'https://generativelanguage.googleapis.com', label: 'Gemini 3.8 Flash' },
     ],
   },
 };
@@ -587,93 +580,16 @@ export interface MultiTierRecipe {
   enablePromptCaching: boolean;
 }
 
+/**
+ * Only Gemini 4 Hydrogen + Gemini 3.8 Flash has pre-filled default model IDs.
+ * All other recipes set up the provider + Base URL without hardcoding any non-Gemini model names.
+ */
 export const MULTI_TIER_RECIPES: readonly MultiTierRecipe[] = [
   {
-    id: 'anthropic_golden_trio',
-    titleFa: 'ترکیب طلایی Anthropic (Opus + Sonnet + Haiku)',
-    subtitleFa: 'کیفیت نگارش Opus 4.1 در بازبینی نهایی + صرفه‌جویی تا ۷۵٪ روی مراحل سبک با Haiku 3.5 و Sonnet 4',
-    badgeFa: 'بهترین برای کلید پولی کلاد',
-    primaryProvider: 'anthropic',
-    tiers: {
-      economy: {
-        provider: 'anthropic',
-        baseUrl: 'https://api.anthropic.com/v1',
-        modelId: 'claude-3-5-haiku-latest',
-      },
-      balanced: {
-        provider: 'anthropic',
-        baseUrl: 'https://api.anthropic.com/v1',
-        modelId: 'claude-sonnet-4-20250514',
-      },
-      flagship: {
-        provider: 'anthropic',
-        baseUrl: 'https://api.anthropic.com/v1',
-        modelId: 'claude-opus-4-1-20250805',
-      },
-    },
-    taskTierMap: { ...DEFAULT_TASK_TIER_MAP },
-    optimizationMode: 'balanced_pro',
-    enablePromptCaching: true,
-  },
-  {
-    id: 'openai_pro_trio',
-    titleFa: 'ترکیب حرفه‌ای OpenAI (o4-mini + GPT-4.1 + 4o-mini)',
-    subtitleFa: 'استدلال عمیق o4-mini برای ممیزی نهایی + GPT-4.1 برای چیدمان و GPT-4o Mini برای غربالگری ارزان',
-    badgeFa: 'اقتصادی و سریع',
-    primaryProvider: 'openai',
-    tiers: {
-      economy: {
-        provider: 'openai',
-        baseUrl: 'https://api.openai.com/v1',
-        modelId: 'gpt-4o-mini',
-      },
-      balanced: {
-        provider: 'openai',
-        baseUrl: 'https://api.openai.com/v1',
-        modelId: 'gpt-4.1',
-      },
-      flagship: {
-        provider: 'openai',
-        baseUrl: 'https://api.openai.com/v1',
-        modelId: 'o4-mini',
-      },
-    },
-    taskTierMap: { ...DEFAULT_TASK_TIER_MAP },
-    optimizationMode: 'balanced_pro',
-    enablePromptCaching: true,
-  },
-  {
-    id: 'openrouter_mixed_elite',
-    titleFa: 'ترکیب نخبه OpenRouter (Opus 4 + Sonnet 4 + DeepSeek V3)',
-    subtitleFa: 'فقط با یک کلید OpenRouter: کارهای سنگین روی Claude Opus 4 و کارهای سریع روی DeepSeek V3 فوق‌ارزان',
-    badgeFa: 'یک کلید · چند برند',
-    primaryProvider: 'custom_openai',
-    tiers: {
-      economy: {
-        provider: 'custom_openai',
-        baseUrl: 'https://openrouter.ai/api/v1',
-        modelId: 'deepseek/deepseek-chat',
-      },
-      balanced: {
-        provider: 'custom_openai',
-        baseUrl: 'https://openrouter.ai/api/v1',
-        modelId: 'anthropic/claude-sonnet-4',
-      },
-      flagship: {
-        provider: 'custom_openai',
-        baseUrl: 'https://openrouter.ai/api/v1',
-        modelId: 'anthropic/claude-opus-4',
-      },
-    },
-    taskTierMap: { ...DEFAULT_TASK_TIER_MAP },
-    optimizationMode: 'balanced_pro',
-    enablePromptCaching: true,
-  },
-  {
     id: 'gemini_optimal_duo',
-    titleFa: 'ترکیب بهینه Gemini (Hydrogen 4 + Flash 3.8)',
+    titleFa: 'ترکیب پیش‌فرض Gemini (Hydrogen 4 + Flash 3.8)',
     subtitleFa: 'کاملاً سازگار با سهمیه سازنده (App Owner): کارهای سریع با Flash 3.8 و بازبینی عمیق با Hydrogen 4',
-    badgeFa: 'سازگار با سهمیه رایگان',
+    badgeFa: 'تنها پیش‌فرض داخلی',
     primaryProvider: 'google_aistudio',
     tiers: {
       economy: {
@@ -695,6 +611,60 @@ export const MULTI_TIER_RECIPES: readonly MultiTierRecipe[] = [
     taskTierMap: { ...DEFAULT_TASK_TIER_MAP },
     optimizationMode: 'balanced_pro',
     enablePromptCaching: false,
+  },
+  {
+    id: 'custom_openai_flexible',
+    titleFa: 'الگوی ۳ سطحی OpenAI-Compatible (انتخاب آزاد مدل‌های روز)',
+    subtitleFa: 'هر ۳ سطح را به درگاه OpenAI-Compatible فعلی شما متصل می‌کند تا مدل‌های روز را از لیست زنده /models انتخاب کنید',
+    badgeFa: 'بدون مدل پیش‌فرض قدیمی',
+    primaryProvider: 'custom_openai',
+    tiers: {
+      economy: {
+        provider: 'custom_openai',
+        baseUrl: 'https://openrouter.ai/api/v1',
+        modelId: '',
+      },
+      balanced: {
+        provider: 'custom_openai',
+        baseUrl: 'https://openrouter.ai/api/v1',
+        modelId: '',
+      },
+      flagship: {
+        provider: 'custom_openai',
+        baseUrl: 'https://openrouter.ai/api/v1',
+        modelId: '',
+      },
+    },
+    taskTierMap: { ...DEFAULT_TASK_TIER_MAP },
+    optimizationMode: 'balanced_pro',
+    enablePromptCaching: true,
+  },
+  {
+    id: 'hybrid_gemini_and_custom',
+    titleFa: 'ترکیب هیبریدی: کارهای سبک با Gemini Flash 3.8 + پرچمدار سفارشی شما',
+    subtitleFa: 'مراحل سبک و پرتکرار روی Gemini 3.8 Flash/Hydrogen 4 و مرحله نگارش/بازبینی نهایی روی مدل دلخواه شما در تب ۱',
+    badgeFa: 'هیبریدی اقتصادی',
+    primaryProvider: 'custom_openai',
+    tiers: {
+      economy: {
+        provider: 'google_aistudio',
+        baseUrl: 'https://generativelanguage.googleapis.com',
+        modelId: 'gemini-3.8-flash',
+      },
+      balanced: {
+        provider: 'google_aistudio',
+        baseUrl: 'https://generativelanguage.googleapis.com',
+        modelId: 'gemini-4-hydrogen',
+      },
+      flagship: {
+        provider: 'custom_openai',
+        baseUrl: 'https://openrouter.ai/api/v1',
+        modelId: '',
+      },
+    },
+    taskTierMap: { ...DEFAULT_TASK_TIER_MAP },
+    optimizationMode: 'balanced_pro',
+    enablePromptCaching: true,
   },
 ] as const;
 
@@ -740,17 +710,17 @@ export const DEFAULT_AI_PROVIDER_CONFIG: AiProviderConfig = {
     openai: {
       baseUrl: AI_PROVIDER_METADATA.openai.defaultBaseUrl,
       apiKey: '',
-      modelId: AI_PROVIDER_METADATA.openai.defaultModelId,
+      modelId: '',
     },
     anthropic: {
       baseUrl: AI_PROVIDER_METADATA.anthropic.defaultBaseUrl,
       apiKey: '',
-      modelId: AI_PROVIDER_METADATA.anthropic.defaultModelId,
+      modelId: '',
     },
     custom_openai: {
       baseUrl: AI_PROVIDER_METADATA.custom_openai.defaultBaseUrl,
       apiKey: '',
-      modelId: AI_PROVIDER_METADATA.custom_openai.defaultModelId,
+      modelId: '',
     },
   },
   webSearchRoute: { ...DEFAULT_WEB_SEARCH_ROUTE },
@@ -767,7 +737,7 @@ export const DEFAULT_AI_PROVIDER_CONFIG: AiProviderConfig = {
   personalGoogleApiKey: '',
   customBaseUrl: AI_PROVIDER_METADATA.custom_openai.defaultBaseUrl,
   customApiKey: '',
-  customModelId: AI_PROVIDER_METADATA.custom_openai.defaultModelId,
+  customModelId: '',
 };
 
 export function normalizeKeyAuthMode(mode?: string | null): KeyAuthMode {
@@ -841,11 +811,13 @@ export function getEffectiveTierRouting(config: AiProviderConfig): MultiTierRout
     const fallbackSlot = DEFAULT_MULTI_TIER_ROUTING.tiers[tier];
     const provider = normalizeProviderType(rawSlot?.provider || fallbackSlot.provider);
     const meta = AI_PROVIDER_METADATA[provider];
+    const defaultModelForProvider =
+      provider === 'google_aistudio' ? fallbackSlot.modelId || meta.defaultModelId : '';
     return {
       provider,
       baseUrl: (rawSlot?.baseUrl || '').trim() || meta.defaultBaseUrl,
       apiKey: (rawSlot?.apiKey || '').trim(),
-      modelId: (rawSlot?.modelId || '').trim() || fallbackSlot.modelId || meta.defaultModelId,
+      modelId: (rawSlot?.modelId || '').trim() || defaultModelForProvider,
     };
   };
 
@@ -895,11 +867,16 @@ export function applyMultiTierRecipe(
     const target = recipe.tiers[tier];
     const existingSameProviderKey =
       prev.tiers[tier].provider === target.provider ? prev.tiers[tier].apiKey : '';
+    const inheritedTab1Url = config.providers?.[target.provider]?.baseUrl?.trim() || '';
+    const inheritedTab1Model = config.providers?.[target.provider]?.modelId?.trim() || '';
     return {
       provider: target.provider,
-      baseUrl: target.baseUrl,
+      baseUrl:
+        target.provider !== 'google_aistudio' && inheritedTab1Url
+          ? inheritedTab1Url
+          : target.baseUrl,
       apiKey: existingSameProviderKey,
-      modelId: target.modelId,
+      modelId: target.modelId || inheritedTab1Model,
     };
   };
   return {
@@ -931,7 +908,7 @@ export interface ResolvedTaskTierTarget {
  * Resolves the concrete provider/model/key for a given pipeline task.
  * If Multi-Tier Routing is disabled, returns the primary provider configuration.
  * When a tier's own `apiKey` is left blank, seamlessly inherits `config.providers[tier.provider].apiKey`
- * so the user never has to paste the same Anthropic/OpenAI/OpenRouter key three times.
+ * so the user never has to paste the same API key three times.
  */
 export function resolveTierSlotForTask(
   config: AiProviderConfig,
@@ -954,6 +931,7 @@ export function resolveTierSlotForTask(
   const slot = tr.tiers[tierId];
   const inheritedKey = config.providers?.[slot.provider]?.apiKey?.trim() || '';
   const inheritedBaseUrl = config.providers?.[slot.provider]?.baseUrl?.trim() || '';
+  const inheritedModelId = config.providers?.[slot.provider]?.modelId?.trim() || '';
   const meta = AI_PROVIDER_METADATA[slot.provider];
 
   return {
@@ -961,7 +939,9 @@ export function resolveTierSlotForTask(
     provider: slot.provider,
     baseUrl: slot.baseUrl.trim() || inheritedBaseUrl || meta.defaultBaseUrl,
     apiKey: slot.apiKey.trim() || inheritedKey,
-    modelId: slot.modelId.trim() || meta.defaultModelId,
+    modelId:
+      slot.modelId.trim() ||
+      (slot.provider === 'google_aistudio' ? meta.defaultModelId : inheritedModelId),
   };
 }
 
@@ -986,7 +966,7 @@ export function resolveCapabilityRoutingPlan(
   let webSearchLabelFa: string;
   if (searchRoute.provider === 'same_as_primary') {
     if (config.provider === 'anthropic') {
-      webSearchLabelFa = 'Claude Web Search (بومی)';
+      webSearchLabelFa = 'Anthropic Web Search (بومی)';
     } else if (config.provider === 'google_aistudio') {
       webSearchLabelFa = 'Google Search (Gemini)';
     } else {
@@ -994,11 +974,15 @@ export function resolveCapabilityRoutingPlan(
     }
   } else {
     const sm = WEB_SEARCH_PROVIDER_METADATA[searchRoute.provider];
-    webSearchLabelFa = `${sm.shortName} (${searchRoute.modelId})`;
+    webSearchLabelFa = searchRoute.modelId
+      ? `${sm.shortName} (${searchRoute.modelId})`
+      : `${sm.shortName} (مدل انتخاب نشده)`;
   }
 
   const am = AUDIO_TRANSCRIBE_PROVIDER_METADATA[audioRoute.provider];
-  const audioLabelFa = `${am.shortName} (${audioRoute.modelId})`;
+  const audioLabelFa = audioRoute.modelId
+    ? `${am.shortName} (${audioRoute.modelId})`
+    : `${am.shortName} (مدل انتخاب نشده)`;
 
   const isHybrid =
     tr.enabled ||
@@ -1006,8 +990,9 @@ export function resolveCapabilityRoutingPlan(
     (searchRoute.provider !== 'same_as_primary' && searchRoute.provider !== 'google_gemini_search') ||
     audioRoute.provider !== 'google_gemini_audio';
 
+  const fmtTierModel = (m: string) => m.trim() || 'انتخاب نشده';
   const tierSummaryFa = tr.enabled
-    ? `اقتصادی: ${tr.tiers.economy.modelId} · متعادل: ${tr.tiers.balanced.modelId} · پرچمدار: ${tr.tiers.flagship.modelId}`
+    ? `اقتصادی: ${fmtTierModel(tr.tiers.economy.modelId)} · متعادل: ${fmtTierModel(tr.tiers.balanced.modelId)} · پرچمدار: ${fmtTierModel(tr.tiers.flagship.modelId)}`
     : 'تک‌مدله (همه مراحل روی مدل اصلی)';
 
   return {
@@ -1057,7 +1042,7 @@ export function getProviderDisplaySummary(
   const modelLabel =
     provider === 'google_aistudio'
       ? getGoogleModelMeta(googleModelId).displayName
-      : creds.modelId || meta.defaultModelId;
+      : creds.modelId.trim() || 'مدل انتخاب نشده';
 
   const keySourceLabel =
     mode === 'personal'
