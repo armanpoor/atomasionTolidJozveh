@@ -82,6 +82,22 @@ const UNIT_SYNONYM_MAP: Record<string, string> = {
   baud: 'baud',
 };
 
+export const UNIT_DIMENSION_FAMILIES: Record<string, string[]> = {
+  pressure: ['bar', 'mbar', 'psi', 'kpa'],
+  airflow_mass: ['mg_str', 'g_s', 'kg_h'],
+  angle: ['deg', 'deg_btdc', 'deg_atdc'],
+  temperature: ['deg_c', 'deg_f'],
+  power: ['hp', 'kw'],
+  torque: ['nm'],
+};
+
+const UNIT_TO_DIMENSION_MAP: Record<string, string> = {};
+for (const [dimension, units] of Object.entries(UNIT_DIMENSION_FAMILIES)) {
+  for (const u of units) {
+    UNIT_TO_DIMENSION_MAP[u] = dimension;
+  }
+}
+
 const MEASUREMENT_TRIPLE_RX =
   /([+-])?\s*(\d+(?:\.\d+)?)(?:\s*:\s*1)?\s*(°[CFcf]|°|mg\/stroke|mg\/str|mg\/stk|mg\/hub|kg\/h|g\/s|BTDC|ATDC|RPM|rpm|bar|BAR|psi|PSI|kPa|kpa|mbar|hPa|ms|mV|V|kHz|MHz|Hz|Nm|kW|hp|AFR|afr|lambda|λ|kbps|baud|deg|CA|%|میلی[\s\u200c]*ثانیه|میلی[\s\u200c]*ولت|دور\s+بر\s+دقیقه|نیوتن[\s\u200c]*متر|اسب\s+بخار|کیلوپاسکال|کیلووات|درجه|درصد|لامبدا|ولت|بار)(?![A-Za-z0-9\u0600-\u06FF])/g;
 
@@ -879,13 +895,22 @@ export function runLayer1DeterministicGuard(
 
         if (!scopedAnchors.measurementUnits.has(tr.unit)) {
           invalidBlockSet.add(blockId);
+          const outDim = UNIT_TO_DIMENSION_MAP[tr.unit];
+          const competingSourceUnits = outDim
+            ? Array.from(scopedAnchors.measurementUnits).filter((u) => UNIT_TO_DIMENSION_MAP[u] === outDim)
+            : [];
+          const conversionMsg =
+            competingSourceUnits.length > 0
+              ? `تبدیل واحد مهندسی غیرمجاز (${competingSourceUnits.join(', ')} به ${tr.unit}) در بلوک ${blockId}: در استانداردهای کالیبراسیون و WinOLS تبدیل واحد سرخود اکیداً ممنوع است (مقدار: «${tr.raw}»).`
+              : `تبدیل واحد سرخود یا واحد غیرمستند «${tr.raw}» در بلوک ${blockId}: واحد «${tr.unit}» در منبع ارجاع‌شده وجود ندارد.`;
+
           issues.push({
             id: `l1-unit-conv-${blockId}-${tr.raw}`,
             kind: 'unit_mismatch_or_conversion',
             severity: 'error',
             blockId,
             offendingToken: tr.raw,
-            messageFa: `تبدیل واحد سرخود یا واحد غیرمستند «${tr.raw}» در بلوک ${blockId}: واحد «${tr.unit}» در منبع ارجاع‌شده وجود ندارد.`,
+            messageFa: conversionMsg,
           });
           continue;
         }

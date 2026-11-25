@@ -87,6 +87,12 @@ import {
   SURGICAL_PATCH_RESPONSE_SCHEMA,
 } from '../lib/harness/promptBuilder.ts';
 import {
+  auditPreservedImmutableTokens,
+  maskSourceChunks,
+  unmaskSemanticBlock,
+  unmaskSemanticSectionIR,
+} from '../lib/harness/deterministicMasking.ts';
+import {
   ProviderGatewayError,
   repairMalformedJsonDeterministic,
 } from '../lib/harness/providerGuard.ts';
@@ -1102,10 +1108,14 @@ export async function executeHarnessStepForProject(params: {
     }).length;
 
     // 1. STATELESS AUTHOR CALL (Immutable Cached Prefix + Isolated Dynamic Suffix + Strict Schema on Google & Custom)
+    // Deterministic masking of hex/DTC/scale tokens to guarantee zero numeric drift in LLM generation
+    const { maskedChunks: authorMaskedChunks, tokenMap: authorTokenMap } =
+      maskSourceChunks(sourceChunks);
+
     const authorPrompt = buildStatelessAuthorPrompt({
       glossary: harnessState.glossary,
       section: targetSection,
-      sourceChunks,
+      sourceChunks: authorMaskedChunks,
       rollingSummary: harnessState.rollingSummary,
       validationDomain: activeValidationDomain,
     });
@@ -1225,6 +1235,12 @@ export async function executeHarnessStepForProject(params: {
         sourceChunks,
       }),
     };
+
+    // Deterministically restore immutable hex addresses & calibration parameters
+    if (authorTokenMap.size > 0) {
+      currentIR = unmaskSemanticSectionIR(currentIR, authorTokenMap);
+      auditPreservedImmutableTokens(authorRes.text, authorTokenMap);
+    }
 
     // Package C: Immediately persist `drafted_unverified` BEFORE Judge/Patch so pause/abort never wastes draft!
     const draftTs = new Date().toISOString();
@@ -1387,13 +1403,16 @@ export async function executeHarnessStepForProject(params: {
 
       if (plan.action === 'quarantine') break;
 
+      const { maskedChunks: patchMaskedChunks, tokenMap: patchTokenMap } =
+        maskSourceChunks(plan.minimalSourceChunks);
+
       const patchPrompt = buildSurgicalPatchPrompt({
         glossary: harnessState.glossary,
         section: targetSection,
         faultyBlocks: plan.faultyBlocks,
         layer1Issues: plan.focusedLayer1Issues,
         layer2Issues: plan.focusedLayer2Issues,
-        minimalSourceChunks: plan.minimalSourceChunks,
+        minimalSourceChunks: patchMaskedChunks,
         validationDomain: activeValidationDomain,
       });
 
@@ -1451,10 +1470,13 @@ export async function executeHarnessStepForProject(params: {
           ? focusedChunkIds
           : targetSection.sourceChunkIds;
 
-      const patchedBlocks = normalizeSemanticBlocks(
+      let patchedBlocks = normalizeSemanticBlocks(
         parsedPatch?.patchedBlocks || parsedPatch?.blocks,
         patchFallbackChunkIds
       );
+      if (patchTokenMap.size > 0) {
+        patchedBlocks = patchedBlocks.map((b) => unmaskSemanticBlock(b, patchTokenMap));
+      }
 
       attempts += 1;
       reAuditedAfterLastPatch = false;

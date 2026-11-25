@@ -91,7 +91,7 @@ function buildInlineRuns(
       if (part.kind === 'ltr_code') {
         runs.push(
           new TextRun({
-            text: `\u2066 ${part.text} \u2069`,
+            text: `\u202A\u2066 ${part.text} \u2069\u202C`,
             font: codeFont,
             size: Math.max(16, sizeHalfPt - 2),
             bold: true,
@@ -101,18 +101,20 @@ function buildInlineRuns(
                 ? undefined
                 : { fill: COLORS.primaryLight, type: ShadingType.CLEAR, color: 'auto' },
             rightToLeft: false,
+            complexScript: false,
             language: { value: 'en-US' },
           })
         );
       } else if (part.kind === 'ltr_tech') {
         runs.push(
           new TextRun({
-            text: `\u2066${part.text}\u2069`,
+            text: `\u202A\u2066${part.text}\u2069\u202C`,
             font,
             size: sizeHalfPt,
             bold,
             color: baseColor,
             rightToLeft: false,
+            complexScript: false,
             language: { value: 'en-US' },
           })
         );

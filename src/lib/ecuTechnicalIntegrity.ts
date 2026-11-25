@@ -37,8 +37,10 @@ const LTR_TECH_PATTERN = new RegExp(
     '\\b\\d{1,2}\\s*[xX×]\\s*\\d{1,2}\\b',
     // Signed numbers with optional unit (e.g. -2.5°, +3.5 deg, -4.0 CA, +0.25 bar)
     '[+-]\\d+(?:\\.\\d+)?(?:\\s*(?:°[CF]?|deg|CA|BTDC|ATDC|bar|psi|kPa|mbar|ms|V|mV|%|λ|AFR))?',
-    // Numbers directly paired with Latin technical units (e.g. 3500 RPM, 1.2 bar, 45 mg/str, 0.85 lambda)
-    '\\b\\d+(?:\\.\\d+)?\\s*(?:RPM|rpm|bar|BAR|psi|PSI|kPa|kpa|mbar|hPa|AFR|afr|lambda|λ|BTDC|ATDC|mg\\/str(?:oke)?|mg\\/stk|mg\\/hub|g\\/s|kg\\/h|ms|mV|V|kHz|MHz|Hz|Nm|hp|kW|kbps|baud|°C|°F)\\b',
+    // Numbers directly paired with Latin technical units (e.g. 3500 RPM, 1.2 bar, 45 mg/str, 0.85 lambda, 16-Bit)
+    '\\b\\d+(?:\\.\\d+)?\\s*(?:RPM|rpm|bar|BAR|psi|PSI|kPa|kpa|mbar|hPa|AFR|afr|lambda|λ|BTDC|ATDC|mg\\/str(?:oke)?|mg\\/stk|mg\\/hub|g\\/s|kg\\/h|ms|mV|V|kHz|MHz|Hz|Nm|hp|kW|kbps|baud|°C|°F|Bit|bit|Byte|byte)\\b',
+    // Alphanumeric technical tokens starting with numbers (e.g. 16Bit, 16-Bit, 32bit, 2D, 3D)
+    '\\b\\d+[-_]?[A-Za-z]+[A-Za-z0-9._/-]*',
     // ECU models, calibration map names, formulas, Latin technical acronyms (e.g. ME7.4.4, SIM2K-241, KFZW/KFZW2, AFR = 12.5)
     '\\b[A-Za-z][A-Za-z0-9._/-]{1,28}(?:\\s*[=<>±]\\s*[+-]?[A-Za-z0-9._:/-]+)?',
   ].join('|'),
@@ -91,12 +93,13 @@ export function segmentBidiTechnicalRuns(text: string): BidiRunSegment[] {
     const next = segments[i + 1];
     if (
       seg.kind === 'rtl_text' &&
-      /^[\s/\-–]+$/.test(seg.text) &&
+      /^[\s/\-–—:+()]+$/.test(seg.text) &&
       prev &&
-      prev.kind === 'ltr_tech' &&
+      (prev.kind === 'ltr_tech' || prev.kind === 'ltr_code') &&
       next &&
-      next.kind === 'ltr_tech'
+      (next.kind === 'ltr_tech' || next.kind === 'ltr_code')
     ) {
+      prev.kind = prev.kind === 'ltr_code' && next.kind === 'ltr_code' ? 'ltr_code' : 'ltr_tech';
       prev.text += seg.text + next.text;
       i += 1;
       continue;

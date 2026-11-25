@@ -26,6 +26,21 @@ test('segmentBidiTechnicalRuns isolates hex addresses, DTC codes, ECU models, ra
   assert.equal(segs.map((s) => s.text).join(''), input);
 });
 
+test('segmentBidiTechnicalRuns coalesces multi-word English technical phrases with hyphens, slashes, and numbers', () => {
+  const input =
+    'در پلتفرم BOSCH ME7.4.4 - 16Bit و نقشه KFZW2 / Ignition Angle مقدار 45 mg/stroke ثبت شده است.';
+  const segs = segmentBidiTechnicalRuns(input);
+
+  // Multi-word phrase with hyphen and numbers must be coalesced into a single LTR segment
+  assert.ok(segs.some((s) => s.text === 'BOSCH ME7.4.4 - 16Bit'));
+  // Multi-word phrase with slash must be coalesced
+  assert.ok(segs.some((s) => s.text === 'KFZW2 / Ignition Angle'));
+  // Measurement unit
+  assert.ok(segs.some((s) => s.text === '45 mg/stroke'));
+  // Lossless byte preservation
+  assert.equal(segs.map((s) => s.text).join(''), input);
+});
+
 test('extractEcuPlatforms and hasDisjointEcuPlatforms isolate distinct ECUs to prevent false contradictions', () => {
   const textA = 'در ایسیو بوش ME7.4.4 حداکثر فشار ریل سوخت ۳.۵ بار است.';
   const textB = 'در ایسیو زیمنس SIM2K-241 حداکثر فشار ریل سوخت ۴.۲ بار است.';

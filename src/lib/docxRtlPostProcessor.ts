@@ -214,6 +214,40 @@ function ensureBidiVisualOnTables(xml: string): string {
   });
 }
 
+/**
+ * Guarantees that LTR technical runs (e.g. English ECU identifiers, formulas, and hex ranges)
+ * inside RTL paragraphs explicitly carry <w:rtl w:val="0"/> and <w:cs w:val="0"/> in Word XML,
+ * preventing Microsoft Word from reversing hyphens, slashes, or numbers in RTL mode.
+ */
+function ensureLtrTechnicalRunsInDocumentXml(xml: string): string {
+  return xml.replace(/<w:r\b[^>]*>[\s\S]*?<\/w:r>/g, (runXml) => {
+    const isLtrRun =
+      runXml.includes('w:val="en-US"') ||
+      runXml.includes('\u202A') ||
+      runXml.includes('\u2066');
+    if (!isLtrRun) return runXml;
+
+    return runXml.replace(/<w:rPr\b[^>]*>([\s\S]*?)<\/w:rPr>/, (rPrFull, rPrInner) => {
+      let patchedInner = rPrInner;
+      if (/<w:rtl(?:\s|\/|>)/.test(patchedInner)) {
+        patchedInner = patchedInner.replace(
+          /<w:rtl\b[^>]*\/>|<w:rtl\b[^>]*>[\s\S]*?<\/w:rtl>/g,
+          '<w:rtl w:val="0"/>'
+        );
+      } else {
+        patchedInner = `<w:rtl w:val="0"/>${patchedInner}`;
+      }
+      if (/<w:cs(?:\s|\/|>)/.test(patchedInner)) {
+        patchedInner = patchedInner.replace(
+          /<w:cs\b[^>]*\/>|<w:cs\b[^>]*>[\s\S]*?<\/w:cs>/g,
+          '<w:cs w:val="0"/>'
+        );
+      }
+      return `<w:rPr>${patchedInner}</w:rPr>`;
+    });
+  });
+}
+
 function ensureHeaderFooterBidi(xml: string, fontFamily: string, fallbackTitle: string): string {
   const font = escapeXml(fontFamily);
   let out = ensureBidiVisualOnTables(xml);
@@ -357,6 +391,7 @@ export async function enforceRtlOoxmlIntegrity(
 
     docXml = injectBidiIntoSectPr(docXml);
     docXml = ensureBidiVisualOnTables(docXml);
+    docXml = ensureLtrTechnicalRunsInDocumentXml(docXml);
     zip.file('word/document.xml', docXml);
   }
 

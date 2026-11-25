@@ -587,6 +587,7 @@ test('Package A: Measurement triple (sign + number + unit) catches sign inversio
   const unitRes = runLayer1DeterministicGuard(unitSwapIR, sourceChunks, SAMPLE_GLOSSARY);
   assert.equal(unitRes.passed, false);
   assert.ok(unitRes.issues.some((i) => i.kind === 'unit_mismatch_or_conversion'));
+  assert.ok(unitRes.issues.some((i) => i.messageFa.includes('bar به psi')));
 });
 
 test('Package A: ECU platform isolation catches cross-ECU leak even when leaked ECU exists in global LivingGlossary', () => {
