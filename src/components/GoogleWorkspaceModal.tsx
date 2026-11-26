@@ -7,6 +7,7 @@ import {
   FileText,
   FolderOpen,
   Loader2,
+  Presentation,
   RefreshCw,
   Search,
   Table2,
@@ -24,16 +25,19 @@ import type { WinolsExtractionReport } from '../lib/winolsMapGuide';
 import type { QueuedUploadFile } from './FileDropzone';
 import {
   buildBookSpreadsheetReportPayload,
+  createBookGoogleDoc,
+  createBookPresentation,
   createBookSpreadsheet,
   downloadDriveFileForImport,
   DriveFileItem,
   GOOGLE_DOC_MIME,
   GOOGLE_SHEET_MIME,
+  GOOGLE_SLIDES_MIME,
   listDriveFiles,
   listSpreadsheetTabs,
   SpreadsheetMetadata,
   updateExistingSpreadsheetTab,
-  uploadFileToDrive,
+  uploadFinalDocumentToDrive,
 } from '../lib/googleWorkspace';
 import { generateDocxBlob } from '../lib/docxGenerator';
 import { exportBookToMarkdown, toPersianDigits } from '../lib/formatParsers';
@@ -73,6 +77,14 @@ type PendingMutationConfirmation =
       spreadsheetTitle: string;
       sheetTitle: string;
       sourceTabKey: 'summary' | 'chapters' | 'winols';
+    }
+  | {
+      kind: 'doc_create';
+      docTitle: string;
+    }
+  | {
+      kind: 'slides_create';
+      presentationTitle: string;
     };
 
 export const GoogleWorkspaceModal: React.FC<GoogleWorkspaceModalProps> = ({
@@ -117,6 +129,8 @@ export const GoogleWorkspaceModal: React.FC<GoogleWorkspaceModalProps> = ({
   const [targetUpdatePayloadKey, setTargetUpdatePayloadKey] = useState<
     'summary' | 'chapters' | 'winols'
   >('winols');
+  const [newDocTitle, setNewDocTitle] = useState('');
+  const [newSlidesTitle, setNewSlidesTitle] = useState('');
 
   const [pendingConfirmation, setPendingConfirmation] =
     useState<PendingMutationConfirmation | null>(null);
@@ -141,6 +155,8 @@ export const GoogleWorkspaceModal: React.FC<GoogleWorkspaceModalProps> = ({
           `${cleanTitle}_VazirMedium.${driveExportFormat === 'docx' ? 'docx' : 'md'}`
         );
         setNewSheetTitle(`گزارش و نقشه‌های WinOLS — ${book.title}`);
+        setNewDocTitle(`${book.title} (نسخه Google Docs)`);
+        setNewSlidesTitle(`اسلایدهای ارائه — ${book.title}`);
       }
     }
   }, [open, initialTab, book, driveExportFormat]);
@@ -280,31 +296,24 @@ export const GoogleWorkspaceModal: React.FC<GoogleWorkspaceModalProps> = ({
     setSuccessInfo(null);
     try {
       if (pendingConfirmation.kind === 'drive_upload') {
-        let data: Blob | string;
-        let mimeType: string;
-        if (pendingConfirmation.format === 'docx') {
-          data = await generateDocxBlob(book, config);
-          mimeType =
-            'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
-        } else {
-          data = exportBookToMarkdown(book);
-          mimeType = 'text/markdown;charset=utf-8';
-        }
+        const data: Blob | string =
+          pendingConfirmation.format === 'docx'
+            ? await generateDocxBlob(book, config)
+            : exportBookToMarkdown(book);
 
-        const uploaded = await uploadFileToDrive({
+        const uploaded = await uploadFinalDocumentToDrive({
           accessToken: workspaceAccessToken,
           fileName: pendingConfirmation.fileName,
-          mimeType,
+          format: pendingConfirmation.format,
           data,
           existingFileId: pendingConfirmation.overwriteFileId,
+          description: `خروجی نهایی کتاب: ${book.title}`,
         });
         setSuccessInfo({
-          message: pendingConfirmation.overwriteFileId
+          message: uploaded.updated
             ? `فایل «${uploaded.name}» در Google Drive به‌روزرسانی شد.`
             : `فایل «${uploaded.name}» با موفقیت در Google Drive ذخیره شد.`,
-          url:
-            uploaded.webViewLink ||
-            `https://drive.google.com/file/d/${uploaded.id}/view`,
+          url: uploaded.webViewLink,
           linkLabel: 'مشاهده در Google Drive',
         });
         void fetchDriveFilesList();
@@ -351,6 +360,33 @@ export const GoogleWorkspaceModal: React.FC<GoogleWorkspaceModalProps> = ({
           url: `https://docs.google.com/spreadsheets/d/${pendingConfirmation.spreadsheetId}/edit`,
           linkLabel: 'باز کردن در Google Sheets',
         });
+      } else if (pendingConfirmation.kind === 'doc_create') {
+        const created = await createBookGoogleDoc({
+          accessToken: workspaceAccessToken,
+          title: pendingConfirmation.docTitle,
+          book,
+        });
+        setSuccessInfo({
+          message: `سند بومی Google Docs «${created.title}» با جهت راست‌چین کامل ساخته شد.`,
+          url: created.documentUrl,
+          linkLabel: 'باز کردن در Google Docs',
+        });
+        void fetchDriveFilesList();
+      } else if (pendingConfirmation.kind === 'slides_create') {
+        const created = await createBookPresentation({
+          accessToken: workspaceAccessToken,
+          title: pendingConfirmation.presentationTitle,
+          book,
+          winolsReport,
+        });
+        setSuccessInfo({
+          message: `ارائه Google Slides «${created.title}» با ${toPersianDigits(
+            created.slideCount
+          )} اسلاید ساخته شد.`,
+          url: created.presentationUrl,
+          linkLabel: 'باز کردن در Google Slides',
+        });
+        void fetchDriveFilesList();
       }
       setPendingConfirmation(null);
     } catch (err) {
@@ -384,10 +420,10 @@ export const GoogleWorkspaceModal: React.FC<GoogleWorkspaceModalProps> = ({
             </div>
             <div>
               <h2 className="text-sm sm:text-base font-extrabold text-[#1A1816]">
-                اتصال مستقیم به Google Drive و Google Sheets
+                اتصال مستقیم به Google Drive، Docs، Sheets و Slides
               </h2>
               <p className="text-[11px] text-[#57534E]">
-                وارد کردن مستقیم جزوه‌ها از Drive/Sheets و خروجی گزارش کتاب و نقشه‌های WinOLS
+                وارد کردن مستقیم جزوه‌ها از Drive/Docs/Sheets/Slides و خروجی گزارش، سند و اسلاید ارائه
               </p>
             </div>
           </div>
@@ -640,6 +676,7 @@ export const GoogleWorkspaceModal: React.FC<GoogleWorkspaceModalProps> = ({
                 <ul className="divide-y divide-[#EFECE4] rounded-xl border border-[#E2DDD3] bg-white">
                   {driveFiles.map((file) => {
                     const isSheet = file.mimeType === GOOGLE_SHEET_MIME;
+                    const isSlides = file.mimeType === GOOGLE_SLIDES_MIME;
                     const busy = importingFileId === file.id;
                     return (
                       <li
@@ -651,11 +688,15 @@ export const GoogleWorkspaceModal: React.FC<GoogleWorkspaceModalProps> = ({
                             className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-lg ${
                               isSheet
                                 ? 'bg-[#EEF6F0] text-[#14532D]'
-                                : 'bg-[#EEF3F8] text-[#1E3A5F]'
+                                : isSlides
+                                  ? 'bg-[#FEF6E7] text-[#92400E]'
+                                  : 'bg-[#EEF3F8] text-[#1E3A5F]'
                             }`}
                           >
                             {isSheet ? (
                               <Table2 className="h-4 w-4" />
+                            ) : isSlides ? (
+                              <Presentation className="h-4 w-4" />
                             ) : (
                               <FileText className="h-4 w-4" />
                             )}
@@ -665,7 +706,13 @@ export const GoogleWorkspaceModal: React.FC<GoogleWorkspaceModalProps> = ({
                               {file.name}
                             </div>
                             <div className="text-[11px] text-[#78716C]">
-                              {isSheet ? 'Google Sheets' : file.mimeType.includes('document') ? 'Google Docs' : 'فایل درایو'}
+                              {isSheet
+                                ? 'Google Sheets'
+                                : isSlides
+                                  ? 'Google Slides'
+                                  : file.mimeType === GOOGLE_DOC_MIME
+                                    ? 'Google Docs'
+                                    : 'فایل درایو'}
                             </div>
                           </div>
                         </div>
@@ -724,7 +771,11 @@ export const GoogleWorkspaceModal: React.FC<GoogleWorkspaceModalProps> = ({
                         ? `یک Google Sheet جدید با عنوان «${pendingConfirmation.spreadsheetTitle}» شامل ${toPersianDigits(
                             pendingConfirmation.tabNames.length
                           )} تب (${pendingConfirmation.tabNames.join('، ')}) در حساب شما ایجاد خواهد شد.`
-                        : `داده‌های تب «${pendingConfirmation.sheetTitle}» در فایل Google Sheet «${pendingConfirmation.spreadsheetTitle}» به‌روزرسانی و بازنویسی خواهد شد. آیا تأیید می‌کنید؟`}
+                        : pendingConfirmation.kind === 'doc_create'
+                          ? `یک سند بومی Google Docs جدید با عنوان «${pendingConfirmation.docTitle}» شامل متن ساختاریافته کتاب در حساب شما ساخته خواهد شد. آیا تأیید می‌کنید؟`
+                          : pendingConfirmation.kind === 'slides_create'
+                            ? `یک فایل ارائه Google Slides جدید با عنوان «${pendingConfirmation.presentationTitle}» شامل خلاصه فصل‌ها و نقشه‌های WinOLS در حساب شما ساخته خواهد شد. آیا تأیید می‌کنید؟`
+                            : `داده‌های تب «${pendingConfirmation.sheetTitle}» در فایل Google Sheet «${pendingConfirmation.spreadsheetTitle}» به‌روزرسانی و بازنویسی خواهد شد. آیا تأیید می‌کنید؟`}
                   </p>
                   <div className="flex flex-wrap items-center gap-2">
                     <button
@@ -800,7 +851,8 @@ export const GoogleWorkspaceModal: React.FC<GoogleWorkspaceModalProps> = ({
                       .filter(
                         (f) =>
                           f.mimeType !== GOOGLE_DOC_MIME &&
-                          f.mimeType !== GOOGLE_SHEET_MIME
+                          f.mimeType !== GOOGLE_SHEET_MIME &&
+                          f.mimeType !== GOOGLE_SLIDES_MIME
                       )
                       .map((f) => (
                         <option key={f.id} value={f.id}>
@@ -981,6 +1033,77 @@ export const GoogleWorkspaceModal: React.FC<GoogleWorkspaceModalProps> = ({
                         : 'به‌روزرسانی تب در Google Sheets'}
                     </span>
                   </button>
+                </div>
+              </div>
+
+              {/* Export Section 3: Native Google Docs & Google Slides */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div className="rounded-xl border border-[#E2DDD3] bg-white p-4 space-y-3">
+                  <div className="flex items-center gap-2 text-xs font-extrabold text-[#1E3A5F]">
+                    <FileText className="h-4 w-4" />
+                    <span>۳. ساخت سند بومی در Google Docs</span>
+                  </div>
+                  <div className="space-y-1">
+                    <label className="block text-[11px] font-bold text-[#57534E]">
+                      عنوان سند Google Docs
+                    </label>
+                    <input
+                      type="text"
+                      value={newDocTitle}
+                      onChange={(e) => setNewDocTitle(e.target.value)}
+                      className="w-full rounded-lg border border-[#D6D0C4] bg-[#FAF9F6] px-3 py-2 text-xs text-[#1A1816]"
+                    />
+                  </div>
+                  <div className="flex justify-end">
+                    <button
+                      type="button"
+                      disabled={!newDocTitle.trim() || executingMutation}
+                      onClick={() =>
+                        setPendingConfirmation({
+                          kind: 'doc_create',
+                          docTitle: newDocTitle.trim(),
+                        })
+                      }
+                      className="inline-flex items-center gap-1.5 rounded-lg bg-[#1E3A5F] px-3.5 py-2 text-xs font-bold text-white hover:bg-[#162C49] disabled:opacity-50 cursor-pointer"
+                    >
+                      <FileText className="h-3.5 w-3.5" />
+                      <span>ایجاد در Google Docs</span>
+                    </button>
+                  </div>
+                </div>
+
+                <div className="rounded-xl border border-[#E2DDD3] bg-white p-4 space-y-3">
+                  <div className="flex items-center gap-2 text-xs font-extrabold text-[#92400E]">
+                    <Presentation className="h-4 w-4" />
+                    <span>۴. ساخت اسلاید ارائه در Google Slides</span>
+                  </div>
+                  <div className="space-y-1">
+                    <label className="block text-[11px] font-bold text-[#57534E]">
+                      عنوان ارائه Google Slides
+                    </label>
+                    <input
+                      type="text"
+                      value={newSlidesTitle}
+                      onChange={(e) => setNewSlidesTitle(e.target.value)}
+                      className="w-full rounded-lg border border-[#D6D0C4] bg-[#FAF9F6] px-3 py-2 text-xs text-[#1A1816]"
+                    />
+                  </div>
+                  <div className="flex justify-end">
+                    <button
+                      type="button"
+                      disabled={!newSlidesTitle.trim() || executingMutation}
+                      onClick={() =>
+                        setPendingConfirmation({
+                          kind: 'slides_create',
+                          presentationTitle: newSlidesTitle.trim(),
+                        })
+                      }
+                      className="inline-flex items-center gap-1.5 rounded-lg bg-[#92400E] px-3.5 py-2 text-xs font-bold text-white hover:bg-[#78350F] disabled:opacity-50 cursor-pointer"
+                    >
+                      <Presentation className="h-3.5 w-3.5" />
+                      <span>ایجاد در Google Slides</span>
+                    </button>
+                  </div>
                 </div>
               </div>
             </div>

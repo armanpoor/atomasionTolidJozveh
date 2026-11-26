@@ -30,6 +30,7 @@ import {
   getCalloutTheme,
   SPECIAL_FRAME_THEMES,
 } from '../lib/calloutThemes';
+import { sanitizeSvgMarkup } from '../lib/diagramRenderer';
 import { toPersianDigits } from '../lib/formatParsers';
 import { SelectedChapterKey } from './ChapterSidebar';
 import { RichText } from './RichText';
@@ -406,7 +407,7 @@ function BlockRenderer({
         <figure className="my-6 overflow-hidden rounded-xl border border-[#D4CEC2] bg-[#FCFBF8]">
           <div
             className="p-3 [&>svg]:h-auto [&>svg]:w-full"
-            dangerouslySetInnerHTML={{ __html: block.svgMarkup }}
+            dangerouslySetInnerHTML={{ __html: sanitizeSvgMarkup(block.svgMarkup) }}
           />
           <figcaption className="border-t border-[#E4DFD4] bg-[#F4F1EA] px-4 py-2.5 text-center text-xs font-bold text-[#1E3A5F]">
             {block.caption}

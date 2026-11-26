@@ -88,6 +88,7 @@ import {
 } from '../lib/harness/promptBuilder.ts';
 import {
   auditPreservedImmutableTokens,
+  findLeftoverImmutableTokens,
   maskSourceChunks,
   unmaskSemanticBlock,
   unmaskSemanticSectionIR,
@@ -133,6 +134,9 @@ const VALID_BLOCK_KINDS = new Set<SemanticBlockKind>([
   'source_conflict_flag',
   'figure_ref',
 ]);
+
+/** Per-project in-process mutex to prevent concurrent Harness execution or retry races. */
+const inFlightHarnessProjects = new Set<string>();
 
 function safeParseJsonObject<T>(raw: string): T | null {
   const repaired = repairMalformedJsonDeterministic<T>(raw);
@@ -972,6 +976,22 @@ export async function executeHarnessStepForProject(params: {
 
   let projectUsage = extractAiUsageFromCheckpoint(existingCheckpoint);
 
+  if (inFlightHarnessProjects.has(params.projectId)) {
+    const nowIso = new Date().toISOString();
+    throw new HarnessStepConflictError(
+      harnessState.activeStepLock || {
+        stepRunId: 'in-flight-local',
+        sectionId: targetSection.sectionId,
+        acquiredAt: nowIso,
+        heartbeatAt: nowIso,
+        lockExpiresAt: new Date(Date.now() + DEFAULT_STEP_LOCK_TTL_MS).toISOString(),
+      },
+      'گام دیگری از هارنس هم‌اکنون در حال اجرا روی این پروژه است. لطفاً چند لحظه صبر کنید.'
+    );
+  }
+  inFlightHarnessProjects.add(params.projectId);
+
+  try {
   // Package C: Acquire concurrency lease lock (stepRunId + 180s Lease TTL) -> 409 Conflict if active
   const stepRunId = `run-${crypto.randomUUID().slice(0, 12)}`;
   const lockAttempt = acquireStepLock({
@@ -1170,38 +1190,10 @@ export async function executeHarnessStepForProject(params: {
       newGlossaryTerms?: Array<{ term?: string; canonicalForm?: string; unit?: string; notes?: string }>;
     }>(authorRes.text);
 
-    // Record newly discovered terms safely in deltaEntries (never mutating frozen prefix mid-chapter)
-    if (Array.isArray(parsedAuthor?.newGlossaryTerms) && parsedAuthor.newGlossaryTerms.length > 0) {
-      const existingBaseTerms = new Set(
-        harnessState.glossary.entries.map((g) => g.canonicalTerm.toLowerCase())
-      );
-      const existingDeltaTerms = new Set(
-        (harnessState.glossary.deltaEntries || []).map((g) => g.canonicalTerm.toLowerCase())
-      );
-      const deltaList = [...(harnessState.glossary.deltaEntries || [])];
-      for (const item of parsedAuthor.newGlossaryTerms.slice(0, 6)) {
-        const term = String(item?.term || '').trim();
-        const canonicalForm = String(item?.canonicalForm || term).trim();
-        if (!term || term.length < 2) continue;
-        const low = term.toLowerCase();
-        if (existingBaseTerms.has(low) || existingDeltaTerms.has(low)) continue;
-        existingDeltaTerms.add(low);
-        deltaList.push({
-          id: `gl-delta-${deltaList.length + 1}-${low.replace(/[^a-z0-9_-]+/gi, '').slice(0, 12) || 'term'}`,
-          canonicalTerm: canonicalForm || term,
-          enEquivalents: [term],
-          faEquivalents: item.notes ? [item.notes.trim()] : [term],
-          forbiddenVariants: [],
-          category: 'general',
-          definitionFa:
-            [item.notes?.trim(), item.unit?.trim() ? `واحد: ${item.unit.trim()}` : '']
-              .filter(Boolean)
-              .join(' — ') || canonicalForm,
-          sourceChunkIds: targetSection.sourceChunkIds.slice(0, 2),
-        });
-      }
-      harnessState.glossary.deltaEntries = deltaList;
-    }
+    // Buffer newly discovered terms locally and commit into glossary.deltaEntries ONLY after finalPassed === true
+    const pendingAuthorGlossaryTerms = Array.isArray(parsedAuthor?.newGlossaryTerms)
+      ? parsedAuthor.newGlossaryTerms.slice(0, 6)
+      : [];
 
     const resolvedTier: SemanticSectionIR['tierUsed'] =
       authorCtx.tierUsed === 'economy' ||
@@ -1236,10 +1228,14 @@ export async function executeHarnessStepForProject(params: {
       }),
     };
 
-    // Deterministically restore immutable hex addresses & calibration parameters
+    // Deterministically restore immutable hex addresses & calibration parameters and capture any dropped tokens
+    let missingMaskedTokens: string[] = [];
     if (authorTokenMap.size > 0) {
+      const maskAudit = auditPreservedImmutableTokens(authorRes.text, authorTokenMap);
+      missingMaskedTokens = maskAudit.missingTokens.map(
+        (tok) => authorTokenMap.get(tok) || tok
+      );
       currentIR = unmaskSemanticSectionIR(currentIR, authorTokenMap);
-      auditPreservedImmutableTokens(authorRes.text, authorTokenMap);
     }
 
     // Package C: Immediately persist `drafted_unverified` BEFORE Judge/Patch so pause/abort never wastes draft!
@@ -1291,24 +1287,54 @@ export async function executeHarnessStepForProject(params: {
       validationDomain: activeValidationDomain,
     };
 
-    const runLayer1WithTruncation = (ir: SemanticSectionIR, truncEval: typeof outputTruncatedEval) => {
+    const runLayer1WithTruncation = (
+      ir: SemanticSectionIR,
+      truncEval: typeof outputTruncatedEval,
+      droppedImmutableValues: string[] = []
+    ) => {
       const baseAudit = runLayer1DeterministicGuard(
         ir,
         sourceChunks,
         harnessState!.glossary,
         layer1Options
       );
+      const extraIssues = [...baseAudit.issues];
+      let passed = baseAudit.passed;
+
       if (truncEval.truncated && truncEval.issue) {
-        return {
-          ...baseAudit,
-          passed: false,
-          issues: [truncEval.issue, ...baseAudit.issues],
-        };
+        extraIssues.unshift(truncEval.issue);
+        passed = false;
       }
-      return baseAudit;
+
+      if (droppedImmutableValues.length > 0) {
+        extraIssues.push({
+          id: `immutable-token-dropped-${ir.sectionId}`,
+          kind: 'missing_technical_anchor',
+          severity: 'error',
+          messageFa: `توکن‌های عددی/هگز/کدخطای غیرقابل‌تغییر در خروجی مدل حذف شده‌اند: ${droppedImmutableValues.slice(0, 6).join('، ')}`,
+        });
+        passed = false;
+      }
+
+      const leftoverTokens = findLeftoverImmutableTokens(JSON.stringify(ir.blocks));
+      if (leftoverTokens.length > 0) {
+        extraIssues.push({
+          id: `immutable-token-leftover-${ir.sectionId}`,
+          kind: 'invalid_block_structure',
+          severity: 'error',
+          messageFa: `نشانه موقت بازگشایی‌نشده در متن باقی مانده است: ${leftoverTokens.slice(0, 4).join('، ')}`,
+        });
+        passed = false;
+      }
+
+      return {
+        ...baseAudit,
+        passed,
+        issues: extraIssues,
+      };
     };
 
-    let l1Audit = runLayer1WithTruncation(currentIR, outputTruncatedEval);
+    let l1Audit = runLayer1WithTruncation(currentIR, outputTruncatedEval, missingMaskedTokens);
     let l2Audit: Layer2AuditResult = {
       passed: false,
       score: 0,
@@ -1474,38 +1500,53 @@ export async function executeHarnessStepForProject(params: {
         parsedPatch?.patchedBlocks || parsedPatch?.blocks,
         patchFallbackChunkIds
       );
+      let patchMissingTokens: string[] = [];
       if (patchTokenMap.size > 0) {
+        const patchMaskAudit = auditPreservedImmutableTokens(patchRes.text, patchTokenMap);
+        patchMissingTokens = patchMaskAudit.missingTokens.map(
+          (tok) => patchTokenMap.get(tok) || tok
+        );
         patchedBlocks = patchedBlocks.map((b) => unmaskSemanticBlock(b, patchTokenMap));
       }
 
       attempts += 1;
       reAuditedAfterLastPatch = false;
 
-      if (patchedBlocks.length > 0) {
-        const patchMeta = {
-          modelUsed: patchRes.modelUsed,
-          tierUsed: (
-            effectivePatchCtx.tierUsed === 'economy' ||
-            effectivePatchCtx.tierUsed === 'balanced' ||
-            effectivePatchCtx.tierUsed === 'flagship'
-              ? effectivePatchCtx.tierUsed
-              : 'balanced'
-          ) as SemanticSectionIR['tierUsed'],
+      if (patchedBlocks.length === 0) {
+        // Patch returned no usable blocks — do NOT waste tokens calling Layer 2 Judge on unchanged IR
+        l1Audit = runLayer1WithTruncation(currentIR, outputTruncatedEval, patchMissingTokens);
+        l2Audit = {
+          ...l2Audit,
+          passed: false,
+          summaryFa: 'تلاش ترمیم جراحی هیچ بلوک اصلاح‌شده‌ای برنگرداند؛ از فراخوانی تکراری داور لایه ۲ صرف‌نظر شد.',
         };
-        currentIR = plan.requiresFullSectionRewrite
-          ? replaceFullSectionBlocksAtomic({
-              originalIR: currentIR,
-              rewrittenBlocks: patchedBlocks,
-              meta: patchMeta,
-            })
-          : applySurgicalPatchBlocksStrict({
-              originalIR: currentIR,
-              patchedBlocks,
-              targetFaultyBlockIds: plan.faultyBlocks.map((b) => b.id),
-              meta: patchMeta,
-            }).mergedIR;
-        harnessState.sectionsIR[targetSection.sectionId] = currentIR;
+        reAuditedAfterLastPatch = true;
+        continue;
       }
+
+      const patchMeta = {
+        modelUsed: patchRes.modelUsed,
+        tierUsed: (
+          effectivePatchCtx.tierUsed === 'economy' ||
+          effectivePatchCtx.tierUsed === 'balanced' ||
+          effectivePatchCtx.tierUsed === 'flagship'
+            ? effectivePatchCtx.tierUsed
+            : 'balanced'
+        ) as SemanticSectionIR['tierUsed'],
+      };
+      currentIR = plan.requiresFullSectionRewrite
+        ? replaceFullSectionBlocksAtomic({
+            originalIR: currentIR,
+            rewrittenBlocks: patchedBlocks,
+            meta: patchMeta,
+          })
+        : applySurgicalPatchBlocksStrict({
+            originalIR: currentIR,
+            patchedBlocks,
+            targetFaultyBlockIds: plan.faultyBlocks.map((b) => b.id),
+            meta: patchMeta,
+          }).mergedIR;
+      harnessState.sectionsIR[targetSection.sectionId] = currentIR;
 
       // Bug #4: If author truncated previously and patch didn't verify all chunks, keep truncated signal until L1 proves 100% chunk coverage
       if (wasPreviouslyTruncated && !patchTruncEval.truncated) {
@@ -1528,7 +1569,7 @@ export async function executeHarnessStepForProject(params: {
       }
 
       // Mandatory post-patch Dual-Layer Re-Audit (L1 + L2)
-      l1Audit = runLayer1WithTruncation(currentIR, outputTruncatedEval);
+      l1Audit = runLayer1WithTruncation(currentIR, outputTruncatedEval, patchMissingTokens);
       if (l1Audit.passed && !judgeCtx.provider.validationError) {
         try {
           const judgeOut = await runLayer2SemanticJudge({
@@ -1628,6 +1669,39 @@ export async function executeHarnessStepForProject(params: {
       harnessState.quarantineQueue = harnessState.quarantineQueue.filter(
         (q) => q.sectionId !== targetSection.sectionId
       );
+
+      // Commit buffered glossary terms ONLY after both Layer 1 and Layer 2 verified this section
+      if (pendingAuthorGlossaryTerms.length > 0) {
+        const existingBaseTerms = new Set(
+          harnessState.glossary.entries.map((g) => g.canonicalTerm.toLowerCase())
+        );
+        const existingDeltaTerms = new Set(
+          (harnessState.glossary.deltaEntries || []).map((g) => g.canonicalTerm.toLowerCase())
+        );
+        const deltaList = [...(harnessState.glossary.deltaEntries || [])];
+        for (const item of pendingAuthorGlossaryTerms) {
+          const term = String(item?.term || '').trim();
+          const canonicalForm = String(item?.canonicalForm || term).trim();
+          if (!term || term.length < 2) continue;
+          const low = term.toLowerCase();
+          if (existingBaseTerms.has(low) || existingDeltaTerms.has(low)) continue;
+          existingDeltaTerms.add(low);
+          deltaList.push({
+            id: `gl-delta-${deltaList.length + 1}-${low.replace(/[^a-z0-9_-]+/gi, '').slice(0, 12) || 'term'}`,
+            canonicalTerm: canonicalForm || term,
+            enEquivalents: [term],
+            faEquivalents: item.notes ? [item.notes.trim()] : [term],
+            forbiddenVariants: [],
+            category: 'general',
+            definitionFa:
+              [item.notes?.trim(), item.unit?.trim() ? `واحد: ${item.unit.trim()}` : '']
+                .filter(Boolean)
+                .join(' — ') || canonicalForm,
+            sourceChunkIds: targetSection.sourceChunkIds.slice(0, 2),
+          });
+        }
+        harnessState.glossary.deltaEntries = deltaList;
+      }
 
       // Append-Only RollingSummary update (Economy tier, strict JSON schema, budget-checked + abort-checked)
       let summaryText = `${targetSection.title} بر اساس ${toPersianDigits(targetSection.sourceChunkIds.length)} قطعه منبع تدوین و تایید شد.`;
@@ -1857,6 +1931,9 @@ export async function executeHarnessStepForProject(params: {
     });
     throw err;
   }
+  } finally {
+    inFlightHarnessProjects.delete(params.projectId);
+  }
 }
 
 export async function resolveHarnessQuarantineItem(params: {
@@ -1886,12 +1963,42 @@ export async function resolveHarnessQuarantineItem(params: {
 
   const now = new Date().toISOString();
   const qItem = harnessState.quarantineQueue[qIndex];
+  const rawCandidateBlocks =
+    Array.isArray(params.editedBlocks) && params.editedBlocks.length > 0
+      ? params.editedBlocks
+      : qItem.draftIR.blocks;
+
+  // Sanitize manual edits against raw HTML/script injection and leftover masking placeholders
+  const stripUnsafeMarkup = (val?: string): string | undefined => {
+    if (typeof val !== 'string') return val;
+    return val
+      .replace(/<\s*(?:script|style|iframe|object|embed)[^>]*>[\s\S]*?<\/\s*(?:script|style|iframe|object|embed)\s*>/gi, '')
+      .replace(/<\/?(?:div|span|p|br|table|tr|td|th|style|script|img|svg|a|b|i|u|font|h[1-6])\b[^>]*>/gi, '')
+      .trim();
+  };
+  const sanitizedBlocks = rawCandidateBlocks.map((b) => ({
+    ...b,
+    ...(b.title !== undefined ? { title: stripUnsafeMarkup(b.title) } : {}),
+    ...(b.text !== undefined ? { text: stripUnsafeMarkup(b.text) } : {}),
+    ...(b.caption !== undefined ? { caption: stripUnsafeMarkup(b.caption) } : {}),
+    ...(Array.isArray(b.items)
+      ? { items: b.items.map((it) => stripUnsafeMarkup(it) || '') }
+      : {}),
+    ...(Array.isArray(b.rows)
+      ? { rows: b.rows.map((row) => row.map((c) => stripUnsafeMarkup(c) || '')) }
+      : {}),
+  }));
+
+  const leftoverTokens = findLeftoverImmutableTokens(JSON.stringify(sanitizedBlocks));
+  if (leftoverTokens.length > 0) {
+    throw new Error(
+      `متن ویرایش‌شده هنوز شامل توکن بازگشایی‌نشده (${leftoverTokens[0]}) است. لطفاً پیش از تأیید آن را اصلاح کنید.`
+    );
+  }
+
   const updatedIR: SemanticSectionIR = {
     ...qItem.draftIR,
-    blocks:
-      Array.isArray(params.editedBlocks) && params.editedBlocks.length > 0
-        ? params.editedBlocks
-        : qItem.draftIR.blocks,
+    blocks: sanitizedBlocks,
     generatedAt: now,
     tierUsed: 'manual',
   };
@@ -2093,6 +2200,30 @@ export async function retryQuarantinedSectionForProject(params: {
   );
   if (!targetSection) {
     throw new Error('زیربخش موردنظر در نقشه راه هارنس یافت نشد.');
+  }
+
+  if (inFlightHarnessProjects.has(params.projectId)) {
+    const nowIso = new Date().toISOString();
+    throw new HarnessStepConflictError(
+      harnessState.activeStepLock || {
+        stepRunId: 'in-flight-local',
+        sectionId: params.sectionId,
+        acquiredAt: nowIso,
+        heartbeatAt: nowIso,
+        lockExpiresAt: new Date(Date.now() + DEFAULT_STEP_LOCK_TTL_MS).toISOString(),
+      },
+      'گام دیگری از هارنس هم‌اکنون در حال اجرا است؛ پیش از تلاش مجدد برای زیربخش قرنطینه صبر کنید.'
+    );
+  }
+
+  const existingLockCheck = acquireStepLock({
+    existingLock: harnessState.activeStepLock,
+    stepRunId: `retry-probe-${Date.now()}`,
+    sectionId: params.sectionId,
+    ttlMs: DEFAULT_STEP_LOCK_TTL_MS,
+  });
+  if (!existingLockCheck.acquired) {
+    throw new HarnessStepConflictError(existingLockCheck.lock, existingLockCheck.messageFa);
   }
 
   // Temporarily mark section pending so executeHarnessStepForProject processes it cleanly

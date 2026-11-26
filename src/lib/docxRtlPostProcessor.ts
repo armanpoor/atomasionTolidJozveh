@@ -254,24 +254,40 @@ function ensureHeaderFooterBidi(xml: string, fontFamily: string, fallbackTitle: 
 
   // Replace the running chapter StyleRef marker with a true Word STYLEREF "Heading 2" field
   if (out.includes(HEADER_CHAPTER_STYLEREF_MARKER)) {
-    const fieldXml = [
-      `</w:t></w:r>`,
+    const styleRefRuns = [
       `<w:r><w:rPr><w:rFonts w:ascii="${font}" w:hAnsi="${font}" w:cs="${font}" w:eastAsia="${font}"/><w:b/><w:bCs/><w:color w:val="1E3A5F"/><w:sz w:val="17"/><w:szCs w:val="17"/><w:rtl/><w:lang w:val="fa-IR" w:bidi="fa-IR"/></w:rPr><w:fldChar w:fldCharType="begin"/></w:r>`,
       `<w:r><w:rPr><w:rFonts w:ascii="${font}" w:hAnsi="${font}" w:cs="${font}" w:eastAsia="${font}"/><w:rtl/></w:rPr><w:instrText xml:space="preserve"> STYLEREF "Heading 2" \\* MERGEFORMAT </w:instrText></w:r>`,
       `<w:r><w:rPr><w:rFonts w:ascii="${font}" w:hAnsi="${font}" w:cs="${font}" w:eastAsia="${font}"/><w:b/><w:bCs/><w:color w:val="1E3A5F"/><w:sz w:val="17"/><w:szCs w:val="17"/><w:rtl/><w:lang w:val="fa-IR" w:bidi="fa-IR"/></w:rPr><w:fldChar w:fldCharType="separate"/></w:r>`,
       `<w:r><w:rPr><w:rFonts w:ascii="${font}" w:hAnsi="${font}" w:cs="${font}" w:eastAsia="${font}"/><w:b/><w:bCs/><w:color w:val="1E3A5F"/><w:sz w:val="17"/><w:szCs w:val="17"/><w:rtl/><w:lang w:val="fa-IR" w:bidi="fa-IR"/></w:rPr><w:t>${escapeXml(fallbackTitle)}</w:t></w:r>`,
       `<w:r><w:rPr><w:rFonts w:ascii="${font}" w:hAnsi="${font}" w:cs="${font}" w:eastAsia="${font}"/><w:rtl/></w:rPr><w:fldChar w:fldCharType="end"/></w:r>`,
-      `<w:r><w:t>`,
     ].join('');
-    out = out.replace(HEADER_CHAPTER_STYLEREF_MARKER, fieldXml);
-    // Clean up any empty <w:r><w:t></w:t></w:r> produced around marker
-    out = out.replace(/<w:r><w:t><\/w:t><\/w:r>/g, '');
+
+    // Prefer replacing a standalone run containing only the marker
+    const standaloneMarkerRunRe = new RegExp(
+      `<w:r\\b[^>]*>(?:<w:rPr>[\\s\\S]*?<\\/w:rPr>)?<w:t\\b[^>]*>\\s*${HEADER_CHAPTER_STYLEREF_MARKER}\\s*<\\/w:t><\\/w:r>`,
+      'g'
+    );
+    if (standaloneMarkerRunRe.test(out)) {
+      out = out.replace(standaloneMarkerRunRe, styleRefRuns);
+    } else {
+      out = out.replace(
+        HEADER_CHAPTER_STYLEREF_MARKER,
+        `</w:t></w:r>${styleRefRuns}<w:r><w:t xml:space="preserve">`
+      );
+      out = out.replace(/<w:r><w:t(?:\s+xml:space="preserve")?><\/w:t><\/w:r>/g, '');
+    }
   }
 
-  // Ensure every <w:pPr> inside header/footer contains <w:bidi/>
-  out = out.replace(/<w:pPr>([\s\S]*?)<\/w:pPr>/g, (full, inner) => {
-    if (/<w:bidi(?:\s|\/|>)/.test(inner)) return full;
-    return `<w:pPr><w:bidi/>${inner}</w:pPr>`;
+  // Ensure every <w:p> inside header/footer contains <w:pPr><w:bidi/>...</w:pPr>, even when <w:pPr> was omitted
+  out = out.replace(/<w:p(\b[^>]*)>([\s\S]*?)<\/w:p>/g, (_full, attrs, body) => {
+    if (/<w:pPr\b[^>]*>/.test(body)) {
+      const patchedBody = body.replace(/<w:pPr(\b[^>]*)>([\s\S]*?)<\/w:pPr>/, (pFull: string, pAttrs: string, inner: string) => {
+        if (/<w:bidi(?:\s|\/|>)/.test(inner)) return pFull;
+        return `<w:pPr${pAttrs}><w:bidi/>${inner}</w:pPr>`;
+      });
+      return `<w:p${attrs}>${patchedBody}</w:p>`;
+    }
+    return `<w:p${attrs}><w:pPr><w:bidi/></w:pPr>${body}</w:p>`;
   });
 
   return out;

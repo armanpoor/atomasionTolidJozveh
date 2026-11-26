@@ -1071,6 +1071,16 @@ export async function parseDocxDocument(buffer: ArrayBuffer | Uint8Array, fileNa
   let chartSeq = 0;
   const listCounters = new Map<string, number>();
 
+  // Detect whether this DOCX uses a 3-tier Volume(H1)/Chapter(H2)/Section(H3) hierarchy (e.g. our exported books)
+  const hasHeading3InDoc = elements.some((el) => {
+    if (el.tag !== 'p') return false;
+    const sm = el.xml.match(/<w:pStyle\s+w:val="([^"]+)"/);
+    const om = el.xml.match(/<w:outlineLvl\s+w:val="(\d+)"/);
+    const st = sm ? sm[1] : '';
+    const lv = styleHeadingMap.get(st);
+    return /^Heading3$|^3$/i.test(st) || om?.[1] === '2' || lv === 2;
+  });
+
   for (const el of elements) {
     if (el.tag === 'p') {
       // Extract ALL embedded images in this paragraph (modern DrawingML r:embed AND legacy VML v:imagedata r:id)
@@ -1150,19 +1160,24 @@ export async function parseDocxDocument(buffer: ArrayBuffer | Uint8Array, fileNa
         resolvedStyleLevel === 1
       ) {
         detectedHeading = true;
-        mdLines.push(`# ${text}`, '');
+        // In 3-tier books (H1=Volume, H2=Chapter, H3=Section) or explicit chapter prefixes, keep H2 as '#'; in 2-tier docs (H1=Chapter, H2=Section), map H2 to '##'
+        const isChapterLevelH2 =
+          hasHeading3InDoc ||
+          /^(?:فصل|درس|روز|باب|Chapter|Lesson|Day|Module)\b/i.test(text) ||
+          /^[\d۰-۹]+\s*[-–:]\s*(?:فصل|درس|روز)/i.test(text);
+        mdLines.push(`${isChapterLevelH2 ? '#' : '##'} ${text}`, '');
       } else if (
         /^Heading3$|^3$/i.test(style) ||
         outlineMatch?.[1] === '2' ||
         resolvedStyleLevel === 2
       ) {
-        mdLines.push(`## ${text}`, '');
+        mdLines.push(`### ${text}`, '');
       } else if (
         /^Heading4$|^4$/i.test(style) ||
         outlineMatch?.[1] === '3' ||
         resolvedStyleLevel === 3
       ) {
-        mdLines.push(`### ${text}`, '');
+        mdLines.push(`#### ${text}`, '');
       } else {
         // Preserve OOXML Word numbered & bulleted lists (<w:numPr>)
         const numPrMatch = el.xml.match(/<w:numPr[\s>][\s\S]*?<\/w:numPr>/);
@@ -1471,35 +1486,69 @@ export function parseJsonDocument(rawContent: string, fileName: string): ParsedB
 
 function parseCsvDocument(rawContent: string, fileName: string): ParsedBook {
   const baseTitle = fileName.replace(/\.csv$/i, '').replace(/[_-]+/g, ' ').trim();
-  const rows = rawContent
-    .replace(/\r\n/g, '\n')
-    .split('\n')
-    .map((line) => line.trim())
-    .filter(Boolean)
-    .map((line) => {
-      const cells: string[] = [];
-      let cur = '';
-      let inQuotes = false;
-      for (let i = 0; i < line.length; i++) {
-        const ch = line[i];
-        if (ch === '"') {
-          inQuotes = !inQuotes;
-        } else if ((ch === ',' || ch === ';') && !inQuotes) {
-          cells.push(cur.trim());
-          cur = '';
+  const normalized = rawContent.replace(/^\uFEFF/, '').replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+
+  // Auto-detect dominant delimiter (',' vs ';') from first non-empty line outside quotes
+  const firstLine = normalized.split('\n').find((l) => l.trim().length > 0) || '';
+  let commaCount = 0;
+  let semiCount = 0;
+  let qProbe = false;
+  for (let i = 0; i < firstLine.length; i++) {
+    const ch = firstLine[i];
+    if (ch === '"') qProbe = !qProbe;
+    else if (!qProbe && ch === ',') commaCount++;
+    else if (!qProbe && ch === ';') semiCount++;
+  }
+  const delimiter = semiCount > commaCount ? ';' : ',';
+
+  // RFC-4180 compliant character-stream parser (handles escaped "" and multiline quoted cells)
+  const rows: string[][] = [];
+  let currentRow: string[] = [];
+  let currentCell = '';
+  let inQuotes = false;
+
+  for (let i = 0; i < normalized.length; i++) {
+    const ch = normalized[i];
+    if (inQuotes) {
+      if (ch === '"') {
+        if (normalized[i + 1] === '"') {
+          currentCell += '"';
+          i++;
         } else {
-          cur += ch;
+          inQuotes = false;
         }
+      } else {
+        currentCell += ch;
       }
-      cells.push(cur.trim());
-      return cells;
-    });
+    } else if (ch === '"') {
+      inQuotes = true;
+    } else if (ch === delimiter) {
+      currentRow.push(currentCell.replace(/\n+/g, ' ').trim());
+      currentCell = '';
+    } else if (ch === '\n') {
+      currentRow.push(currentCell.replace(/\n+/g, ' ').trim());
+      if (currentRow.some((c) => c.length > 0)) {
+        rows.push(currentRow);
+      }
+      currentRow = [];
+      currentCell = '';
+    } else {
+      currentCell += ch;
+    }
+  }
+  if (currentCell.length > 0 || currentRow.length > 0) {
+    currentRow.push(currentCell.replace(/\n+/g, ' ').trim());
+    if (currentRow.some((c) => c.length > 0)) {
+      rows.push(currentRow);
+    }
+  }
 
   if (rows.length === 0) {
     return parseMarkdownDocument(`# فصل ۱: ${baseTitle}\n\n(فایل CSV خالی است)`, fileName);
   }
 
-  const headers = rows[0];
+  const colCount = Math.max(1, ...rows.map((r) => r.length));
+  const headers = rows[0].concat(Array(Math.max(0, colCount - rows[0].length)).fill(''));
   const mdLines = [
     `# فصل ۱: ${baseTitle}`,
     '',
@@ -1519,22 +1568,67 @@ function parseCsvDocument(rawContent: string, fileName: string): ParsedBook {
   return parsed;
 }
 
+function decodeHtmlEntities(input: string): string {
+  return input
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/&amp;/gi, '&')
+    .replace(/&lt;/gi, '<')
+    .replace(/&gt;/gi, '>')
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;/gi, "'");
+}
+
 function parseHtmlDocument(rawContent: string, fileName: string): ParsedBook {
   const baseTitle = fileName.replace(/\.html?$/i, '').replace(/[_-]+/g, ' ').trim();
-  const cleaned = rawContent
+  const withoutScripts = rawContent
     .replace(/<script[\s\S]*?<\/script>/gi, '')
-    .replace(/<style[\s\S]*?<\/style>/gi, '')
-    .replace(/<h1[^>]*>([\s\S]*?)<\/h1>/gi, '\n# $1\n')
-    .replace(/<h2[^>]*>([\s\S]*?)<\/h2>/gi, '\n## $1\n')
-    .replace(/<h3[^>]*>([\s\S]*?)<\/h3>/gi, '\n### $1\n')
-    .replace(/<li[^>]*>([\s\S]*?)<\/li>/gi, '\n- $1')
-    .replace(/<p[^>]*>([\s\S]*?)<\/p>/gi, '\n$1\n')
-    .replace(/<br\s*\/?>/gi, '\n')
-    .replace(/<[^>]+>/g, ' ')
-    .replace(/&nbsp;/g, ' ')
-    .replace(/&amp;/g, '&')
-    .replace(/&lt;/g, '<')
-    .replace(/&gt;/g, '>');
+    .replace(/<style[\s\S]*?<\/style>/gi, '');
+
+  // Convert HTML <table> blocks into structured Markdown tables before stripping generic tags
+  const withMdTables = withoutScripts.replace(/<table[^>]*>([\s\S]*?)<\/table>/gi, (_full, inner: string) => {
+    const trMatches = inner.match(/<tr[^>]*>[\s\S]*?<\/tr>/gi) || [];
+    const parsedRows: string[][] = [];
+    for (const tr of trMatches) {
+      const cellMatches = tr.match(/<t[hd][^>]*>[\s\S]*?<\/t[hd]>/gi) || [];
+      if (cellMatches.length === 0) continue;
+      const cells = cellMatches.map((cellXml) =>
+        decodeHtmlEntities(
+          cellXml
+            .replace(/<br\s*\/?>/gi, ' ')
+            .replace(/<[^>]+>/g, ' ')
+            .replace(/\s+/g, ' ')
+            .trim()
+        ).replace(/\|/g, '\\|')
+      );
+      if (cells.some((c) => c.length > 0)) {
+        parsedRows.push(cells);
+      }
+    }
+    if (parsedRows.length === 0) return '';
+    const colCount = Math.max(1, ...parsedRows.map((r) => r.length));
+    const pad = (r: string[]) => r.concat(Array(Math.max(0, colCount - r.length)).fill(''));
+    const header = pad(parsedRows[0]);
+    const body = parsedRows.slice(1).map(pad);
+    return [
+      '',
+      `| ${header.join(' | ')} |`,
+      `| ${header.map(() => '---').join(' | ')} |`,
+      ...body.map((r) => `| ${r.join(' | ')} |`),
+      '',
+    ].join('\n');
+  });
+
+  const cleaned = decodeHtmlEntities(
+    withMdTables
+      .replace(/<h1[^>]*>([\s\S]*?)<\/h1>/gi, '\n# $1\n')
+      .replace(/<h2[^>]*>([\s\S]*?)<\/h2>/gi, '\n## $1\n')
+      .replace(/<h3[^>]*>([\s\S]*?)<\/h3>/gi, '\n### $1\n')
+      .replace(/<h4[^>]*>([\s\S]*?)<\/h4>/gi, '\n#### $1\n')
+      .replace(/<li[^>]*>([\s\S]*?)<\/li>/gi, '\n- $1')
+      .replace(/<p[^>]*>([\s\S]*?)<\/p>/gi, '\n$1\n')
+      .replace(/<br\s*\/?>/gi, '\n')
+      .replace(/<[^>]+>/g, ' ')
+  );
   const parsed = parseMarkdownDocument(cleaned, fileName);
   if (!parsed.title || parsed.title === fileName) parsed.title = baseTitle;
   return parsed;
@@ -1588,9 +1682,12 @@ export async function parsePdfDocument(
       .filter(Boolean)
       .join('\n\n');
   } catch (err) {
-    // Graceful fallback if PDF has unusual encoding
+    // Graceful fallback if PDF has unusual encoding — filter out PDF object/dictionary syntax
     const rawFallback = new TextDecoder('utf-8', { fatal: false }).decode(bytes);
-    const readableChunks = rawFallback.match(/[\u0600-\u06FFa-zA-Z0-9\s.,:;()\-–—]{20,}/g) || [];
+    const pdfSyntaxRx = /\b(?:endobj|endstream|startxref|xref|trailer|FlateDecode|FontDescriptor|MediaBox|Resources|Catalog)\b|^%PDF-/i;
+    const readableChunks = (rawFallback.match(/[\u0600-\u06FFa-zA-Z0-9\s.,:;()\-–—]{24,}/g) || [])
+      .map((s) => s.trim())
+      .filter((s) => s.length >= 24 && !pdfSyntaxRx.test(s) && /[\u0600-\u06FFa-zA-Z]{4,}/.test(s));
     if (readableChunks.length === 0) {
       throw new Error(
         `استخراج متن از فایل PDF (${fileName}) با خطا مواجه شد: ${err instanceof Error ? err.message : String(err)}`

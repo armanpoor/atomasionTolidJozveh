@@ -59,7 +59,7 @@ export function detectProviderFlavor(params: {
   }
   if (params.provider === 'google_aistudio') return 'google_aistudio';
   if (params.provider === 'anthropic') return 'anthropic';
-  if (params.provider === 'openai') return 'openai';
+  if (params.provider === 'openai' || url.includes('api.openai.com')) return 'openai';
   return 'custom_openai';
 }
 
@@ -278,6 +278,16 @@ export function sanitizeOpenAiCompatiblePayload(params: {
   }
 
   // Reasoning models: convert max_tokens -> max_completion_tokens on native OpenAI & cap reasoning_effort
+  if (
+    params.profile.isReasoningModel &&
+    params.profile.flavor === 'openai' &&
+    'max_tokens' in payload
+  ) {
+    payload.max_completion_tokens = payload.max_tokens;
+    delete payload.max_tokens;
+    strippedParameters.push('max_tokens->max_completion_tokens');
+  }
+
   const roleCap = resolveRoleReasoningCap(params.taskRole);
   if (params.profile.supportsReasoningEffort) {
     if (roleCap.openaiReasoningEffort) {

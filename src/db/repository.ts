@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, notInArray, sql } from 'drizzle-orm';
 import { db, isSqlConfigured } from './index.ts';
 import {
   auditReports,
@@ -460,22 +460,24 @@ export async function insertSourceFileWithUnits(params: {
   }
 
   try {
-    await db
-      .insert(sourceFiles)
-      .values(params.file)
-      .onConflictDoNothing({ target: sourceFiles.id });
+    await db.transaction(async (tx) => {
+      await tx
+        .insert(sourceFiles)
+        .values(params.file)
+        .onConflictDoNothing({ target: sourceFiles.id });
 
-    // Chunk unit inserts for large 100+ file batches
-    const chunkSize = 150;
-    for (let i = 0; i < params.units.length; i += chunkSize) {
-      const slice = params.units.slice(i, i + chunkSize);
-      if (slice.length > 0) {
-        await db
-          .insert(contentUnits)
-          .values(slice)
-          .onConflictDoNothing({ target: contentUnits.id });
+      // Chunk unit inserts for large 100+ file batches
+      const chunkSize = 150;
+      for (let i = 0; i < params.units.length; i += chunkSize) {
+        const slice = params.units.slice(i, i + chunkSize);
+        if (slice.length > 0) {
+          await tx
+            .insert(contentUnits)
+            .values(slice)
+            .onConflictDoNothing({ target: contentUnits.id });
+        }
       }
-    }
+    });
   } catch (error) {
     console.error('Database query failed (insertSourceFileWithUnits):', error);
     throw new Error('خطا در ذخیره فایل منبع و واحدهای محتوایی در پایگاه داده.', { cause: error });
@@ -497,14 +499,16 @@ export async function clearProjectPipelineArtifacts(projectId: string, clearFile
   }
 
   try {
-    await db.delete(dedupClusters).where(eq(dedupClusters.projectId, projectId));
-    await db.delete(conflicts).where(eq(conflicts.projectId, projectId));
-    await db.delete(outlineNodes).where(eq(outlineNodes.projectId, projectId));
-    await db.delete(auditReports).where(eq(auditReports.projectId, projectId));
-    if (clearFiles) {
-      await db.delete(contentUnits).where(eq(contentUnits.projectId, projectId));
-      await db.delete(sourceFiles).where(eq(sourceFiles.projectId, projectId));
-    }
+    await db.transaction(async (tx) => {
+      await tx.delete(dedupClusters).where(eq(dedupClusters.projectId, projectId));
+      await tx.delete(conflicts).where(eq(conflicts.projectId, projectId));
+      await tx.delete(outlineNodes).where(eq(outlineNodes.projectId, projectId));
+      await tx.delete(auditReports).where(eq(auditReports.projectId, projectId));
+      if (clearFiles) {
+        await tx.delete(contentUnits).where(eq(contentUnits.projectId, projectId));
+        await tx.delete(sourceFiles).where(eq(sourceFiles.projectId, projectId));
+      }
+    });
   } catch (error) {
     console.error('Database query failed (clearProjectPipelineArtifacts):', error);
     throw new Error('خطا در بازنشانی داده‌های میانی پروژه.', { cause: error });
@@ -581,31 +585,33 @@ export async function saveDedupResults(params: {
   }
 
   try {
-    await db.delete(dedupClusters).where(eq(dedupClusters.projectId, params.projectId));
-    await db.delete(conflicts).where(eq(conflicts.projectId, params.projectId));
+    await db.transaction(async (tx) => {
+      await tx.delete(dedupClusters).where(eq(dedupClusters.projectId, params.projectId));
+      await tx.delete(conflicts).where(eq(conflicts.projectId, params.projectId));
 
-    for (const u of params.unitUpdates) {
-      await db
-        .update(contentUnits)
-        .set({
-          status: u.status,
-          canonicalUnitId: u.canonicalUnitId,
-          ...(u.rawText !== undefined ? { rawText: u.rawText } : {}),
-          ...(u.payloadJson !== undefined ? { payloadJson: u.payloadJson } : {}),
-        })
-        .where(and(eq(contentUnits.id, u.id), eq(contentUnits.projectId, params.projectId)));
-    }
-
-    if (params.clusters.length > 0) {
-      const chunkSize = 150;
-      for (let i = 0; i < params.clusters.length; i += chunkSize) {
-        await db.insert(dedupClusters).values(params.clusters.slice(i, i + chunkSize));
+      for (const u of params.unitUpdates) {
+        await tx
+          .update(contentUnits)
+          .set({
+            status: u.status,
+            canonicalUnitId: u.canonicalUnitId,
+            ...(u.rawText !== undefined ? { rawText: u.rawText } : {}),
+            ...(u.payloadJson !== undefined ? { payloadJson: u.payloadJson } : {}),
+          })
+          .where(and(eq(contentUnits.id, u.id), eq(contentUnits.projectId, params.projectId)));
       }
-    }
 
-    if (params.conflictRows.length > 0) {
-      await db.insert(conflicts).values(params.conflictRows);
-    }
+      if (params.clusters.length > 0) {
+        const chunkSize = 150;
+        for (let i = 0; i < params.clusters.length; i += chunkSize) {
+          await tx.insert(dedupClusters).values(params.clusters.slice(i, i + chunkSize));
+        }
+      }
+
+      if (params.conflictRows.length > 0) {
+        await tx.insert(conflicts).values(params.conflictRows);
+      }
+    });
   } catch (error) {
     console.error('Database query failed (saveDedupResults):', error);
     throw new Error('خطا در ذخیره نتایج حذف تکراری و تناقض‌ها در پایگاه داده.', { cause: error });
@@ -645,21 +651,23 @@ export async function saveOutlineNodesForProject(params: {
   }
 
   try {
-    await db.delete(outlineNodes).where(eq(outlineNodes.projectId, params.projectId));
-    if (params.nodes.length > 0) {
-      await db.insert(outlineNodes).values(params.nodes);
-    }
-    for (const assign of params.unitAssignments) {
-      await db
-        .update(contentUnits)
-        .set({ outlineNodeId: assign.outlineNodeId })
-        .where(
-          and(
-            eq(contentUnits.id, assign.unitId),
-            eq(contentUnits.projectId, params.projectId)
-          )
-        );
-    }
+    await db.transaction(async (tx) => {
+      await tx.delete(outlineNodes).where(eq(outlineNodes.projectId, params.projectId));
+      if (params.nodes.length > 0) {
+        await tx.insert(outlineNodes).values(params.nodes);
+      }
+      for (const assign of params.unitAssignments) {
+        await tx
+          .update(contentUnits)
+          .set({ outlineNodeId: assign.outlineNodeId })
+          .where(
+            and(
+              eq(contentUnits.id, assign.unitId),
+              eq(contentUnits.projectId, params.projectId)
+            )
+          );
+      }
+    });
   } catch (error) {
     console.error('Database query failed (saveOutlineNodesForProject):', error);
     throw new Error('خطا در ذخیره ساختار فصل‌بندی پروژه.', { cause: error });
@@ -701,22 +709,24 @@ export async function updateOutlineNodesOrderAndApproval(
   }
 
   try {
-    await db.delete(outlineNodes).where(eq(outlineNodes.projectId, projectId));
-    if (nodes.length > 0) {
-      await db.insert(outlineNodes).values(
-        nodes.map((n) => ({
-          id: n.id,
-          projectId,
-          parentId: n.parentId ?? null,
-          level: n.level,
-          nodeOrder: n.nodeOrder,
-          title: n.title,
-          summary: n.summary ?? null,
-          isApproved: n.isApproved,
-          webEnrichmentJson: n.webEnrichmentJson ?? null,
-        }))
-      );
-    }
+    await db.transaction(async (tx) => {
+      await tx.delete(outlineNodes).where(eq(outlineNodes.projectId, projectId));
+      if (nodes.length > 0) {
+        await tx.insert(outlineNodes).values(
+          nodes.map((n) => ({
+            id: n.id,
+            projectId,
+            parentId: n.parentId ?? null,
+            level: n.level,
+            nodeOrder: n.nodeOrder,
+            title: n.title,
+            summary: n.summary ?? null,
+            isApproved: n.isApproved,
+            webEnrichmentJson: n.webEnrichmentJson ?? null,
+          }))
+        );
+      }
+    });
   } catch (error) {
     console.error('Database query failed (updateOutlineNodesOrderAndApproval):', error);
     throw new Error('خطا در به‌روزرسانی ترتیب و تأیید ساختار فصل‌ها.', { cause: error });
@@ -913,33 +923,35 @@ export async function replaceProjectConflicts(params: {
   }
 
   try {
-    // 1. Reset any previously flagged 'conflict' units back to 'active' (preserving 'merged' units untouched)
-    await db
-      .update(contentUnits)
-      .set({ status: 'active' })
-      .where(and(eq(contentUnits.projectId, params.projectId), eq(contentUnits.status, 'conflict')));
-
-    // 2. Replace conflicts table rows for this project
-    await db.delete(conflicts).where(eq(conflicts.projectId, params.projectId));
-
-    if (params.conflictRows.length > 0) {
-      await db.insert(conflicts).values(params.conflictRows);
-    }
-
-    // 3. Re-mark genuine conflict participant units as 'conflict'
-    const uniqueIds = Array.from(new Set(params.conflictUnitIds));
-    for (const uid of uniqueIds) {
-      await db
+    await db.transaction(async (tx) => {
+      // 1. Reset any previously flagged 'conflict' units back to 'active' (preserving 'merged' units untouched)
+      await tx
         .update(contentUnits)
-        .set({ status: 'conflict' })
-        .where(
-          and(
-            eq(contentUnits.projectId, params.projectId),
-            eq(contentUnits.id, uid),
-            eq(contentUnits.status, 'active')
-          )
-        );
-    }
+        .set({ status: 'active' })
+        .where(and(eq(contentUnits.projectId, params.projectId), eq(contentUnits.status, 'conflict')));
+
+      // 2. Replace conflicts table rows for this project
+      await tx.delete(conflicts).where(eq(conflicts.projectId, params.projectId));
+
+      if (params.conflictRows.length > 0) {
+        await tx.insert(conflicts).values(params.conflictRows);
+      }
+
+      // 3. Re-mark genuine conflict participant units as 'conflict'
+      const uniqueIds = Array.from(new Set(params.conflictUnitIds));
+      for (const uid of uniqueIds) {
+        await tx
+          .update(contentUnits)
+          .set({ status: 'conflict' })
+          .where(
+            and(
+              eq(contentUnits.projectId, params.projectId),
+              eq(contentUnits.id, uid),
+              eq(contentUnits.status, 'active')
+            )
+          );
+      }
+    });
   } catch (error) {
     console.error('Database query failed (replaceProjectConflicts):', error);
     throw new Error('خطا در پالایش و به‌روزرسانی جدول تناقض‌ها در پایگاه داده.', { cause: error });
@@ -969,9 +981,11 @@ export async function saveAuditReportRecord(report: typeof auditReports.$inferIn
   }
 
   try {
-    await db.delete(auditReports).where(eq(auditReports.projectId, report.projectId));
-    const rows = await db.insert(auditReports).values(report).returning();
-    return rows[0];
+    return await db.transaction(async (tx) => {
+      await tx.delete(auditReports).where(eq(auditReports.projectId, report.projectId));
+      const rows = await tx.insert(auditReports).values(report).returning();
+      return rows[0];
+    });
   } catch (error) {
     console.error('Database query failed (saveAuditReportRecord):', error);
     throw new Error('خطا در ذخیره گزارش ممیزی پوشش در پایگاه داده.', { cause: error });
@@ -1015,32 +1029,37 @@ export async function createProjectRevisionRecord(params: {
   }
 
   try {
-    const maxRow = await db
-      .select({
-        maxVersion: sql<number>`CAST(COALESCE(MAX(${projectRevisions.versionNumber}), 0) AS INTEGER)`,
-      })
-      .from(projectRevisions)
-      .where(eq(projectRevisions.projectId, params.projectId));
+    return await db.transaction(async (tx) => {
+      // Serialize per-project revision numbering to avoid TOCTOU versionNumber collisions
+      await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${params.projectId}))`);
 
-    const nextVersion = (Number(maxRow[0]?.maxVersion) || 0) + 1;
+      const maxRow = await tx
+        .select({
+          maxVersion: sql<number>`CAST(COALESCE(MAX(${projectRevisions.versionNumber}), 0) AS INTEGER)`,
+        })
+        .from(projectRevisions)
+        .where(eq(projectRevisions.projectId, params.projectId));
 
-    const rows = await db
-      .insert(projectRevisions)
-      .values({
-        id: params.id,
-        projectId: params.projectId,
-        versionNumber: nextVersion,
-        actorType: params.actorType,
-        actorName: params.actorName,
-        actionType: params.actionType,
-        title: params.title,
-        summary: params.summary,
-        detailsJson: params.detailsJson ?? null,
-        snapshotJson: params.snapshotJson ?? null,
-      })
-      .returning();
+      const nextVersion = (Number(maxRow[0]?.maxVersion) || 0) + 1;
 
-    return rows[0];
+      const rows = await tx
+        .insert(projectRevisions)
+        .values({
+          id: params.id,
+          projectId: params.projectId,
+          versionNumber: nextVersion,
+          actorType: params.actorType,
+          actorName: params.actorName,
+          actionType: params.actionType,
+          title: params.title,
+          summary: params.summary,
+          detailsJson: params.detailsJson ?? null,
+          snapshotJson: params.snapshotJson ?? null,
+        })
+        .returning();
+
+      return rows[0];
+    });
   } catch (error) {
     console.error('Database query failed (createProjectRevisionRecord):', error);
     throw new Error('خطا در ثبت رکورد تاریخچه تغییرات در پایگاه داده.', { cause: error });
@@ -1140,6 +1159,21 @@ export async function restoreProjectFromRevisionSnapshot(
   ownerUid: string,
   snapshot: ProjectRevisionSnapshotPayload
 ) {
+  const buildRestoredCheckpoint = (
+    currentCheckpoint: Record<string, unknown> | null | undefined
+  ): Record<string, unknown> => {
+    const current = (currentCheckpoint && typeof currentCheckpoint === 'object' ? currentCheckpoint : {}) as Record<string, unknown>;
+    if (!snapshot.checkpointJson || typeof snapshot.checkpointJson !== 'object') {
+      return current;
+    }
+    const restored: Record<string, unknown> = { ...snapshot.checkpointJson };
+    // Preserve cumulative AI usage ledger so rollbacks cannot erase cost accounting
+    if (current.aiUsage !== undefined) {
+      restored.aiUsage = current.aiUsage;
+    }
+    return restored;
+  };
+
   if (!isSqlConfigured()) {
     const owned = await getOwnedProject(projectId, ownerUid);
     if (!owned) return null;
@@ -1153,6 +1187,9 @@ export async function restoreProjectFromRevisionSnapshot(
       pipelineStage: snapshot.pipelineStage,
       status: snapshot.status,
       settingsJson: cloneRecord(snapshot.settingsJson ?? owned.settingsJson ?? {}),
+      checkpointJson: cloneRecord(
+        buildRestoredCheckpoint(currentProj.checkpointJson as Record<string, unknown> | null)
+      ),
       bookSnapshotJson: cloneRecord(
         (snapshot.bookSnapshotJson as Record<string, unknown> | null) ?? null
       ),
@@ -1176,6 +1213,12 @@ export async function restoreProjectFromRevisionSnapshot(
       });
     }
 
+    const snapshotUnitIds = new Set(snapshot.contentUnits.map((u) => u.id));
+    for (const [k, u] of store.contentUnits) {
+      if (u.projectId === projectId && !snapshotUnitIds.has(k)) {
+        store.contentUnits.delete(k);
+      }
+    }
     for (const u of snapshot.contentUnits) {
       const existingUnit = store.contentUnits.get(u.id);
       if (existingUnit && existingUnit.projectId === projectId) {
@@ -1189,6 +1232,12 @@ export async function restoreProjectFromRevisionSnapshot(
       }
     }
 
+    const snapshotConflictIds = new Set(snapshot.conflicts.map((c) => c.id));
+    for (const [k, c] of store.conflicts) {
+      if (c.projectId === projectId && !snapshotConflictIds.has(k)) {
+        store.conflicts.delete(k);
+      }
+    }
     const now = new Date();
     for (const c of snapshot.conflicts) {
       const existingConflict = store.conflicts.get(c.id);
@@ -1210,63 +1259,84 @@ export async function restoreProjectFromRevisionSnapshot(
     const owned = await getOwnedProject(projectId, ownerUid);
     if (!owned) return null;
 
-    // 1. Restore project-level metadata and compiled book snapshot
-    await db
-      .update(projects)
-      .set({
-        title: snapshot.title,
-        workflowMode: snapshot.workflowMode,
-        pipelineStage: snapshot.pipelineStage,
-        status: snapshot.status,
-        settingsJson: snapshot.settingsJson ?? owned.settingsJson ?? {},
-        bookSnapshotJson: (snapshot.bookSnapshotJson as Record<string, unknown> | null) ?? null,
-        updatedAt: new Date(),
-      })
-      .where(and(eq(projects.id, projectId), eq(projects.ownerUid, ownerUid)));
-
-    // 2. Restore outline nodes
-    await db.delete(outlineNodes).where(eq(outlineNodes.projectId, projectId));
-    if (snapshot.outlineNodes.length > 0) {
-      await db.insert(outlineNodes).values(
-        snapshot.outlineNodes.map((n) => ({
-          id: n.id,
-          projectId,
-          parentId: n.parentId ?? null,
-          level: n.level,
-          nodeOrder: n.nodeOrder,
-          title: n.title,
-          summary: n.summary ?? null,
-          isApproved: Boolean(n.isApproved),
-          webEnrichmentJson: n.webEnrichmentJson ?? null,
-        }))
-      );
-    }
-
-    // 3. Restore content unit statuses, assignments, and text
-    for (const u of snapshot.contentUnits) {
-      await db
-        .update(contentUnits)
+    await db.transaction(async (tx) => {
+      // 1. Restore project-level metadata, checkpoint state, and compiled book snapshot
+      await tx
+        .update(projects)
         .set({
-          status: u.status,
-          canonicalUnitId: u.canonicalUnitId ?? null,
-          outlineNodeId: u.outlineNodeId ?? null,
-          rawText: u.rawText,
-        })
-        .where(and(eq(contentUnits.id, u.id), eq(contentUnits.projectId, projectId)));
-    }
-
-    // 4. Restore conflict resolutions & web grounding
-    for (const c of snapshot.conflicts) {
-      await db
-        .update(conflicts)
-        .set({
-          status: c.status,
-          resolutionNote: c.resolutionNote ?? null,
-          webGroundingJson: c.webGroundingJson ?? null,
+          title: snapshot.title,
+          workflowMode: snapshot.workflowMode,
+          pipelineStage: snapshot.pipelineStage,
+          status: snapshot.status,
+          settingsJson: snapshot.settingsJson ?? owned.settingsJson ?? {},
+          checkpointJson: buildRestoredCheckpoint(
+            owned.checkpointJson as Record<string, unknown> | null
+          ),
+          bookSnapshotJson: (snapshot.bookSnapshotJson as Record<string, unknown> | null) ?? null,
           updatedAt: new Date(),
         })
-        .where(and(eq(conflicts.id, c.id), eq(conflicts.projectId, projectId)));
-    }
+        .where(and(eq(projects.id, projectId), eq(projects.ownerUid, ownerUid)));
+
+      // 2. Restore outline nodes
+      await tx.delete(outlineNodes).where(eq(outlineNodes.projectId, projectId));
+      if (snapshot.outlineNodes.length > 0) {
+        await tx.insert(outlineNodes).values(
+          snapshot.outlineNodes.map((n) => ({
+            id: n.id,
+            projectId,
+            parentId: n.parentId ?? null,
+            level: n.level,
+            nodeOrder: n.nodeOrder,
+            title: n.title,
+            summary: n.summary ?? null,
+            isApproved: Boolean(n.isApproved),
+            webEnrichmentJson: n.webEnrichmentJson ?? null,
+          }))
+        );
+      }
+
+      // 3. Prune post-snapshot units & restore unit statuses, assignments, and text
+      const snapshotUnitIds = snapshot.contentUnits.map((u) => u.id);
+      if (snapshotUnitIds.length > 0) {
+        await tx
+          .delete(contentUnits)
+          .where(and(eq(contentUnits.projectId, projectId), notInArray(contentUnits.id, snapshotUnitIds)));
+      } else {
+        await tx.delete(contentUnits).where(eq(contentUnits.projectId, projectId));
+      }
+      for (const u of snapshot.contentUnits) {
+        await tx
+          .update(contentUnits)
+          .set({
+            status: u.status,
+            canonicalUnitId: u.canonicalUnitId ?? null,
+            outlineNodeId: u.outlineNodeId ?? null,
+            rawText: u.rawText,
+          })
+          .where(and(eq(contentUnits.id, u.id), eq(contentUnits.projectId, projectId)));
+      }
+
+      // 4. Prune post-snapshot conflicts & restore conflict resolutions
+      const snapshotConflictIds = snapshot.conflicts.map((c) => c.id);
+      if (snapshotConflictIds.length > 0) {
+        await tx
+          .delete(conflicts)
+          .where(and(eq(conflicts.projectId, projectId), notInArray(conflicts.id, snapshotConflictIds)));
+      } else {
+        await tx.delete(conflicts).where(eq(conflicts.projectId, projectId));
+      }
+      for (const c of snapshot.conflicts) {
+        await tx
+          .update(conflicts)
+          .set({
+            status: c.status,
+            resolutionNote: c.resolutionNote ?? null,
+            webGroundingJson: c.webGroundingJson ?? null,
+            updatedAt: new Date(),
+          })
+          .where(and(eq(conflicts.id, c.id), eq(conflicts.projectId, projectId)));
+      }
+    });
 
     return await getProjectBundle(projectId, ownerUid);
   } catch (error) {

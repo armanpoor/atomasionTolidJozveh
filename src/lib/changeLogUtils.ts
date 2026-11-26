@@ -69,6 +69,7 @@ export interface ProjectRevisionSnapshotPayload {
   pipelineStage: number;
   status: ProjectStatus | string;
   settingsJson: Record<string, unknown> | null;
+  checkpointJson?: Record<string, unknown> | null;
   bookSnapshotJson: ParsedBook | Record<string, unknown> | null;
   outlineNodes: RevisionSnapshotOutlineNode[];
   contentUnits: RevisionSnapshotUnitState[];
@@ -370,6 +371,7 @@ export function buildRevisionSnapshotPayload(input: {
     pipelineStage: number;
     status: string;
     settingsJson?: Record<string, unknown> | null;
+    checkpointJson?: Record<string, unknown> | null;
     bookSnapshotJson?: Record<string, unknown> | null;
   };
   outlineNodes: Array<{
@@ -403,6 +405,7 @@ export function buildRevisionSnapshotPayload(input: {
     pipelineStage: input.project.pipelineStage,
     status: input.project.status,
     settingsJson: input.project.settingsJson ?? null,
+    checkpointJson: input.project.checkpointJson ?? null,
     bookSnapshotJson: input.project.bookSnapshotJson ?? null,
     outlineNodes: input.outlineNodes.map((n) => ({
       id: n.id,

@@ -8,8 +8,9 @@ export interface MaskedTokensResult {
 }
 
 const HEX_ADDRESS_RX = /(?:0[xX][0-9A-Fa-f]{2,8}|\$[0-9A-Fa-f]{3,8})\b/g;
-const DTC_FAULT_CODE_RX = /\b[PBCE][0-3][0-9A-Fa-f]{3}\b/g;
+const DTC_FAULT_CODE_RX = /\b[PBCU][0-3][0-9A-Fa-f]{3}\b/g;
 const CALIBRATION_SCALE_RX = /\b(?:(?:Factor|ضریب|Offset|آفست)\s*[:=]\s*[-+]?\d+(?:\.\d+)?)\b/gi;
+const LEFTOVER_IMMUTABLE_TOKEN_RX = /\[\[(?:HEX|DTC|SCALE)_IMMUTABLE_\d{3}\]\]/g;
 
 /**
  * Deterministically masks hex addresses, DTC fault codes, and calibration scaling factors
@@ -163,6 +164,8 @@ export function unmaskSemanticBlock(
   if (copy.gapReason) copy.gapReason = unmaskTechnicalTokens(copy.gapReason, tokenMap);
   if (copy.missingInfo) copy.missingInfo = unmaskTechnicalTokens(copy.missingInfo, tokenMap);
   if (copy.conflictTopic) copy.conflictTopic = unmaskTechnicalTokens(copy.conflictTopic, tokenMap);
+  if (copy.conflictSourceA) copy.conflictSourceA = unmaskTechnicalTokens(copy.conflictSourceA, tokenMap);
+  if (copy.conflictSourceB) copy.conflictSourceB = unmaskTechnicalTokens(copy.conflictSourceB, tokenMap);
 
   if (Array.isArray(copy.items)) {
     copy.items = copy.items.map((item) => unmaskTechnicalTokens(item, tokenMap));
@@ -218,4 +221,14 @@ export function auditPreservedImmutableTokens(
     passed: missingTokens.length === 0,
     missingTokens,
   };
+}
+
+/**
+ * Detects any un-restored or hallucinated [[HEX|DTC|SCALE_IMMUTABLE_NNN]] placeholders
+ * remaining in unmasked text or serialized SemanticSectionIR.
+ */
+export function findLeftoverImmutableTokens(text: string): string[] {
+  if (!text) return [];
+  const matches = text.match(LEFTOVER_IMMUTABLE_TOKEN_RX) || [];
+  return Array.from(new Set(matches));
 }

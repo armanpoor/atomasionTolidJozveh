@@ -555,7 +555,7 @@ export function autoSplitOversizedBlueprintSections(params: {
       result.push({
         ...sec,
         sectionId: buckets.length === 1 ? sec.sectionId : `${sec.sectionId}__split_${idx + 1}`,
-        sectionOrder: sec.sectionOrder * 100 + idx + 1,
+        sectionOrder: sec.sectionOrder,
         title:
           buckets.length === 1
             ? sec.title
@@ -567,5 +567,14 @@ export function autoSplitOversizedBlueprintSections(params: {
     });
   }
 
-  return result;
+  // Re-index sectionOrder sequentially (1, 2, 3...) within each chapter so split sections stay strictly in place
+  const chapterCounters = new Map<string, number>();
+  return result.map((sec) => {
+    const nextOrder = (chapterCounters.get(sec.chapterId) || 0) + 1;
+    chapterCounters.set(sec.chapterId, nextOrder);
+    return {
+      ...sec,
+      sectionOrder: nextOrder,
+    };
+  });
 }

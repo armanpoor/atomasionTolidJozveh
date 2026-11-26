@@ -13,6 +13,19 @@ function escapeXml(str: string): string {
     .replace(/'/g, '&apos;');
 }
 
+/**
+ * Strips potentially dangerous elements and attributes from SVG markup prior to
+ * rendering in the DOM (blocks script, foreignObject, iframe, event handlers, and javascript: URIs).
+ */
+export function sanitizeSvgMarkup(svg: string): string {
+  if (!svg || typeof svg !== 'string') return '';
+  return svg
+    .replace(/<\s*(?:script|foreignObject|iframe|object|embed|audio|video|link|meta)\b[^>]*>[\s\S]*?<\/\s*(?:script|foreignObject|iframe|object|embed|audio|video|link|meta)\s*>/gi, '')
+    .replace(/<\s*(?:script|foreignObject|iframe|object|embed|link|meta)\b[^>]*\/?>/gi, '')
+    .replace(/\s+on[a-z]+\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)/gi, '')
+    .replace(/\s+(?:xlink:)?href\s*=\s*(?:"\s*(?:javascript:|vbscript:|data:text\/html)[^"]*"|'\s*(?:javascript:|vbscript:|data:text\/html)[^']*')/gi, '');
+}
+
 function truncateText(text: string, maxLen: number): string {
   const clean = text.replace(/\s+/g, ' ').trim();
   if (clean.length <= maxLen) return clean;
@@ -56,11 +69,17 @@ export function buildDiagramSvg(
   const defs: string[] = [];
   let bodySvg = '';
 
-  if (kind === 'comparison_bars') {
-    const maxVal = Math.max(
-      ...safeItems.map((it, idx) => (typeof it.value === 'number' && it.value > 0 ? it.value : (safeItems.length - idx) * 20)),
-      1
-    );
+  const hasRealNumericValues = safeItems.some(
+    (it) => typeof it.value === 'number' && Number.isFinite(it.value) && it.value > 0
+  );
+  // Zero-hallucination rule: never fabricate synthetic bar heights when source items lack real numbers
+  const effectiveKind: DiagramKind =
+    kind === 'comparison_bars' && !hasRealNumericValues ? 'process_steps' : kind;
+
+  if (effectiveKind === 'comparison_bars') {
+    const numericVals = safeItems
+      .map((it) => (typeof it.value === 'number' && Number.isFinite(it.value) && it.value > 0 ? it.value : 0));
+    const maxVal = Math.max(...numericVals, 1);
     const barLeft = 72;
     const barMaxWidth = 530;
     const barRight = barLeft + barMaxWidth; // 602
@@ -70,8 +89,9 @@ export function buildDiagramSvg(
 
     bodySvg = safeItems
       .map((item, idx) => {
-        const val = typeof item.value === 'number' && item.value > 0 ? item.value : (safeItems.length - idx) * 18;
-        const barW = Math.max(44, Math.round((val / maxVal) * barMaxWidth));
+        const hasVal = typeof item.value === 'number' && Number.isFinite(item.value) && item.value > 0;
+        const val = hasVal ? item.value! : 0;
+        const barW = hasVal ? Math.max(24, Math.round((val / maxVal) * barMaxWidth)) : 0;
         const y = startY + idx * rowHeight;
         const fill = palette[idx % palette.length];
         const barX = barRight - barW;
@@ -81,13 +101,13 @@ export function buildDiagramSvg(
             <text x="${labelCenterX}" y="${y + (item.detail ? 21 : 27)}" text-anchor="middle" direction="rtl" font-family="${fontStack}" font-size="13" font-weight="700" fill="#1A1816">${escapeXml(truncateText(item.label, 30))}</text>
             ${item.detail ? `<text x="${labelCenterX}" y="${y + 39}" text-anchor="middle" direction="rtl" font-family="${fontStack}" font-size="10.5" fill="#57534E">${escapeXml(truncateText(item.detail, 38))}</text>` : ''}
             <rect x="${barLeft}" y="${y + 8}" width="${barMaxWidth}" height="24" rx="3" fill="#EFECE4"/>
-            <rect x="${barX}" y="${y + 8}" width="${barW}" height="24" rx="3" fill="${fill}"/>
-            <text x="${Math.max(36, barX - 24)}" y="${y + 25}" text-anchor="middle" font-family="${fontStack}" font-size="12.5" font-weight="700" fill="${fill}">${escapeXml(toPersianDigits(val))}</text>
+            ${barW > 0 ? `<rect x="${barX}" y="${y + 8}" width="${barW}" height="24" rx="3" fill="${fill}"/>` : ''}
+            <text x="${Math.max(36, barX - 24)}" y="${y + 25}" text-anchor="middle" font-family="${fontStack}" font-size="12.5" font-weight="700" fill="${hasVal ? fill : '#78716C'}">${escapeXml(hasVal ? toPersianDigits(val) : '—')}</text>
           </g>
         `;
       })
       .join('');
-  } else if (kind === 'architecture') {
+  } else if (effectiveKind === 'architecture') {
     // Top central root box + connected module boxes below in RTL order
     const cols = Math.min(3, safeItems.length);
     const rows = Math.ceil(safeItems.length / cols);
@@ -239,6 +259,13 @@ export async function rasterizeSvgToPng(
   }
 
   try {
+    if (typeof document.fonts?.ready !== 'undefined') {
+      await Promise.race([
+        document.fonts.ready,
+        new Promise<void>((r) => setTimeout(r, 800)),
+      ]);
+    }
+    const safeSvg = sanitizeSvgMarkup(svgMarkup);
     const scale = 2;
     const canvas = document.createElement('canvas');
     canvas.width = width * scale;
@@ -250,7 +277,7 @@ export async function rasterizeSvgToPng(
     ctx.fillStyle = '#FBF9F5';
     ctx.fillRect(0, 0, width, height);
 
-    const svgBlob = new Blob([svgMarkup], { type: 'image/svg+xml;charset=utf-8' });
+    const svgBlob = new Blob([safeSvg], { type: 'image/svg+xml;charset=utf-8' });
     const url = URL.createObjectURL(svgBlob);
 
     await new Promise<void>((resolve, reject) => {

@@ -137,19 +137,26 @@ export class ApiClient {
     init: RequestInit = {},
     overrideProvider?: AiProviderConfig
   ): Promise<T> {
-    const token = await this.getToken();
     const providerHeaders = buildProviderHeaders(
       overrideProvider ?? this.getProviderConfig?.()
     );
-    const res = await fetch(path, {
-      ...init,
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${token}`,
-        ...providerHeaders,
-        ...(init.headers || {}),
-      },
-    });
+    const executeFetch = async (forceRefresh: boolean) => {
+      const token = await this.getToken(forceRefresh);
+      return fetch(path, {
+        ...init,
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+          ...providerHeaders,
+          ...(init.headers || {}),
+        },
+      });
+    };
+
+    let res = await executeFetch(false);
+    if (res.status === 401) {
+      res = await executeFetch(true);
+    }
 
     const rawText = await res.text();
     let data: unknown = null;
@@ -424,18 +431,25 @@ export class ApiClient {
     } = {},
     onProgress?: (event: DeepReviewProgressEvent) => void
   ): Promise<DeepReviewResponse> {
-    const token = await this.getToken();
     const providerHeaders = buildProviderHeaders(this.getProviderConfig?.());
-    const res = await fetch(`/api/projects/${encodeURIComponent(projectId)}/deep-review`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Accept: 'application/x-ndjson, application/json',
-        Authorization: `Bearer ${token}`,
-        ...providerHeaders,
-      },
-      body: JSON.stringify({ ...payload, stream: true }),
-    });
+    const executeDeepReviewFetch = async (forceRefresh: boolean) => {
+      const token = await this.getToken(forceRefresh);
+      return fetch(`/api/projects/${encodeURIComponent(projectId)}/deep-review`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Accept: 'application/x-ndjson, application/json',
+          Authorization: `Bearer ${token}`,
+          ...providerHeaders,
+        },
+        body: JSON.stringify({ ...payload, stream: true }),
+      });
+    };
+
+    let res = await executeDeepReviewFetch(false);
+    if (res.status === 401) {
+      res = await executeDeepReviewFetch(true);
+    }
 
     const contentType = (res.headers.get('content-type') || '').toLowerCase();
 

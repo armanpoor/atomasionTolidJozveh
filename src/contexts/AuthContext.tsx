@@ -17,6 +17,7 @@ import {
   auth,
   ensureUserWorkspaceProfile,
   googleAuthProvider,
+  googleWorkspaceAuthProvider,
 } from '../lib/firebase';
 
 export interface AppSessionUser {
@@ -143,19 +144,22 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     setSigningIn(true);
     setAuthError(null);
     try {
-      const result = await signInWithPopup(auth, googleAuthProvider);
-      const credential = GoogleAuthProvider.credentialFromResult(result);
-      const accessToken = credential?.accessToken ?? null;
-      workspaceTokenRef.current = accessToken;
-      setWorkspaceAccessToken(accessToken);
+      await signInWithPopup(auth, googleAuthProvider);
+      workspaceTokenRef.current = null;
+      setWorkspaceAccessToken(null);
       guestTokenRef.current = null;
       setGuestUser(null);
     } catch (err) {
       const code = (err as { code?: string })?.code;
-      if (code === 'auth/popup-closed-by-user') {
+      if (code === 'auth/popup-closed-by-user' || code === 'auth/cancelled-popup-request') {
         setAuthError('پنجره ورود با گوگل بسته شد. لطفاً دوباره تلاش کنید.');
       } else if (code === 'auth/popup-blocked') {
-        setAuthError('مرورگر پنجره ورود را مسدود کرد. اجازه باز شدن پنجره (Popup) را فعال کنید.');
+        setAuthError('مرورگر پنجره ورود را مسدود کرد. اجازه باز شدن پنجره (Popup) را فعال کنید و در مرورگر Brave سپر Shields را برای این صفحه خاموش کنید.');
+      } else if (code === 'auth/unauthorized-domain') {
+        const host = typeof window !== 'undefined' ? window.location.hostname : '';
+        setAuthError(
+          `دامنه فعلی (${host}) در فهرست Authorized Domains پروژه Firebase مجاز نشده است. لطفاً صفحه را رفرش کنید یا دامنه را در Firebase Authentication اضافه نمایید.`
+        );
       } else {
         setAuthError(
           err instanceof Error ? err.message : 'ورود با حساب گوگل با خطا مواجه شد.'
@@ -170,7 +174,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     setSigningIn(true);
     setAuthError(null);
     try {
-      const result = await signInWithPopup(auth, googleAuthProvider);
+      const result = await signInWithPopup(auth, googleWorkspaceAuthProvider);
       const credential = GoogleAuthProvider.credentialFromResult(result);
       const accessToken = credential?.accessToken ?? null;
       if (!accessToken) {
@@ -183,10 +187,13 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       return accessToken;
     } catch (err) {
       const code = (err as { code?: string })?.code;
-      if (code === 'auth/popup-closed-by-user') {
+      if (code === 'auth/popup-closed-by-user' || code === 'auth/cancelled-popup-request') {
         setAuthError('پنجره اتصال به گوگل بسته شد.');
       } else if (code === 'auth/popup-blocked') {
         setAuthError('مرورگر پنجره اتصال به گوگل را مسدود کرد.');
+      } else if (code === 'auth/unauthorized-domain') {
+        const host = typeof window !== 'undefined' ? window.location.hostname : '';
+        setAuthError(`دامنه فعلی (${host}) در Firebase Authentication مجاز نشده است.`);
       } else {
         setAuthError(
           err instanceof Error ? err.message : 'اتصال به Google Workspace با خطا مواجه شد.'

@@ -18,6 +18,7 @@ import {
 import { issueGuestSession } from './src/server/guestSession.ts';
 import { getOrCreateUser } from './src/db/repository.ts';
 import { resolveServerBindConfig } from './src/server/serverBindConfig.ts';
+import { requireAuth } from './src/middleware/auth.ts';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -182,7 +183,7 @@ async function startServer() {
     });
   });
 
-  app.post('/api/ai/analyze', async (req, res) => {
+  app.post('/api/ai/analyze', requireAuth, async (req, res) => {
     try {
       const body = req.body as {
         model?: string;
@@ -199,6 +200,8 @@ async function startServer() {
           wordCount: number;
         }>;
         generateTablesAndDiagrams?: boolean;
+        generateTables?: boolean;
+        generateDiagrams?: boolean;
       };
 
       const requestedModel = normalizeGoogleModelId(body.model);
@@ -212,12 +215,21 @@ async function startServer() {
       }
 
       const provider = resolveAiProviderFromRequest(req);
+      const allowTables =
+        body.generateTables !== undefined
+          ? Boolean(body.generateTables)
+          : body.generateTablesAndDiagrams !== false;
+      const allowDiagrams =
+        body.generateDiagrams !== undefined
+          ? Boolean(body.generateDiagrams)
+          : body.generateTablesAndDiagrams !== false;
 
       const promptPayload = {
         bookTitle: body.bookTitle || 'سند یکپارچه',
         sourceFiles: body.sourceFiles || [],
         totalSections: catalog.length,
-        generateTablesAndDiagrams: body.generateTablesAndDiagrams !== false,
+        generateTables: allowTables,
+        generateDiagrams: allowDiagrams,
         sections: catalog,
       };
 
@@ -228,8 +240,12 @@ async function startServer() {
         '۱. تمام خروجی‌ها باید به زبان فارسی استاندارد، روان و با نیم‌فاصله صحیح باشد.',
         '۲. هر sectionId موجود در ورودی باید دقیقاً در یکی از فصل‌های thematicChapters قرار گیرد تا هیچ مفهومی حذف نشود.',
         '۳. اگر موضوع واحدی به شکل پراکنده در چند فایل یا چند بخش تکرار شده، آن‌ها را در یک فصل موضوعی منسجم تجمیع کرده و در semanticDuplicates گزارش دهید.',
-        '۴. اگر generateTablesAndDiagrams فعال است، ۳ تا ۶ جدول مقایسه‌ای/خلاصه واقعی (generatedTables) با داده‌های دقیقِ برگرفته از متن و ۳ تا ۵ نمودار/فلوچارت آموزشی واقعی (generatedDiagrams) برای درج مستقیم در فایل ورد تولید کنید.',
-        '۵. در generatedDiagrams برای هر نمودار بین ۳ تا ۶ آیتم (label کوتاه فارسی، detail توضیح مختصر، و value عددی در صورت مقایسه) تولید کنید.',
+        allowTables
+          ? '۴. فقط در صورت وجود داده‌های مقایسه‌ای یا پارامتری واقعی در متن، ۲ تا ۵ جدول خلاصه/مقایسه‌ای (generatedTables) بدون جعل عدد یا آدرس هگز تولید کنید.'
+          : '۴. آرایه generatedTables را حتماً خالی ([]) برگردانید و هیچ جدولی تولید نکنید.',
+        allowDiagrams
+          ? '۵. فقط برای مفاهیم فرآیندی یا ساختاری واقعی در متن، ۲ تا ۴ نمودار آموزشی (generatedDiagrams) با ۳ تا ۶ آیتم (و فقط در صورت وجود عدد واقعی در متن مقدار value) تولید کنید.'
+          : '۵. آرایه generatedDiagrams را حتماً خالی ([]) برگردانید و هیچ نموداری تولید نکنید.',
       ].join('\n');
 
       const result = await runWithRetry(() =>
@@ -238,14 +254,34 @@ async function startServer() {
           googleModel: requestedModel,
           thinkingLevel: resolvedLevel,
           systemInstruction,
-          prompt: `این ساختار و چکیده بخش‌های فایل‌های ورودی است. لطفاً تحلیل کامل یکپارچه‌سازی، فصل‌بندی موضوعی، تشخیص تکرارها و تولید جداول و نمودارهای آموزشی را در قالب JSON برگردان:\n\n${JSON.stringify(promptPayload)}`,
+          prompt: `این ساختار و چکیده بخش‌های فایل‌های ورودی است. لطفاً تحلیل کامل یکپارچه‌سازی، فصل‌بندی موضوعی و تشخیص تکرارها را در قالب JSON معتبر برگردان:\n\n${JSON.stringify(promptPayload)}`,
           expectJson: true,
           googleResponseSchema: ANALYSIS_RESPONSE_SCHEMA,
         })
       );
 
       const rawJson = (result.text || '{}').trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '');
-      const parsed = JSON.parse(rawJson);
+      let parsed: Record<string, unknown>;
+      try {
+        parsed = JSON.parse(rawJson) as Record<string, unknown>;
+      } catch {
+        const firstBrace = rawJson.indexOf('{');
+        const lastBrace = rawJson.lastIndexOf('}');
+        if (firstBrace >= 0 && lastBrace > firstBrace) {
+          try {
+            parsed = JSON.parse(rawJson.slice(firstBrace, lastBrace + 1)) as Record<string, unknown>;
+          } catch {
+            res.status(502).json({ error: 'پاسخ JSON دریافتی از مدل هوش مصنوعی ناقص یا نامعتبر بود. لطفاً مجدداً تلاش کنید.' });
+            return;
+          }
+        } else {
+          res.status(502).json({ error: 'پاسخ JSON دریافتی از مدل هوش مصنوعی ناقص یا نامعتبر بود. لطفاً مجدداً تلاش کنید.' });
+          return;
+        }
+      }
+
+      if (!allowTables) parsed.generatedTables = [];
+      if (!allowDiagrams) parsed.generatedDiagrams = [];
 
       res.json({
         ok: true,

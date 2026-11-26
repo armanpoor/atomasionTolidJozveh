@@ -48,22 +48,84 @@ const LIVE_VOICE_TOOLS: FunctionDeclaration[] = [
   },
 ];
 
+const MAX_WS_PAYLOAD_BYTES = 256 * 1024;
+const MAX_AUDIO_BASE64_CHARS = 200_000;
+const MAX_TEXT_CHARS = 8_000;
+const AUTH_TIMEOUT_MS = 10_000;
+
+function isAllowedWsOrigin(originHeader: string | undefined, hostHeader: string | undefined): boolean {
+  if (!originHeader) return true;
+  try {
+    const originUrl = new URL(originHeader);
+    const originHost = originUrl.host.toLowerCase();
+    if (
+      originUrl.hostname === 'localhost' ||
+      originUrl.hostname === '127.0.0.1' ||
+      originUrl.hostname === '::1'
+    ) {
+      return true;
+    }
+    if (hostHeader && originHost === hostHeader.toLowerCase()) {
+      return true;
+    }
+    if (originUrl.hostname.endsWith('.run.app') || originUrl.hostname.endsWith('.googleusercontent.com')) {
+      return true;
+    }
+    return false;
+  } catch {
+    return false;
+  }
+}
+
 export function attachLiveVoiceWebSocket(server: HttpServer) {
-  const wss = new WebSocketServer({ server, path: '/ws/live' });
+  const wss = new WebSocketServer({
+    server,
+    path: '/ws/live',
+    maxPayload: MAX_WS_PAYLOAD_BYTES,
+  });
   wss.on('error', (err) => {
     console.error('Live voice WebSocket server error:', err);
   });
 
-  wss.on('connection', (ws: WebSocket) => {
+  wss.on('connection', (ws: WebSocket, req) => {
+    const originHeader = typeof req.headers.origin === 'string' ? req.headers.origin : undefined;
+    const hostHeader = typeof req.headers.host === 'string' ? req.headers.host : undefined;
+    if (!isAllowedWsOrigin(originHeader, hostHeader)) {
+      ws.close(1008, 'Origin not allowed');
+      return;
+    }
+
     let liveSession: Awaited<ReturnType<NonNullable<ReturnType<typeof createGeminiClient>>['live']['connect']>> | null =
       null;
     let authenticated = false;
+    let startingSession = false;
+
+    const closeLiveSession = () => {
+      if (liveSession) {
+        try {
+          liveSession.close();
+        } catch {
+          // ignore close errors
+        }
+        liveSession = null;
+      }
+      authenticated = false;
+      startingSession = false;
+    };
 
     const sendJson = (payload: Record<string, unknown>) => {
       if (ws.readyState === WebSocket.OPEN) {
         ws.send(JSON.stringify(payload));
       }
     };
+
+    const authTimer = setTimeout(() => {
+      if (!authenticated && !startingSession) {
+        sendJson({ type: 'error', message: 'زمان احراز هویت اتصال صوتی به پایان رسید.' });
+        ws.close(1008, 'Auth timeout');
+      }
+    }, AUTH_TIMEOUT_MS);
+    authTimer.unref?.();
 
     ws.on('message', async (raw) => {
       try {
@@ -77,9 +139,18 @@ export function attachLiveVoiceWebSocket(server: HttpServer) {
         };
 
         if (msg.type === 'start') {
+          if (startingSession) {
+            return;
+          }
+          if (liveSession) {
+            closeLiveSession();
+          }
+          startingSession = true;
+
           if (!msg.token) {
+            startingSession = false;
             sendJson({ type: 'error', message: 'توکن احراز هویت برای اتصال صوتی ارسال نشده است.' });
-            ws.close();
+            ws.close(1008, 'Missing token');
             return;
           }
 
@@ -87,8 +158,9 @@ export function attachLiveVoiceWebSocket(server: HttpServer) {
           if (isGuestBearerToken(msg.token)) {
             const guest = verifyGuestToken(msg.token);
             if (!guest) {
+              startingSession = false;
               sendJson({ type: 'error', message: 'نشست مهمان برای اتصال صوتی منقضی یا نامعتبر است.' });
-              ws.close();
+              ws.close(1008, 'Invalid guest token');
               return;
             }
             uid = guest.uid;
@@ -97,16 +169,20 @@ export function attachLiveVoiceWebSocket(server: HttpServer) {
               const decoded = await adminAuth.verifyIdToken(msg.token);
               uid = decoded.uid;
             } catch {
+              startingSession = false;
               sendJson({ type: 'error', message: 'احراز هویت جلسه صوتی نامعتبر یا منقضی است.' });
-              ws.close();
+              ws.close(1008, 'Invalid auth token');
               return;
             }
           }
 
+          clearTimeout(authTimer);
+
           const ai = createGeminiClient();
           if (!ai) {
+            startingSession = false;
             sendJson({ type: 'error', message: 'کلید API هوش مصنوعی در تنظیمات سرور تنظیم نشده است.' });
-            ws.close();
+            ws.close(1011, 'Missing AI key');
             return;
           }
 
@@ -153,10 +229,10 @@ export function attachLiveVoiceWebSocket(server: HttpServer) {
             callbacks: {
               onopen: () => {
                 authenticated = true;
+                startingSession = false;
                 sendJson({ type: 'ready' });
               },
               onmessage: (serverMsg) => {
-                // Forward 24kHz PCM audio output
                 const parts = serverMsg.serverContent?.modelTurn?.parts || [];
                 for (const part of parts) {
                   if (part.inlineData?.data) {
@@ -168,7 +244,6 @@ export function attachLiveVoiceWebSocket(server: HttpServer) {
                   }
                 }
 
-                // Forward transcriptions
                 if (serverMsg.serverContent?.inputTranscription?.text) {
                   sendJson({
                     type: 'input_transcript',
@@ -188,7 +263,6 @@ export function attachLiveVoiceWebSocket(server: HttpServer) {
                   sendJson({ type: 'turn_complete' });
                 }
 
-                // Forward tool calls as structured proposals for user confirmation
                 const calls = serverMsg.toolCall?.functionCalls || [];
                 if (calls.length > 0 && liveSession) {
                   const responses = [];
@@ -236,28 +310,33 @@ export function attachLiveVoiceWebSocket(server: HttpServer) {
               },
             },
           });
+          startingSession = false;
           return;
         }
 
         if (!authenticated || !liveSession) return;
 
-        if (msg.type === 'audio' && msg.data) {
+        if (msg.type === 'audio' && typeof msg.data === 'string' && msg.data.length > 0) {
+          if (msg.data.length > MAX_AUDIO_BASE64_CHARS) {
+            sendJson({ type: 'error', message: 'بسته صوتی ارسال‌شده بیش از حد مجاز است.' });
+            return;
+          }
           liveSession.sendRealtimeInput({
             audio: {
               data: msg.data,
               mimeType: 'audio/pcm;rate=16000',
             },
           });
-        } else if (msg.type === 'text' && msg.text) {
+        } else if (msg.type === 'text' && typeof msg.text === 'string' && msg.text.trim()) {
           liveSession.sendClientContent({
-            turns: [{ role: 'user', parts: [{ text: msg.text }] }],
+            turns: [{ role: 'user', parts: [{ text: msg.text.slice(0, MAX_TEXT_CHARS) }] }],
             turnComplete: true,
           });
         } else if (msg.type === 'stop') {
-          liveSession.close();
-          liveSession = null;
+          closeLiveSession();
         }
       } catch (err) {
+        startingSession = false;
         sendJson({
           type: 'error',
           message: err instanceof Error ? err.message : 'خطا در پردازش پیام صوتی.',
@@ -265,15 +344,14 @@ export function attachLiveVoiceWebSocket(server: HttpServer) {
       }
     });
 
+    ws.on('error', () => {
+      clearTimeout(authTimer);
+      closeLiveSession();
+    });
+
     ws.on('close', () => {
-      if (liveSession) {
-        try {
-          liveSession.close();
-        } catch {
-          // ignore close errors
-        }
-        liveSession = null;
-      }
+      clearTimeout(authTimer);
+      closeLiveSession();
     });
   });
 }

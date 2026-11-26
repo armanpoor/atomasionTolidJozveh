@@ -22,10 +22,20 @@ export const GOOGLE_WORKSPACE_SCOPES: readonly string[] = [
   'https://www.googleapis.com/auth/drive.scripts',
   'https://www.googleapis.com/auth/spreadsheets',
   'https://www.googleapis.com/auth/spreadsheets.readonly',
+  'https://www.googleapis.com/auth/documents',
+  'https://www.googleapis.com/auth/documents.readonly',
+  'https://www.googleapis.com/auth/presentations',
+  'https://www.googleapis.com/auth/presentations.readonly',
 ];
 
 export const GOOGLE_DOC_MIME = 'application/vnd.google-apps.document';
 export const GOOGLE_SHEET_MIME = 'application/vnd.google-apps.spreadsheet';
+export const GOOGLE_SLIDES_MIME = 'application/vnd.google-apps.presentation';
+export const DRIVE_FOLDER_MIME = 'application/vnd.google-apps.folder';
+export const DOCX_MIME_TYPE =
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+export const MARKDOWN_MIME_TYPE = 'text/markdown;charset=utf-8';
+const DRIVE_MULTIPART_MAX_BYTES = 4 * 1024 * 1024; // Switch to resumable upload above 4MB
 
 export interface DriveFileItem {
   id: string;
@@ -92,6 +102,7 @@ export async function listDriveFiles(params: {
         [
           `mimeType = '${GOOGLE_DOC_MIME}'`,
           `mimeType = '${GOOGLE_SHEET_MIME}'`,
+          `mimeType = '${GOOGLE_SLIDES_MIME}'`,
           `mimeType = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'`,
           `mimeType = 'application/pdf'`,
           `mimeType = 'text/markdown'`,
@@ -207,9 +218,10 @@ export async function readSpreadsheetTabValues(params: {
   sheetTitle: string;
   maxRange?: string;
 }): Promise<string[][]> {
-  const { accessToken, spreadsheetId, sheetTitle, maxRange = 'A1:Z500' } = params;
+  const { accessToken, spreadsheetId, sheetTitle, maxRange } = params;
   const safeTab = sheetTitle.replace(/'/g, "''");
-  const rangeExpr = `'${safeTab}'!${maxRange}`;
+  // Query full sheet grid by default so large ECU/calibration tables (>500 rows or >26 cols) are never silently truncated
+  const rangeExpr = maxRange?.trim() ? `'${safeTab}'!${maxRange.trim()}` : `'${safeTab}'`;
   const url = `https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(
     spreadsheetId
   )}/values/${encodeURIComponent(rangeExpr)}`;
@@ -350,6 +362,26 @@ export async function downloadDriveFileForImport(params: {
     };
   }
 
+  if (file.mimeType === GOOGLE_SLIDES_MIME) {
+    const res = await fetch(
+      `https://slides.googleapis.com/v1/presentations/${encodeURIComponent(file.id)}`,
+      { headers: { Authorization: `Bearer ${accessToken}` } }
+    );
+    if (!res.ok) {
+      const msg = await parseGoogleErrorMessage(res);
+      throw new Error(`خطا در خواندن اسلایدهای Google Slides «${file.name}»: ${msg}`);
+    }
+    const presentation = (await res.json()) as GoogleSlidesPresentationPayload;
+    const markdown = extractPresentationTextToMarkdown(presentation, file.name);
+    const outName = file.name.endsWith('.md') ? file.name : `${file.name}.md`;
+    return {
+      name: outName,
+      format: 'md',
+      sizeBytes: new Blob([markdown]).size,
+      presetText: markdown,
+    };
+  }
+
   // Binary or text file stored directly in Google Drive
   const res = await fetch(
     `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(file.id)}?alt=media`,
@@ -383,27 +415,276 @@ export async function downloadDriveFileForImport(params: {
   };
 }
 
+export type FinalExportFormat = 'docx' | 'md';
+
+export interface DriveUploadResult {
+  id: string;
+  name: string;
+  mimeType: string;
+  sizeBytes: number;
+  webViewLink?: string;
+  updated: boolean;
+}
+
+export function normalizeDriveExportFileName(
+  fileName: string,
+  format: FinalExportFormat
+): string {
+  const cleaned = String(fileName || '')
+    .replace(/[\u0000-\u001F\u007F/\\:*?"<>|]/g, '_')
+    .trim();
+  const ext = format === 'docx' ? '.docx' : '.md';
+  const base = cleaned || (format === 'docx' ? 'book_export' : 'book_export');
+  const lower = base.toLowerCase();
+  if (lower.endsWith(ext)) return base;
+  const strippedOther = base.replace(/\.(docx|md|markdown)$/i, '');
+  return `${strippedOther || 'book_export'}${ext}`;
+}
+
+export function buildMultipartRelatedUploadPayload(params: {
+  metadata: Record<string, unknown>;
+  contentBytes: Uint8Array;
+  mimeType: string;
+  boundary?: string;
+}): { contentType: string; bytes: Uint8Array } {
+  const { metadata, contentBytes, mimeType } = params;
+  const boundary =
+    params.boundary || `drive_upload_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+  const encoder = new TextEncoder();
+
+  const metaPart = encoder.encode(
+    `--${boundary}\r\n` +
+      `Content-Type: application/json; charset=UTF-8\r\n\r\n` +
+      `${JSON.stringify(metadata)}\r\n` +
+      `--${boundary}\r\n` +
+      `Content-Type: ${mimeType}\r\n\r\n`
+  );
+  const closing = encoder.encode(`\r\n--${boundary}--`);
+
+  const combined = new Uint8Array(metaPart.byteLength + contentBytes.byteLength + closing.byteLength);
+  combined.set(metaPart, 0);
+  combined.set(contentBytes, metaPart.byteLength);
+  combined.set(closing, metaPart.byteLength + contentBytes.byteLength);
+
+  return {
+    contentType: `multipart/related; boundary=${boundary}`,
+    bytes: combined,
+  };
+}
+
+export async function listDriveExportFiles(params: {
+  accessToken: string;
+  formatFilter?: 'all' | FinalExportFormat;
+  searchQuery?: string;
+  folderId?: string;
+  pageSize?: number;
+}): Promise<DriveFileItem[]> {
+  const {
+    accessToken,
+    formatFilter = 'all',
+    searchQuery = '',
+    folderId,
+    pageSize = 30,
+  } = params;
+
+  const clauses: string[] = ['trashed = false'];
+  if (formatFilter === 'docx') {
+    clauses.push(`(mimeType = '${DOCX_MIME_TYPE}' or name contains '.docx')`);
+  } else if (formatFilter === 'md') {
+    clauses.push(`(mimeType = 'text/markdown' or name contains '.md')`);
+  } else {
+    clauses.push(
+      `(mimeType = '${DOCX_MIME_TYPE}' or mimeType = 'text/markdown' or name contains '.docx' or name contains '.md')`
+    );
+  }
+
+  if (folderId?.trim()) {
+    clauses.push(`'${escapeDriveQueryString(folderId.trim())}' in parents`);
+  }
+
+  const trimmedSearch = searchQuery.trim();
+  if (trimmedSearch) {
+    clauses.push(`name contains '${escapeDriveQueryString(trimmedSearch)}'`);
+  }
+
+  const url = new URL('https://www.googleapis.com/drive/v3/files');
+  url.searchParams.set('q', clauses.join(' and '));
+  url.searchParams.set('pageSize', String(Math.min(100, Math.max(1, pageSize))));
+  url.searchParams.set('orderBy', 'modifiedTime desc');
+  url.searchParams.set(
+    'fields',
+    'files(id,name,mimeType,modifiedTime,size,webViewLink)'
+  );
+
+  const res = await fetch(url.toString(), {
+    headers: { Authorization: `Bearer ${accessToken}` },
+  });
+
+  if (!res.ok) {
+    const msg = await parseGoogleErrorMessage(res);
+    throw new Error(`خطا در خواندن فهرست فایل‌های .docx و .md در Google Drive: ${msg}`);
+  }
+
+  const data = (await res.json()) as {
+    files?: Array<{
+      id: string;
+      name: string;
+      mimeType: string;
+      modifiedTime?: string;
+      size?: string;
+      webViewLink?: string;
+    }>;
+  };
+
+  return (data.files || []).map((f) => ({
+    id: f.id,
+    name: f.name,
+    mimeType: f.mimeType,
+    modifiedTime: f.modifiedTime,
+    sizeBytes: f.size ? Number(f.size) || 0 : 0,
+    webViewLink: f.webViewLink,
+  }));
+}
+
+export async function findOrCreateDriveFolder(params: {
+  accessToken: string;
+  folderName: string;
+  parentId?: string;
+}): Promise<{ id: string; name: string }> {
+  const { accessToken, folderName, parentId } = params;
+  const safeName = folderName.trim() || 'Persian Book Studio Exports';
+
+  const clauses = [
+    'trashed = false',
+    `mimeType = '${DRIVE_FOLDER_MIME}'`,
+    `name = '${escapeDriveQueryString(safeName)}'`,
+  ];
+  if (parentId?.trim()) {
+    clauses.push(`'${escapeDriveQueryString(parentId.trim())}' in parents`);
+  }
+
+  const listUrl = new URL('https://www.googleapis.com/drive/v3/files');
+  listUrl.searchParams.set('q', clauses.join(' and '));
+  listUrl.searchParams.set('pageSize', '1');
+  listUrl.searchParams.set('fields', 'files(id,name)');
+
+  const searchRes = await fetch(listUrl.toString(), {
+    headers: { Authorization: `Bearer ${accessToken}` },
+  });
+  if (searchRes.ok) {
+    const found = (await searchRes.json()) as { files?: Array<{ id: string; name: string }> };
+    if (found.files && found.files.length > 0) {
+      return found.files[0];
+    }
+  }
+
+  const createBody: Record<string, unknown> = {
+    name: safeName,
+    mimeType: DRIVE_FOLDER_MIME,
+  };
+  if (parentId?.trim()) {
+    createBody.parents = [parentId.trim()];
+  }
+
+  const createRes = await fetch(
+    'https://www.googleapis.com/drive/v3/files?fields=id,name',
+    {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(createBody),
+    }
+  );
+  if (!createRes.ok) {
+    const msg = await parseGoogleErrorMessage(createRes);
+    throw new Error(`خطا در ایجاد پوشه «${safeName}» در Google Drive: ${msg}`);
+  }
+  return (await createRes.json()) as { id: string; name: string };
+}
+
 export async function uploadFileToDrive(params: {
   accessToken: string;
   fileName: string;
   mimeType: string;
-  data: Blob | string;
+  data: Blob | string | Uint8Array;
   existingFileId?: string | null;
+  folderId?: string | null;
+  description?: string;
 }): Promise<{ id: string; name: string; webViewLink?: string }> {
-  const { accessToken, fileName, mimeType, data, existingFileId } = params;
-  const contentBlob =
-    typeof data === 'string' ? new Blob([data], { type: mimeType }) : data;
+  const { accessToken, fileName, mimeType, data, existingFileId, folderId, description } = params;
+  const contentBytes =
+    data instanceof Uint8Array
+      ? data
+      : typeof data === 'string'
+        ? new TextEncoder().encode(data)
+        : new Uint8Array(await data.arrayBuffer());
 
-  const metadata = existingFileId
+  const metadata: Record<string, unknown> = existingFileId
     ? { name: fileName }
     : { name: fileName, mimeType };
+  if (description) {
+    metadata.description = description;
+  }
+  if (!existingFileId && folderId?.trim()) {
+    metadata.parents = [folderId.trim()];
+  }
 
-  const form = new FormData();
-  form.append(
-    'metadata',
-    new Blob([JSON.stringify(metadata)], { type: 'application/json' })
-  );
-  form.append('file', contentBlob);
+  // Use Google Drive Resumable Upload for files larger than 4MB (e.g. rich .docx with embedded diagrams)
+  if (contentBytes.byteLength > DRIVE_MULTIPART_MAX_BYTES) {
+    const initEndpoint = existingFileId
+      ? `https://www.googleapis.com/upload/drive/v3/files/${encodeURIComponent(
+          existingFileId
+        )}?uploadType=resumable&fields=id,name,webViewLink`
+      : 'https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable&fields=id,name,webViewLink';
+
+    const initRes = await fetch(initEndpoint, {
+      method: existingFileId ? 'PATCH' : 'POST',
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        'Content-Type': 'application/json; charset=UTF-8',
+        'X-Upload-Content-Type': mimeType,
+        'X-Upload-Content-Length': String(contentBytes.byteLength),
+      },
+      body: JSON.stringify(metadata),
+    });
+
+    if (!initRes.ok) {
+      const msg = await parseGoogleErrorMessage(initRes);
+      throw new Error(`خطا در آغاز آپلود فایل حجیم در Google Drive: ${msg}`);
+    }
+
+    const uploadUrl = initRes.headers.get('Location');
+    if (!uploadUrl) {
+      throw new Error('آدرس جلسه آپلود (Resumable Session URL) از Google Drive دریافت نشد.');
+    }
+
+    const putRes = await fetch(uploadUrl, {
+      method: 'PUT',
+      headers: {
+        'Content-Type': mimeType,
+      },
+      body: contentBytes.buffer.slice(
+        contentBytes.byteOffset,
+        contentBytes.byteOffset + contentBytes.byteLength
+      ) as ArrayBuffer,
+    });
+
+    if (!putRes.ok) {
+      const msg = await parseGoogleErrorMessage(putRes);
+      throw new Error(`خطا در ارسال محتوای فایل به Google Drive: ${msg}`);
+    }
+
+    return (await putRes.json()) as { id: string; name: string; webViewLink?: string };
+  }
+
+  // Standard RFC-2387 multipart/related upload for files <= 4MB
+  const multipart = buildMultipartRelatedUploadPayload({
+    metadata,
+    contentBytes,
+    mimeType,
+  });
 
   const endpoint = existingFileId
     ? `https://www.googleapis.com/upload/drive/v3/files/${encodeURIComponent(
@@ -415,8 +696,12 @@ export async function uploadFileToDrive(params: {
     method: existingFileId ? 'PATCH' : 'POST',
     headers: {
       Authorization: `Bearer ${accessToken}`,
+      'Content-Type': multipart.contentType,
     },
-    body: form,
+    body: multipart.bytes.buffer.slice(
+      multipart.bytes.byteOffset,
+      multipart.bytes.byteOffset + multipart.bytes.byteLength
+    ) as ArrayBuffer,
   });
 
   if (!res.ok) {
@@ -425,6 +710,84 @@ export async function uploadFileToDrive(params: {
   }
 
   return (await res.json()) as { id: string; name: string; webViewLink?: string };
+}
+
+export async function uploadFinalDocumentToDrive(params: {
+  accessToken: string;
+  fileName: string;
+  format: FinalExportFormat;
+  data: Blob | string | Uint8Array;
+  existingFileId?: string | null;
+  folderId?: string | null;
+  description?: string;
+}): Promise<DriveUploadResult> {
+  const { accessToken, format, data, existingFileId, folderId, description } = params;
+  const normalizedName = normalizeDriveExportFileName(params.fileName, format);
+  const mimeType = format === 'docx' ? DOCX_MIME_TYPE : MARKDOWN_MIME_TYPE;
+  const sizeBytes =
+    data instanceof Uint8Array
+      ? data.byteLength
+      : typeof data === 'string'
+        ? new TextEncoder().encode(data).byteLength
+        : data.size;
+
+  const uploaded = await uploadFileToDrive({
+    accessToken,
+    fileName: normalizedName,
+    mimeType,
+    data,
+    existingFileId,
+    folderId,
+    description,
+  });
+
+  return {
+    id: uploaded.id,
+    name: uploaded.name || normalizedName,
+    mimeType,
+    sizeBytes,
+    webViewLink:
+      uploaded.webViewLink || `https://drive.google.com/file/d/${uploaded.id}/view`,
+    updated: Boolean(existingFileId),
+  };
+}
+
+export function createGoogleDriveService(accessToken: string) {
+  return {
+    listFiles: (options?: {
+      searchQuery?: string;
+      onlySpreadsheets?: boolean;
+      pageSize?: number;
+    }) => listDriveFiles({ accessToken, ...options }),
+
+    listExportFiles: (options?: {
+      formatFilter?: 'all' | FinalExportFormat;
+      searchQuery?: string;
+      folderId?: string;
+      pageSize?: number;
+    }) => listDriveExportFiles({ accessToken, ...options }),
+
+    findOrCreateFolder: (folderName: string, parentId?: string) =>
+      findOrCreateDriveFolder({ accessToken, folderName, parentId }),
+
+    uploadFile: (options: {
+      fileName: string;
+      mimeType: string;
+      data: Blob | string | Uint8Array;
+      existingFileId?: string | null;
+      folderId?: string | null;
+      description?: string;
+    }) => uploadFileToDrive({ accessToken, ...options }),
+
+    uploadFinalDocument: (options: {
+      fileName: string;
+      format: FinalExportFormat;
+      data: Blob | string | Uint8Array;
+      existingFileId?: string | null;
+      folderId?: string | null;
+      description?: string;
+    }) => uploadFinalDocumentToDrive({ accessToken, ...options }),
+  };
 }
 
 export interface BookSpreadsheetTabData {
@@ -569,7 +932,8 @@ export async function createBookSpreadsheet(params: {
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
-        valueInputOption: 'USER_ENTERED',
+        // RAW prevents spreadsheet formula injection / accidental evaluation of technical strings starting with =, +, -, @
+        valueInputOption: 'RAW',
         data: tabs.map((t) => ({
           range: `'${t.tabTitle.replace(/'/g, "''")}'!A1`,
           values: t.rows,
@@ -600,12 +964,32 @@ export async function updateExistingSpreadsheetTab(params: {
 }): Promise<{ updatedRows: number }> {
   const { accessToken, spreadsheetId, sheetTitle, rows } = params;
   const safeTab = sheetTitle.replace(/'/g, "''");
+  const fullTabRange = `'${safeTab}'`;
   const rangeExpr = `'${safeTab}'!A1`;
+
+  // Clear existing grid values first so shorter updates never leave stale trailing rows from prior exports
+  const clearRes = await fetch(
+    `https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(
+      spreadsheetId
+    )}/values/${encodeURIComponent(fullTabRange)}:clear`,
+    {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({}),
+    }
+  );
+  if (!clearRes.ok) {
+    const msg = await parseGoogleErrorMessage(clearRes);
+    throw new Error(`خطا در پاک‌سازی تب «${sheetTitle}» پیش از به‌روزرسانی Google Sheets: ${msg}`);
+  }
 
   const res = await fetch(
     `https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(
       spreadsheetId
-    )}/values/${encodeURIComponent(rangeExpr)}?valueInputOption=USER_ENTERED`,
+    )}/values/${encodeURIComponent(rangeExpr)}?valueInputOption=RAW`,
     {
       method: 'PUT',
       headers: {
@@ -627,4 +1011,425 @@ export async function updateExistingSpreadsheetTab(params: {
 
   const data = (await res.json()) as { updatedRows?: number };
   return { updatedRows: data.updatedRows ?? rows.length };
+}
+
+export interface GoogleSlidesTextElement {
+  textRun?: { content?: string };
+}
+
+export interface GoogleSlidesPageElement {
+  shape?: {
+    text?: { textElements?: GoogleSlidesTextElement[] };
+  };
+  table?: {
+    tableRows?: Array<{
+      tableCells?: Array<{
+        text?: { textElements?: GoogleSlidesTextElement[] };
+      }>;
+    }>;
+  };
+}
+
+export interface GoogleSlidesPresentationPayload {
+  title?: string;
+  slides?: Array<{
+    objectId?: string;
+    pageElements?: GoogleSlidesPageElement[];
+    slideProperties?: {
+      notesPage?: {
+        pageElements?: GoogleSlidesPageElement[];
+      };
+    };
+  }>;
+}
+
+function collectSlideTextElements(elements?: GoogleSlidesTextElement[]): string {
+  if (!Array.isArray(elements)) return '';
+  return elements
+    .map((el) => el.textRun?.content || '')
+    .join('')
+    .replace(/\r/g, '')
+    .trim();
+}
+
+export function extractPresentationTextToMarkdown(
+  presentation: GoogleSlidesPresentationPayload,
+  fallbackTitle = 'Google Slides'
+): string {
+  const title = (presentation.title || fallbackTitle).trim();
+  const slides = Array.isArray(presentation.slides) ? presentation.slides : [];
+  if (slides.length === 0) {
+    return `# ${title}\n\n(ارائه بدون اسلاید است)`;
+  }
+
+  const parts: string[] = [`# ${title}`];
+  slides.forEach((slide, idx) => {
+    const slideBlocks: string[] = [];
+    for (const el of slide.pageElements || []) {
+      const shapeText = collectSlideTextElements(el.shape?.text?.textElements);
+      if (shapeText) {
+        slideBlocks.push(shapeText);
+      }
+      if (el.table?.tableRows && el.table.tableRows.length > 0) {
+        const rows = el.table.tableRows.map((row) =>
+          (row.tableCells || []).map((cell) =>
+            collectSlideTextElements(cell.text?.textElements)
+              .replace(/\|/g, '\\|')
+              .replace(/\n+/g, ' ')
+          )
+        );
+        const maxCols = Math.max(1, ...rows.map((r) => r.length));
+        const padRow = (r: string[]) =>
+          Array.from({ length: maxCols }, (_, i) => r[i] ?? '');
+        const header = padRow(rows[0] || []);
+        const sep = Array.from({ length: maxCols }, () => '---');
+        const body = rows.slice(1).map(padRow);
+        slideBlocks.push(
+          [
+            `| ${header.join(' | ')} |`,
+            `| ${sep.join(' | ')} |`,
+            ...body.map((r) => `| ${r.join(' | ')} |`),
+          ].join('\n')
+        );
+      }
+    }
+
+    const notesTexts = (slide.slideProperties?.notesPage?.pageElements || [])
+      .map((el) => collectSlideTextElements(el.shape?.text?.textElements))
+      .filter((t) => t.length > 0);
+
+    parts.push(`## اسلاید ${idx + 1}`);
+    if (slideBlocks.length > 0) {
+      parts.push(slideBlocks.join('\n\n'));
+    } else {
+      parts.push('(بدون متن)');
+    }
+    if (notesTexts.length > 0) {
+      parts.push(`> یادداشت ارائه‌دهنده: ${notesTexts.join(' ')}`);
+    }
+  });
+
+  return parts.join('\n\n');
+}
+
+export interface GoogleDocBatchSegment {
+  text: string;
+  namedStyleType: 'TITLE' | 'SUBTITLE' | 'HEADING_1' | 'HEADING_2' | 'NORMAL_TEXT';
+}
+
+export function buildGoogleDocSegmentsFromBook(book: ParsedBook): GoogleDocBatchSegment[] {
+  const segments: GoogleDocBatchSegment[] = [];
+  segments.push({ text: `${book.title}\n`, namedStyleType: 'TITLE' });
+  if (book.subtitle?.trim()) {
+    segments.push({ text: `${book.subtitle.trim()}\n`, namedStyleType: 'SUBTITLE' });
+  }
+
+  for (const ch of book.chapters) {
+    segments.push({ text: `${ch.title}\n`, namedStyleType: 'HEADING_1' });
+    for (const block of ch.introBlocks) {
+      if (block.type === 'paragraph' && block.text.trim()) {
+        segments.push({ text: `${block.text.trim()}\n`, namedStyleType: 'NORMAL_TEXT' });
+      }
+    }
+    for (const sec of ch.sections) {
+      const heading = sec.numberLabel ? `${sec.numberLabel}. ${sec.title}` : sec.title;
+      segments.push({ text: `${heading}\n`, namedStyleType: 'HEADING_2' });
+      for (const b of sec.blocks) {
+        if (b.type === 'paragraph' && b.text.trim()) {
+          segments.push({ text: `${b.text.trim()}\n`, namedStyleType: 'NORMAL_TEXT' });
+        } else if (b.type === 'subheading' && b.text.trim()) {
+          segments.push({ text: `${b.text.trim()}\n`, namedStyleType: 'HEADING_2' });
+        } else if (b.type === 'list' && b.items.length > 0) {
+          const listText = b.items
+            .map((it, idx) => (b.ordered ? `${idx + 1}. ${it}` : `• ${it}`))
+            .join('\n');
+          segments.push({ text: `${listText}\n`, namedStyleType: 'NORMAL_TEXT' });
+        } else if (b.type === 'callout') {
+          const body = b.paragraphs.join('\n');
+          segments.push({
+            text: `【${b.title}】\n${body}\n`,
+            namedStyleType: 'NORMAL_TEXT',
+          });
+        } else if (b.type === 'table') {
+          const captionLine = b.caption ? `${b.caption}\n` : '';
+          const headerLine = b.headers.join(' | ');
+          const rowLines = b.rows.map((r) => r.join(' | ')).join('\n');
+          segments.push({
+            text: `${captionLine}${headerLine}\n${rowLines}\n`,
+            namedStyleType: 'NORMAL_TEXT',
+          });
+        } else if (b.type === 'equation' && b.readable.trim()) {
+          segments.push({ text: `${b.readable.trim()}\n`, namedStyleType: 'NORMAL_TEXT' });
+        } else if (b.type === 'conflict_note') {
+          segments.push({
+            text: `تناقض (${b.topic}): روایت ۱ (${b.fileAName}): ${b.excerptA} | روایت ۲ (${b.fileBName}): ${b.excerptB}\n`,
+            namedStyleType: 'NORMAL_TEXT',
+          });
+        }
+      }
+    }
+  }
+
+  return segments;
+}
+
+export async function createBookGoogleDoc(params: {
+  accessToken: string;
+  title: string;
+  book: ParsedBook;
+}): Promise<{ documentId: string; documentUrl: string; title: string }> {
+  const { accessToken, title, book } = params;
+
+  const createRes = await fetch('https://docs.googleapis.com/v1/documents', {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ title }),
+  });
+
+  if (!createRes.ok) {
+    const msg = await parseGoogleErrorMessage(createRes);
+    throw new Error(`خطا در ایجاد Google Doc: ${msg}`);
+  }
+
+  const created = (await createRes.json()) as {
+    documentId: string;
+    title?: string;
+  };
+
+  const segments = buildGoogleDocSegmentsFromBook(book);
+  const fullText = segments.map((s) => s.text).join('');
+  if (fullText.length > 0) {
+    const requests: Array<Record<string, unknown>> = [
+      {
+        insertText: {
+          location: { index: 1 },
+          text: fullText,
+        },
+      },
+    ];
+
+    let cursor = 1;
+    for (const seg of segments) {
+      const startIndex = cursor;
+      const endIndex = cursor + seg.text.length;
+      requests.push({
+        updateParagraphStyle: {
+          range: { startIndex, endIndex },
+          paragraphStyle: {
+            namedStyleType: seg.namedStyleType,
+            direction: 'RIGHT_TO_LEFT',
+          },
+          fields: 'namedStyleType,direction',
+        },
+      });
+      cursor = endIndex;
+    }
+
+    const batchRes = await fetch(
+      `https://docs.googleapis.com/v1/documents/${encodeURIComponent(
+        created.documentId
+      )}:batchUpdate`,
+      {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ requests }),
+      }
+    );
+
+    if (!batchRes.ok) {
+      const msg = await parseGoogleErrorMessage(batchRes);
+      throw new Error(`سند Google Doc ساخته شد اما درج محتوا خطا داد: ${msg}`);
+    }
+  }
+
+  return {
+    documentId: created.documentId,
+    documentUrl: `https://docs.google.com/document/d/${created.documentId}/edit`,
+    title: created.title || title,
+  };
+}
+
+export interface BookSlidePlanItem {
+  slideId: string;
+  titleId: string;
+  bodyId: string;
+  title: string;
+  body: string;
+}
+
+export function buildBookSlidesPlan(params: {
+  book: ParsedBook;
+  winolsReport?: WinolsExtractionReport | null;
+  maxChapterSlides?: number;
+}): BookSlidePlanItem[] {
+  const { book, winolsReport = null, maxChapterSlides = 16 } = params;
+  const plan: BookSlidePlanItem[] = [];
+
+  plan.push({
+    slideId: 'slide_cover',
+    titleId: 'slide_cover_title',
+    bodyId: 'slide_cover_body',
+    title: book.title,
+    body: [
+      book.subtitle || 'ارائه ساختاریافته کتاب فنی',
+      `تعداد فصل‌ها: ${book.chapters.length}`,
+      `نقشه‌های WinOLS شناسایی‌شده: ${winolsReport?.mapsDetected ?? 0}`,
+      `مداخل واژه‌نامه: ${book.glossary?.length ?? 0}`,
+    ].join('\n'),
+  });
+
+  book.chapters.slice(0, maxChapterSlides).forEach((ch, idx) => {
+    const bulletLines = ch.sections
+      .slice(0, 8)
+      .map((sec) => `• ${sec.numberLabel ? `${sec.numberLabel}. ` : ''}${sec.title}`);
+    if (ch.sections.length > 8) {
+      bulletLines.push(`• و ${ch.sections.length - 8} زیربخش دیگر...`);
+    }
+    plan.push({
+      slideId: `slide_ch_${idx + 1}`,
+      titleId: `slide_ch_${idx + 1}_title`,
+      bodyId: `slide_ch_${idx + 1}_body`,
+      title: ch.title,
+      body: bulletLines.join('\n') || 'خلاصه مباحث کلیدی فصل',
+    });
+  });
+
+  if (winolsReport && winolsReport.entries.length > 0) {
+    const mapLines = winolsReport.entries
+      .slice(0, 10)
+      .map(
+        (m) =>
+          `• ${m.mapCode} (${m.mapNameFa}) — ${m.dimensions}${m.hexAddresses.length > 0 ? ` · ${m.hexAddresses[0]}` : ''}`
+      );
+    plan.push({
+      slideId: 'slide_winols_summary',
+      titleId: 'slide_winols_summary_title',
+      bodyId: 'slide_winols_summary_body',
+      title: 'خلاصه نقشه‌های کلیدی WinOLS و کالیبراسیون',
+      body: mapLines.join('\n'),
+    });
+  }
+
+  return plan;
+}
+
+export async function createBookPresentation(params: {
+  accessToken: string;
+  title: string;
+  book: ParsedBook;
+  winolsReport?: WinolsExtractionReport | null;
+}): Promise<{ presentationId: string; presentationUrl: string; title: string; slideCount: number }> {
+  const { accessToken, title, book, winolsReport = null } = params;
+
+  const createRes = await fetch('https://slides.googleapis.com/v1/presentations', {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ title }),
+  });
+
+  if (!createRes.ok) {
+    const msg = await parseGoogleErrorMessage(createRes);
+    throw new Error(`خطا در ایجاد Google Slides: ${msg}`);
+  }
+
+  const created = (await createRes.json()) as {
+    presentationId: string;
+    title?: string;
+    slides?: Array<{ objectId?: string }>;
+  };
+
+  const slidesPlan = buildBookSlidesPlan({ book, winolsReport });
+  const requests: Array<Record<string, unknown>> = [];
+
+  for (const item of slidesPlan) {
+    requests.push(
+      {
+        createSlide: {
+          objectId: item.slideId,
+          slideLayoutReference: { predefinedLayout: 'TITLE_AND_BODY' },
+          placeholderIdMappings: [
+            {
+              layoutPlaceholder: { type: 'TITLE', index: 0 },
+              objectId: item.titleId,
+            },
+            {
+              layoutPlaceholder: { type: 'BODY', index: 0 },
+              objectId: item.bodyId,
+            },
+          ],
+        },
+      },
+      {
+        insertText: {
+          objectId: item.titleId,
+          insertionIndex: 0,
+          text: item.title,
+        },
+      },
+      {
+        insertText: {
+          objectId: item.bodyId,
+          insertionIndex: 0,
+          text: item.body,
+        },
+      },
+      {
+        updateParagraphStyle: {
+          objectId: item.titleId,
+          textRange: { type: 'ALL' },
+          style: { direction: 'RIGHT_TO_LEFT', alignment: 'START' },
+          fields: 'direction,alignment',
+        },
+      },
+      {
+        updateParagraphStyle: {
+          objectId: item.bodyId,
+          textRange: { type: 'ALL' },
+          style: { direction: 'RIGHT_TO_LEFT', alignment: 'START' },
+          fields: 'direction,alignment',
+        },
+      }
+    );
+  }
+
+  // Remove the default blank initial slide so presentation starts cleanly at cover slide
+  const initialSlideId = created.slides?.[0]?.objectId;
+  if (initialSlideId && slidesPlan.length > 0) {
+    requests.push({ deleteObject: { objectId: initialSlideId } });
+  }
+
+  const batchRes = await fetch(
+    `https://slides.googleapis.com/v1/presentations/${encodeURIComponent(
+      created.presentationId
+    )}:batchUpdate`,
+    {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ requests }),
+    }
+  );
+
+  if (!batchRes.ok) {
+    const msg = await parseGoogleErrorMessage(batchRes);
+    throw new Error(`فایل Google Slides ساخته شد اما تولید اسلایدها خطا داد: ${msg}`);
+  }
+
+  return {
+    presentationId: created.presentationId,
+    presentationUrl: `https://docs.google.com/presentation/d/${created.presentationId}/edit`,
+    title: created.title || title,
+    slideCount: slidesPlan.length,
+  };
 }

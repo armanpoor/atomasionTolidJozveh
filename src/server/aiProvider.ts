@@ -655,17 +655,23 @@ export function createGoogleGenAiClient(
   });
 }
 
-function isPrivateOrReservedIp(ip: string): boolean {
+export function isPrivateOrReservedIp(ip: string): boolean {
   if (net.isIPv4(ip)) {
-    const [a, b] = ip.split('.').map(Number);
+    const [a, b, c] = ip.split('.').map(Number);
     return (
       a === 0 ||
       a === 10 ||
       a === 127 ||
+      (a === 100 && b >= 64 && b <= 127) ||
       (a === 169 && b === 254) ||
       (a === 172 && b >= 16 && b <= 31) ||
+      (a === 192 && b === 0 && (c === 0 || c === 2)) ||
+      (a === 192 && b === 88 && c === 99) ||
       (a === 192 && b === 168) ||
-      (a === 100 && b >= 64 && b <= 127)
+      (a === 198 && (b === 18 || b === 19)) ||
+      (a === 198 && b === 51 && c === 100) ||
+      (a === 203 && b === 0 && c === 113) ||
+      a >= 224
     );
   }
   if (net.isIPv6(ip)) {
@@ -679,7 +685,11 @@ function isPrivateOrReservedIp(ip: string): boolean {
       low.startsWith('fe9') ||
       low.startsWith('fea') ||
       low.startsWith('feb') ||
-      low.startsWith('::ffff:')
+      low.startsWith('ff') ||
+      low.startsWith('::ffff:') ||
+      low.startsWith('64:ff9b:') ||
+      low.startsWith('100::') ||
+      low.startsWith('2001:db8:')
     );
   }
   return true;

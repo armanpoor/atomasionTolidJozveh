@@ -217,7 +217,10 @@ export function parseNumericMeasurement(
     .replace(/ي/g, 'ی')
     .replace(/ك/g, 'ک')
     .replace(/[\u200c\u200e\u200f]/g, ' ')
-    .replace(/٬|,/g, '')
+    // Strip thousands grouping commas (e.g. 1,250 or 12,500) first
+    .replace(/(?<=\d)[٬,](?=\d{3}(?:\D|$))/g, '')
+    // Convert remaining single decimal commas (e.g. 14,7 or 0,85) to decimal points
+    .replace(/(?<=\d)[٬,](?=\d{1,2}(?:\D|$))/g, '.')
     .trim();
 
   // Skip hex addresses, OBD-II DTC fault codes, and map dimensions (16x16)
@@ -322,8 +325,15 @@ export function computeDescriptiveStats(values: number[]): {
   const stdDev = Math.sqrt(variance);
   const absDelta = max - min;
 
-  // Relative percentage difference anchored to first non-zero baseline or mean magnitude
-  const baseDenom = Math.abs(values[0]) > 1e-9 ? Math.abs(values[0]) : Math.abs(mean) > 1e-9 ? Math.abs(mean) : 1;
+  // Order-independent relative percentage difference anchored to minimum non-zero magnitude (fallback to max/mean)
+  const baseDenom =
+    Math.abs(min) > 1e-9
+      ? Math.abs(min)
+      : Math.abs(max) > 1e-9
+        ? Math.abs(max)
+        : Math.abs(mean) > 1e-9
+          ? Math.abs(mean)
+          : 1;
   const percentDiff = (absDelta / baseDenom) * 100;
   const cvPercent = Math.abs(mean) > 1e-9 ? (stdDev / Math.abs(mean)) * 100 : 0;
 

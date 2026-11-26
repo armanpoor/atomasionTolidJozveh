@@ -23,8 +23,15 @@ import { GOOGLE_WORKSPACE_SCOPES } from './googleWorkspace';
 const app = initializeApp(firebaseConfig);
 export const auth = getAuth(app);
 export const googleAuthProvider = new GoogleAuthProvider();
+googleAuthProvider.setCustomParameters({ prompt: 'select_account' });
+
+export const googleWorkspaceAuthProvider = new GoogleAuthProvider();
+googleWorkspaceAuthProvider.setCustomParameters({
+  prompt: 'select_account',
+  include_granted_scopes: 'true',
+});
 for (const scope of GOOGLE_WORKSPACE_SCOPES) {
-  googleAuthProvider.addScope(scope);
+  googleWorkspaceAuthProvider.addScope(scope);
 }
 
 const configuredDatabaseId = (

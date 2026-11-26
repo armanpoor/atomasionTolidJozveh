@@ -1,10 +1,6 @@
-import fs from 'node:fs';
 import { getApps, initializeApp } from 'firebase-admin/app';
 import { getAuth } from 'firebase-admin/auth';
-
-const firebaseConfig = JSON.parse(
-  fs.readFileSync(new URL('../../firebase-applet-config.json', import.meta.url), 'utf8')
-) as { projectId?: string };
+import firebaseConfig from '../../firebase-applet-config.json' with { type: 'json' };
 
 if (!getApps().length) {
   initializeApp({

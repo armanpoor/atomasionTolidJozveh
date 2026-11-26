@@ -1758,6 +1758,44 @@ export function assembleFinalBookAndAudit(params: {
             sourceUnitIds: provenanceUnitIds,
           };
         }
+        if (storedBlock.type === 'callout') {
+          const addedDetails = Array.isArray(cluster?.preservedDetailsJson?.addedSentences)
+            ? (cluster.preservedDetailsJson.addedSentences as unknown[])
+                .map((s) => String(s || '').trim())
+                .filter(Boolean)
+            : [];
+          const existingParagraphs = storedBlock.paragraphs || [];
+          const existingNorm = new Set(existingParagraphs.map((p) => normalizePersianForComparison(p)));
+          const extraParagraphs = addedDetails.filter(
+            (s) => !existingNorm.has(normalizePersianForComparison(s))
+          );
+          return {
+            ...storedBlock,
+            id: u.id,
+            paragraphs: extraParagraphs.length > 0 ? [...existingParagraphs, ...extraParagraphs] : existingParagraphs,
+            sourceFileNames: provenanceFiles,
+            sourceUnitIds: provenanceUnitIds,
+          };
+        }
+        if (storedBlock.type === 'list') {
+          const addedDetails = Array.isArray(cluster?.preservedDetailsJson?.addedSentences)
+            ? (cluster.preservedDetailsJson.addedSentences as unknown[])
+                .map((s) => String(s || '').trim())
+                .filter(Boolean)
+            : [];
+          const existingItems = storedBlock.items || [];
+          const existingNorm = new Set(existingItems.map((it) => normalizePersianForComparison(it)));
+          const extraItems = addedDetails.filter(
+            (s) => !existingNorm.has(normalizePersianForComparison(s))
+          );
+          return {
+            ...storedBlock,
+            id: u.id,
+            items: extraItems.length > 0 ? [...existingItems, ...extraItems] : existingItems,
+            sourceFileNames: provenanceFiles,
+            sourceUnitIds: provenanceUnitIds,
+          };
+        }
         return {
           ...storedBlock,
           id: u.id,

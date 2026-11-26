@@ -836,8 +836,9 @@ export default function App() {
           })
         );
 
+        const shouldReplaceFirstBatch = !(bundle && bundle.sourceFiles.length > 0);
         const res = await api.ingestFilesBatch(activeProjectId, {
-          replaceExisting: i === 0,
+          replaceExisting: i === 0 && shouldReplaceFirstBatch,
           files: prepared,
         });
         latestBundle = res.bundle;
@@ -1077,8 +1078,52 @@ export default function App() {
     [activeProjectId, api]
   );
 
+  const handleChangeConfig = useCallback(
+    (patch: Partial<DocxExportConfig>) => {
+      setConfig((prev) => {
+        const updated = { ...prev, ...patch };
+        if (activeProjectId) {
+          void api
+            .updateProject(activeProjectId, {
+              settingsJson: updated as unknown as Record<string, unknown>,
+            })
+            .catch(() => {
+              // ignore transient save warning
+            });
+        }
+        return updated;
+      });
+    },
+    [activeProjectId, api]
+  );
+
+  const handleChangeOptimization = useCallback(
+    (patch: Partial<DocxExportConfig['optimization']>) => {
+      setConfig((prev) => {
+        const updated: DocxExportConfig = {
+          ...prev,
+          optimization: { ...prev.optimization, ...patch },
+        };
+        if (activeProjectId) {
+          void api
+            .updateProject(activeProjectId, {
+              settingsJson: updated as unknown as Record<string, unknown>,
+            })
+            .catch(() => {
+              // ignore transient save warning
+            });
+        }
+        return updated;
+      });
+    },
+    [activeProjectId, api]
+  );
+
   const handleApproveAndFinalize = useCallback(
-    async (approvedNodes: OutlineNodeDto[]) => {
+    async (
+      approvedNodes: OutlineNodeDto[],
+      reassignments?: Array<{ fromNodeId: string; toNodeId: string }>
+    ) => {
       if (!activeProjectId) return;
       setFinalizing(true);
       setBannerError(null);
@@ -1092,6 +1137,7 @@ export default function App() {
         });
         await api.saveOutline(activeProjectId, {
           nodes: approvedNodes,
+          reassignments,
           validationDomain: config.validationDomain || 'ecu_winols',
         });
         const finished = await api.finalizeProject(activeProjectId);
@@ -1748,13 +1794,8 @@ export default function App() {
             }
             onClearFiles={() => setQueuedFiles([])}
             onSetFileRole={handleSetFileRole}
-            onChangeConfig={(patch) => setConfig((prev) => ({ ...prev, ...patch }))}
-            onChangeOptimization={(patch) =>
-              setConfig((prev) => ({
-                ...prev,
-                optimization: { ...prev.optimization, ...patch },
-              }))
-            }
+            onChangeConfig={handleChangeConfig}
+            onChangeOptimization={handleChangeOptimization}
             onStartPipeline={handleRunStage1Ingest}
             onJumpToSearchResult={handleJumpToSearchResult}
           />
@@ -1819,13 +1860,8 @@ export default function App() {
                 }
                 onClearFiles={() => setQueuedFiles([])}
                 onSetFileRole={handleSetFileRole}
-                onChangeConfig={(patch) => setConfig((prev) => ({ ...prev, ...patch }))}
-                onChangeOptimization={(patch) =>
-                  setConfig((prev) => ({
-                    ...prev,
-                    optimization: { ...prev.optimization, ...patch },
-                  }))
-                }
+                onChangeConfig={handleChangeConfig}
+                onChangeOptimization={handleChangeOptimization}
                 onStartPipeline={handleRunStage1Ingest}
                 onJumpToSearchResult={handleJumpToSearchResult}
               />

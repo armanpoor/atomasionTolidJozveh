@@ -7,6 +7,7 @@ import {
   createProjectRecord,
   createProjectRevisionRecord,
   deleteProjectRecord,
+  getOwnedProject,
   getProjectBundle,
   getProjectRevisionWithSnapshot,
   insertContentUnitRecord,
@@ -87,6 +88,7 @@ import {
   extractEntityPreservingExcerpt,
   extractTechnicalFactLedger,
   getBudgetForOptimizationMode,
+  sanitizeInventedHexInText,
   type TokenOptimizationMode,
   validateDeepReviewOutput,
   validateOutlineRefinementOutput,
@@ -265,6 +267,7 @@ async function recordProjectRevision(params: {
               pipelineStage: fresh.project.pipelineStage,
               status: fresh.project.status,
               settingsJson: (fresh.project.settingsJson as Record<string, unknown> | null) ?? null,
+              checkpointJson: (fresh.project.checkpointJson as Record<string, unknown> | null) ?? null,
               bookSnapshotJson:
                 (fresh.project.bookSnapshotJson as Record<string, unknown> | null) ?? null,
             },
@@ -1478,8 +1481,8 @@ export function createProjectRouter(): Router {
       const harnessState = extractHarnessStateFromCheckpoint(
         (bundle.project.checkpointJson || {}) as Record<string, unknown>
       );
-      const deepReviewReport = ((bundle.project.checkpointJson || {}) as Record<string, unknown>)
-        .deepReviewReport as DeepReviewReportDto | null;
+      const cpObj = (bundle.project.checkpointJson || {}) as Record<string, unknown>;
+      const deepReviewReport = (cpObj.lastDeepReview ?? cpObj.deepReviewReport ?? null) as DeepReviewReportDto | null;
       const validationDomain = (config.validationDomain as ValidationDomain) || 'ecu_winols';
 
       const metrics = computeStage5QualityMetrics({
@@ -1521,13 +1524,44 @@ export function createProjectRouter(): Router {
         settingsJson?: Record<string, unknown>;
         checkpointJson?: Record<string, unknown>;
       };
+
+      // Never allow client PATCH to clobber server-managed checkpoint keys (aiUsage, harnessState, lastDeepReview)
+      let mergedCheckpoint: Record<string, unknown> | undefined;
+      if (body.checkpointJson && typeof body.checkpointJson === 'object' && !Array.isArray(body.checkpointJson)) {
+        const owned = await getOwnedProject(req.params.id, user.uid);
+        if (!owned) {
+          res.status(404).json({ error: 'پروژه یافت نشد.' });
+          return;
+        }
+        const existingCp = (owned.checkpointJson && typeof owned.checkpointJson === 'object'
+          ? (owned.checkpointJson as Record<string, unknown>)
+          : {}) as Record<string, unknown>;
+        const SERVER_OWNED_KEYS = new Set([
+          'aiUsage',
+          'harnessState',
+          'lastDeepReview',
+          'deepReviewReport',
+          'activeStepLock',
+        ]);
+        const safeClientPatch: Record<string, unknown> = {};
+        for (const [k, v] of Object.entries(body.checkpointJson)) {
+          if (!SERVER_OWNED_KEYS.has(k)) {
+            safeClientPatch[k] = v;
+          }
+        }
+        mergedCheckpoint = {
+          ...existingCp,
+          ...safeClientPatch,
+        };
+      }
+
       const updated = await updateProjectRecord(req.params.id, user.uid, {
         ...(body.title !== undefined ? { title: body.title.trim().slice(0, 180) } : {}),
         ...(body.workflowMode !== undefined ? { workflowMode: body.workflowMode } : {}),
         ...(body.status !== undefined ? { status: body.status } : {}),
         ...(body.pipelineStage !== undefined ? { pipelineStage: body.pipelineStage } : {}),
         ...(body.settingsJson !== undefined ? { settingsJson: body.settingsJson } : {}),
-        ...(body.checkpointJson !== undefined ? { checkpointJson: body.checkpointJson } : {}),
+        ...(mergedCheckpoint !== undefined ? { checkpointJson: mergedCheckpoint } : {}),
       });
       if (!updated) {
         res.status(404).json({ error: 'پروژه یافت نشد.' });
@@ -2232,6 +2266,12 @@ export function createProjectRouter(): Router {
       const validStatuses = new Set(['open', 'keep_both', 'choose_a', 'choose_b', 'resolved_web']);
       if (!body.status || !validStatuses.has(body.status)) {
         res.status(400).json({ error: 'وضعیت حل تناقض نامعتبر است.' });
+        return;
+      }
+
+      const owned = await getOwnedProject(projectId, user.uid);
+      if (!owned) {
+        res.status(404).json({ error: 'پروژه یافت نشد یا مجوز دسترسی ندارید.' });
         return;
       }
 
@@ -3349,7 +3389,11 @@ export function createProjectRouter(): Router {
           if (!caption || headers.length < 2 || rows.length === 0) continue;
           const targetNode = resolveTargetNode(tbl.nodeId);
           const unitId = `u_rev_tbl_${crypto.randomBytes(4).toString('hex')}`;
-          const rawText = `${caption}\n${headers.join(' | ')}`;
+          const rawText = [
+            caption,
+            headers.join(' | '),
+            ...rows.map((r) => r.join(' | ')),
+          ].join('\n');
           await insertContentUnitRecord({
             id: unitId,
             projectId,
@@ -3878,14 +3922,24 @@ export function createProjectRouter(): Router {
         const nextOrder = bundle.contentUnits.length + 1;
         const unitId = `u_edit_${crypto.randomBytes(4).toString('hex')}`;
 
+        // Build Technical Fact Anchor Ledger from authentic project source units so chat proposals cannot hallucinate hex addresses
+        const factLedger = extractTechnicalFactLedger(
+          bundle.contentUnits.map((u) => ({
+            rawText: u.rawText,
+            outlineNodeId: u.outlineNodeId,
+          })),
+          bundle.outlineNodes.map((n) => ({ id: n.id, title: n.title }))
+        );
+        const cleanHex = (val: string) => sanitizeInventedHexInText(val, factLedger).cleaned;
+
         let unitType = 'paragraph';
         let rawText = '';
         let blockPayload: Record<string, unknown> = {};
 
         if (proposal.action === 'add_callout_box') {
           unitType = 'callout';
-          const title = String(args.title || 'نکته تکمیلی');
-          const bodyText = String(args.body || '');
+          const title = cleanHex(String(args.title || 'نکته تکمیلی'));
+          const bodyText = cleanHex(String(args.body || ''));
           rawText = `${title}\n${bodyText}`;
           blockPayload = {
             type: 'callout',
@@ -3896,12 +3950,20 @@ export function createProjectRouter(): Router {
           };
         } else if (proposal.action === 'add_comparison_table') {
           unitType = 'table';
-          const caption = String(args.caption || 'جدول مقایسه‌ای');
-          const headers = Array.isArray(args.headers) ? args.headers.map(String) : ['موضوع', 'توضیح'];
+          const caption = cleanHex(String(args.caption || 'جدول مقایسه‌ای'));
+          const headers = Array.isArray(args.headers)
+            ? args.headers.map((h) => cleanHex(String(h)))
+            : ['موضوع', 'توضیح'];
           const rows = Array.isArray(args.rows)
-            ? args.rows.map((r) => (Array.isArray(r) ? r.map(String) : [String(r)]))
+            ? args.rows.map((r) =>
+                Array.isArray(r) ? r.map((c) => cleanHex(String(c))) : [cleanHex(String(r))]
+              )
             : [];
-          rawText = `${caption}\n${headers.join(' | ')}`;
+          rawText = [
+            caption,
+            headers.join(' | '),
+            ...rows.map((r) => r.join(' | ')),
+          ].join('\n');
           blockPayload = {
             type: 'table',
             id: unitId,
@@ -3912,7 +3974,7 @@ export function createProjectRouter(): Router {
           };
         } else {
           unitType = 'paragraph';
-          rawText = String(args.text || '').trim();
+          rawText = cleanHex(String(args.text || '').trim());
           blockPayload = {
             type: 'paragraph',
             id: unitId,

@@ -64,7 +64,10 @@ interface OutlineEditorViewProps {
     reassignments?: OutlineReassignment[],
     options?: { silent?: boolean }
   ) => Promise<boolean>;
-  onApproveAndFinalize: (nextNodes: OutlineNodeDto[]) => Promise<void>;
+  onApproveAndFinalize: (
+    nextNodes: OutlineNodeDto[],
+    reassignments?: OutlineReassignment[]
+  ) => Promise<void>;
   onEnrichNodeWithGoogle: (nodeId: string) => Promise<void>;
   onEnrichAllWithGoogle: () => Promise<void>;
   onRunDeepReview: () => Promise<void>;
@@ -360,16 +363,11 @@ export const OutlineEditorView: React.FC<OutlineEditorViewProps> = ({
 
   const handleApprove = async () => {
     const approved = draft.map((n) => ({ ...n, isApproved: true }));
-    if (dirty || pendingReassignments.length > 0) {
-      const ok = await onSaveOutline(approved, pendingReassignments, { silent: true });
-      if (ok) {
-        clearOutlineDraft(projectId);
-        setDirty(false);
-        setPendingReassignments([]);
-      }
-    }
+    const reassignmentsToApply = pendingReassignments.length > 0 ? [...pendingReassignments] : undefined;
+    await onApproveAndFinalize(approved, reassignmentsToApply);
     clearOutlineDraft(projectId);
-    await onApproveAndFinalize(approved);
+    setDirty(false);
+    setPendingReassignments([]);
   };
 
   const formattedTime = lastSavedAt ? formatTimeFa(lastSavedAt) : '';

@@ -169,10 +169,20 @@ export function reconcileHarnessStates(
       !localState.blueprint.sourceCorpusHash ||
       cloudState.blueprint.sourceCorpusHash === localState.blueprint.sourceCorpusHash);
 
+  // If cloudState was explicitly rolled back / reset to idle meaningfully later than localState (>2s),
+  // never let stale IndexedDB state resurrect sections that were cleared on the server.
+  const cloudWasAuthoritativelyReset =
+    cloudState.status === 'idle' &&
+    localState.status !== 'idle' &&
+    cloudTs > localTs + 2000;
+
   let primary = cloudState;
   let secondary = localState;
 
   if (sameBlueprint) {
+    if (cloudWasAuthoritativelyReset) {
+      return cloudState;
+    }
     const cloudScore = progressScore(cloudState);
     const localScore = progressScore(localState);
     if (localScore > cloudScore || (localScore === cloudScore && localTs > cloudTs)) {

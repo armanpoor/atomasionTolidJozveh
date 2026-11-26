@@ -16,6 +16,7 @@ import {
 } from 'lucide-react';
 import { useState } from 'react';
 import { HistoryRunRecord } from '../lib/bookTypes';
+import { sanitizeSvgMarkup } from '../lib/diagramRenderer';
 import { toPersianDigits } from '../lib/formatParsers';
 
 interface HistoryViewProps {
@@ -337,7 +338,7 @@ export function HistoryView({
                             </div>
                             <div
                               className="p-2 [&>svg]:h-auto [&>svg]:w-full"
-                              dangerouslySetInnerHTML={{ __html: d.svgMarkup }}
+                              dangerouslySetInnerHTML={{ __html: sanitizeSvgMarkup(d.svgMarkup) }}
                             />
                           </div>
                         ))}

@@ -91,7 +91,7 @@ function buildInlineRuns(
       if (part.kind === 'ltr_code') {
         runs.push(
           new TextRun({
-            text: `\u202A\u2066 ${part.text} \u2069\u202C`,
+            text: `\u2066 ${part.text} \u2069`,
             font: codeFont,
             size: Math.max(16, sizeHalfPt - 2),
             bold: true,
@@ -101,20 +101,18 @@ function buildInlineRuns(
                 ? undefined
                 : { fill: COLORS.primaryLight, type: ShadingType.CLEAR, color: 'auto' },
             rightToLeft: false,
-            complexScript: false,
             language: { value: 'en-US' },
           })
         );
       } else if (part.kind === 'ltr_tech') {
         runs.push(
           new TextRun({
-            text: `\u202A\u2066${part.text}\u2069\u202C`,
+            text: `\u2066${part.text}\u2069`,
             font,
             size: sizeHalfPt,
             bold,
             color: baseColor,
             rightToLeft: false,
-            complexScript: false,
             language: { value: 'en-US' },
           })
         );
@@ -624,10 +622,20 @@ function renderContentBlock(block: ContentBlock, config: DocxExportConfig): Arra
         bytes = null;
       }
       if (!bytes || bytes.byteLength === 0) return [];
-      const displayWidth = config.paperSize === 'B5' ? 420 : 480;
-      const displayHeight = block.widthPx && block.heightPx
-        ? Math.round((displayWidth * block.heightPx) / Math.max(1, block.widthPx))
-        : 290;
+      const maxDisplayWidth = config.paperSize === 'B5' ? 420 : 480;
+      const maxDisplayHeight = config.paperSize === 'B5' ? 520 : 620;
+      let displayWidth = maxDisplayWidth;
+      let displayHeight = 290;
+      if (block.widthPx && block.heightPx) {
+        const aspect = block.heightPx / Math.max(1, block.widthPx);
+        displayHeight = Math.round(displayWidth * aspect);
+        if (displayHeight > maxDisplayHeight) {
+          displayHeight = maxDisplayHeight;
+          displayWidth = Math.max(120, Math.round(displayHeight / Math.max(0.05, aspect)));
+        } else if (displayHeight < 80) {
+          displayHeight = 80;
+        }
+      }
       return [
         new Paragraph({
           bidirectional: true,

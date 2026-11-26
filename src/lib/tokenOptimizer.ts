@@ -1015,6 +1015,25 @@ export interface DeepReviewValidationResult<T> {
  * - Detects and quarantines hallucinated 0x... hex addresses absent from the user's source files.
  * - Rejects chapter title rewrites that silently strip documented ECU/WinOLS codes.
  */
+export function sanitizeInventedHexInText(
+  text: string,
+  ledger: TechnicalFactLedger
+): { cleaned: string; inventedHex: string[] } {
+  const invented = findInventedHexAddresses(text, ledger);
+  if (invented.length === 0) return { cleaned: text, inventedHex: [] };
+  let cleaned = text;
+  // Sort longest-first and enforce hex-character boundaries so shorter tokens (e.g. 0x1A2B) never corrupt longer valid ones (0x1A2B3C)
+  const ordered = [...invented].sort((a, b) => b.length - a.length);
+  for (const h of ordered) {
+    const escaped = h.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    cleaned = cleaned.replace(
+      new RegExp(`(?<![0-9A-Fa-f])${escaped}(?![0-9A-Fa-f])`, 'gi'),
+      '[آدرس هگز نیازمند بررسی در فایل منبع]'
+    );
+  }
+  return { cleaned, inventedHex: invented };
+}
+
 export function validateDeepReviewOutput<
   T extends {
     titleRefinements?: Array<{ nodeId?: string; newTitle?: string; rationale?: string }>;
@@ -1050,14 +1069,9 @@ export function validateDeepReviewOutput<
   const origTitleById = new Map(originalNodes.map((n) => [n.id, n.title]));
 
   const cleanTextFromInventedHex = (text: string): string => {
-    const invented = findInventedHexAddresses(text, ledger);
-    if (invented.length === 0) return text;
-    let cleaned = text;
-    for (const h of invented) {
+    const { cleaned, inventedHex } = sanitizeInventedHexInText(text, ledger);
+    for (const h of inventedHex) {
       hallucinatedHexSet.add(h);
-      // Replace unverified hex token with explicit safe marker instead of fabricating a wrong WinOLS address
-      const escaped = h.replace(/^0x/i, '0x');
-      cleaned = cleaned.replace(new RegExp(escaped, 'gi'), '[آدرس هگز نیازمند بررسی در فایل منبع]');
     }
     return cleaned;
   };
