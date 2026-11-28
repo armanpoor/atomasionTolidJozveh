@@ -1949,7 +1949,33 @@ export function exportBookToMarkdown(book: ParsedBook): string {
         lines.push(`$$${block.latex}$$`, '');
         break;
       case 'figure':
-        lines.push(`[تصویر فنی پیشنهادی: ${block.caption} — ${block.description}]`, '');
+        if (
+          block.aiPlaceholderSpec &&
+          (block.imageStrategy === 'AI_PLACEHOLDER' ||
+            block.resolutionStatus === 'ai_placeholder' ||
+            block.resolutionStatus === 'fallback_placeholder')
+        ) {
+          const spec = block.aiPlaceholderSpec;
+          lines.push(
+            spec.compactTag,
+            `> **[تصویر تولیدی AI | شناسه: ${spec.codeId} | نوع: ${spec.typeFa}]**`,
+            `> • موضوع: ${spec.subjectFa}`,
+            `> • عناصر کلیدی: ${spec.elementsFa}`,
+            `> • برچسب‌های الزامی روی تصویر: ${spec.labelsFa}`,
+            ''
+          );
+        } else if (block.imageStrategy === 'WEB_SEARCH') {
+          lines.push(
+            `> **[تصویر فنی مرجع وب: ${block.caption}]**`,
+            `> • کوئری جستجو: \`${block.searchQuery || block.caption}\``,
+            block.sourceUri
+              ? `> • منبع: [${block.sourceTitle || 'مشاهده تصویر مرجع'}](${block.sourceUri})`
+              : `> • توضیح: ${block.description}`,
+            ''
+          );
+        } else {
+          lines.push(`[تصویر فنی پیشنهادی: ${block.caption} — ${block.description}]`, '');
+        }
         break;
       case 'image':
         lines.push(`![${block.caption}](embedded-image:${block.id})`, '');

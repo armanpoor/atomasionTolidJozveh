@@ -591,7 +591,53 @@ function renderContentBlock(block: ContentBlock, config: DocxExportConfig): Arra
           })
       );
 
-    case 'figure':
+    case 'figure': {
+      if (block.aiPlaceholderSpec && (block.imageStrategy === 'AI_PLACEHOLDER' || block.resolutionStatus === 'ai_placeholder' || block.resolutionStatus === 'fallback_placeholder')) {
+        const spec = block.aiPlaceholderSpec;
+        return [
+          renderCalloutBox(
+            {
+              type: 'callout',
+              id: block.id,
+              variant: 'project',
+              title: `[تصویر تولیدی AI | شناسه: ${spec.codeId} | نوع: ${spec.typeFa}]`,
+              paragraphs: [
+                `• موضوع: ${spec.subjectFa}`,
+                `• عناصر کلیدی: ${spec.elementsFa}`,
+                `• برچسب‌های الزامی روی تصویر: ${spec.labelsFa}`,
+              ],
+            },
+            config
+          ),
+          new Paragraph({ bidirectional: true, spacing: { before: 0, after: 90 }, children: [] }),
+        ];
+      }
+
+      if (block.imageStrategy === 'WEB_SEARCH') {
+        const paragraphs: string[] = [
+          block.description || `تصویر مرجع فنی برای: ${block.caption}`,
+        ];
+        if (block.searchQuery) {
+          paragraphs.push(`• کوئری جستجوی وب: ${block.searchQuery}`);
+        }
+        if (block.sourceTitle || block.sourceUri) {
+          paragraphs.push(`• منبع مرجع: ${block.sourceTitle || ''} ${block.sourceUri ? `(${block.sourceUri})` : ''}`.trim());
+        }
+        return [
+          renderCalloutBox(
+            {
+              type: 'callout',
+              id: block.id,
+              variant: 'engineering',
+              title: `تصویر فنی مرجع (WEB_SEARCH): ${block.caption}`,
+              paragraphs,
+            },
+            config
+          ),
+          new Paragraph({ bidirectional: true, spacing: { before: 0, after: 90 }, children: [] }),
+        ];
+      }
+
       return [
         renderCalloutBox(
           {
@@ -605,6 +651,7 @@ function renderContentBlock(block: ContentBlock, config: DocxExportConfig): Arra
         ),
         new Paragraph({ bidirectional: true, spacing: { before: 0, after: 90 }, children: [] }),
       ];
+    }
 
     case 'image': {
       const base64Part = block.dataUrl.includes(',') ? block.dataUrl.split(',')[1] : block.dataUrl;

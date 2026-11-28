@@ -205,13 +205,13 @@ export const OPENAI_COMPATIBLE_GATEWAY_TEMPLATES: readonly BaseUrlGatewayTemplat
 export const AI_PROVIDER_METADATA: Record<AiProviderType, ProviderMetadata> = {
   google_aistudio: {
     id: 'google_aistudio',
-    nameFa: 'Google Gemini (AI Studio / پروکسی)',
+    nameFa: 'Google Gemini (سهمیه داخلی پلتفرم / AI Studio / پروکسی)',
     shortName: 'Gemini',
     defaultBaseUrl: 'https://generativelanguage.googleapis.com',
-    defaultModelId: 'gemini-4-hydrogen',
-    apiKeyPlaceholder: 'AIzaSy...',
+    defaultModelId: 'gemini-4-neon',
+    apiKeyPlaceholder: 'AIzaSy... (اختیاری — پیش‌فرض روی سهمیه داخلی بدون کلید API)',
     descriptionFa:
-      'پشتیبانی کامل از تمام مدل‌های Gemini (از جمله سری ۴ Carbon/Argon/Neon/Hydrogen و 3.8 Flash) + انتخاب آزاد شناسه مدل، جستجوی زنده گوگل، تبدیل صوت و سهمیه سازنده',
+      'پیش‌فرض روی Gemini 4 Neon با سهمیه داخلی پلتفرم (بدون مصرف کلید API متصل‌شده) + پشتیبانی کامل از تمام مدل‌های Gemini و انتخاب آزاد هر مدل، پرووایدر یا API دلخواه',
     supportsGoogleSearch: true,
     supportsLiveModelDiscovery: true,
     baseUrlTemplates: [
@@ -220,6 +220,11 @@ export const AI_PROVIDER_METADATA: Record<AiProviderType, ProviderMetadata> = {
       { label: 'GapGPT Proxy', baseUrl: 'https://api.gapgpt.app/v1' },
     ],
     presets: [
+      {
+        label: 'Gemini 4 Neon (نئون ۴ — پیش‌فرض سهمیه داخلی پلتفرم)',
+        baseUrl: 'https://generativelanguage.googleapis.com',
+        modelId: 'gemini-4-neon',
+      },
       {
         label: 'Gemini 4 Carbon (پرچمدار ۲۰۲۶)',
         baseUrl: 'https://generativelanguage.googleapis.com',
@@ -231,12 +236,7 @@ export const AI_PROVIDER_METADATA: Record<AiProviderType, ProviderMetadata> = {
         modelId: 'gemini-4-argon',
       },
       {
-        label: 'Gemini 4 Neon (تعمق بالا)',
-        baseUrl: 'https://generativelanguage.googleapis.com',
-        modelId: 'gemini-4-neon',
-      },
-      {
-        label: 'Gemini 4 Hydrogen (هیدروژن ۴ — پیش‌فرض)',
+        label: 'Gemini 4 Hydrogen (هیدروژن ۴ — متعادل)',
         baseUrl: 'https://generativelanguage.googleapis.com',
         modelId: 'gemini-4-hydrogen',
       },
@@ -838,13 +838,13 @@ export const DEFAULT_MULTI_TIER_ROUTING: MultiTierRoutingConfig = {
       provider: 'google_aistudio',
       baseUrl: 'https://generativelanguage.googleapis.com',
       apiKey: '',
-      modelId: 'gemini-4-hydrogen',
+      modelId: 'gemini-4-neon',
     },
     flagship: {
       provider: 'google_aistudio',
       baseUrl: 'https://generativelanguage.googleapis.com',
       apiKey: '',
-      modelId: 'gemini-4-hydrogen',
+      modelId: 'gemini-4-neon',
     },
   },
   taskTierMap: { ...DEFAULT_TASK_TIER_MAP },
@@ -857,7 +857,7 @@ export const DEFAULT_AI_PROVIDER_CONFIG: AiProviderConfig = {
     google_aistudio: {
       baseUrl: AI_PROVIDER_METADATA.google_aistudio.defaultBaseUrl,
       apiKey: '',
-      modelId: 'gemini-4-hydrogen',
+      modelId: 'gemini-4-neon',
     },
     openai: {
       baseUrl: AI_PROVIDER_METADATA.openai.defaultBaseUrl,
@@ -1411,7 +1411,7 @@ export function getActiveProviderCredentials(config: AiProviderConfig): Provider
     return {
       baseUrl: meta.defaultBaseUrl,
       apiKey: config.personalGoogleApiKey || '',
-      modelId: 'gemini-4-hydrogen',
+      modelId: 'gemini-4-neon',
     };
   }
   return {
@@ -1430,17 +1430,18 @@ export function getProviderDisplaySummary(
   const creds = getActiveProviderCredentials(config);
   const mode = normalizeKeyAuthMode(config.googleKeyMode);
 
+  const effectiveGoogleId = creds.modelId?.trim() || googleModelId || 'gemini-4-neon';
   const modelLabel =
     provider === 'google_aistudio'
-      ? getGoogleModelMeta(googleModelId).displayName
+      ? getGoogleModelMeta(effectiveGoogleId).displayName
       : creds.modelId.trim() || 'مدل انتخاب نشده';
 
   const keySourceLabel =
     mode === 'personal'
-      ? 'کلید اختصاصی شما'
+      ? 'کلید API اختصاصی شما'
       : creds.apiKey.trim()
-        ? 'سهمیه سازنده ← سوئیچ خودکار به کلید شما'
-        : 'سهمیه سازنده (App Owner)';
+        ? 'سهمیه داخلی پلتفرم ← سوئیچ خودکار به کلید شما'
+        : 'سهمیه داخلی پلتفرم (بدون مصرف کلید API)';
 
   return {
     providerLabel: meta.shortName,
@@ -1495,7 +1496,7 @@ export function resolveEffectiveAuthStrategy(params: {
       selectedKeySource: 'creator',
       switchedFromCreator: false,
       needsPersonalKey: false,
-      reasonFa: 'سهمیه سازنده برنامه (App Owner) در استعلام زنده فعال است و در حال استفاده می‌باشد.',
+      reasonFa: 'سهمیه داخلی پلتفرم (Gemini 4 Neon — بدون مصرف کلید API شخصی) فعال است و در حال استفاده می‌باشد.',
     };
   }
 
@@ -1534,10 +1535,22 @@ export interface GoogleModelOption {
 }
 
 /**
- * Strictly the two selectable Google AI Studio models requested by the user:
- * Gemini 4 Hydrogen and Gemini 3.8 Flash.
+ * Built-in selectable Google Gemini models, with Gemini 4 Neon as the primary default on built-in platform quota.
+ * Users can also enter any custom Model ID or switch to any provider / Base URL / API key.
  */
 export const GOOGLE_MODEL_OPTIONS: readonly GoogleModelOption[] = [
+  {
+    id: 'gemini-4-neon',
+    shortName: 'Neon 4',
+    displayName: 'Gemini 4 Neon',
+    labelFa: 'Gemini 4 Neon (نئون ۴ — پیش‌فرض سهمیه داخلی پلتفرم)',
+    descriptionFa: 'پیش‌فرض پایدار روی سهمیه داخلی بدون مصرف کلید API شخصی — مناسب تحلیل جداول WinOLS 2.24 و مراجع سنگین',
+    supportsXHigh: true,
+    softBudgetTokens: 250_000,
+    softRequestCap: 25,
+    inputRatePerMillionUsd: 1.25,
+    outputRatePerMillionUsd: 10.0,
+  },
   {
     id: 'gemini-4-carbon',
     shortName: 'Carbon 4',
@@ -1563,22 +1576,10 @@ export const GOOGLE_MODEL_OPTIONS: readonly GoogleModelOption[] = [
     outputRatePerMillionUsd: 3.5,
   },
   {
-    id: 'gemini-4-neon',
-    shortName: 'Neon 4',
-    displayName: 'Gemini 4 Neon',
-    labelFa: 'Gemini 4 Neon (نئون ۴ — پرظرفیت)',
-    descriptionFa: 'مناسب تحلیل جداول WinOLS، مراجع سنگین و استدلال چندمرحله‌ای',
-    supportsXHigh: true,
-    softBudgetTokens: 250_000,
-    softRequestCap: 25,
-    inputRatePerMillionUsd: 1.25,
-    outputRatePerMillionUsd: 10.0,
-  },
-  {
     id: 'gemini-4-hydrogen',
     shortName: 'Hydrogen 4',
     displayName: 'Gemini 4 Hydrogen',
-    labelFa: 'Gemini 4 Hydrogen (هیدروژن ۴ — پیش‌فرض)',
+    labelFa: 'Gemini 4 Hydrogen (هیدروژن ۴ — متعادل)',
     descriptionFa: 'دقت و استدلال بالا برای فصل‌بندی، کشف تناقض و بازبینی عمیق',
     supportsXHigh: true,
     softBudgetTokens: 250_000,
@@ -1606,7 +1607,7 @@ export const ALLOWED_GOOGLE_MODEL_IDS = new Set<string>(
 
 export function normalizeGoogleModelId(raw?: string | null): AiModelId {
   const cleaned = sanitizeCustomModelId(raw || '');
-  if (!cleaned) return 'gemini-4-hydrogen';
+  if (!cleaned) return 'gemini-4-neon';
   if (cleaned === 'gemini-3.1-flash-lite') return 'gemini-3.8-flash';
   return cleaned;
 }

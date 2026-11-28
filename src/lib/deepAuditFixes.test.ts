@@ -809,4 +809,204 @@ describe('15. Format-Specific Zero-Token Preprocessor & Hybrid Surgical Pruning'
   });
 });
 
+describe('16. Anchor-First Smart Image Orchestrator, 3-Line AI Placeholder & Gemini 4 Neon Default Quota', () => {
+  it('defaults to Gemini 4 Neon (gemini-4-neon) on built-in platform quota without consuming personal API keys', async () => {
+    const { DEFAULT_DOCX_CONFIG } = await import('./bookTypes.ts');
+    const {
+      DEFAULT_AI_PROVIDER_CONFIG,
+      DEFAULT_MULTI_TIER_ROUTING,
+      getProviderDisplaySummary,
+      normalizeGoogleModelId,
+    } = await import('./aiProviderConfig.ts');
+
+    assert.equal(DEFAULT_DOCX_CONFIG.aiModel, 'gemini-4-neon');
+    assert.equal(DEFAULT_AI_PROVIDER_CONFIG.providers.google_aistudio.modelId, 'gemini-4-neon');
+    assert.equal(DEFAULT_AI_PROVIDER_CONFIG.googleKeyMode, 'auto_creator_first');
+    assert.equal(DEFAULT_MULTI_TIER_ROUTING.tiers.balanced.modelId, 'gemini-4-neon');
+    assert.equal(DEFAULT_MULTI_TIER_ROUTING.tiers.flagship.modelId, 'gemini-4-neon');
+    assert.equal(normalizeGoogleModelId(''), 'gemini-4-neon');
+
+    const summary = getProviderDisplaySummary(DEFAULT_AI_PROVIDER_CONFIG, DEFAULT_DOCX_CONFIG.aiModel);
+    assert.equal(summary.modelLabel, 'Gemini 4 Neon');
+    assert.ok(summary.keySourceLabel.includes('سهمیه داخلی پلتفرم'));
+  });
+
+  it('evaluates the 3-State Decision Matrix (WEB_SEARCH vs AI_PLACEHOLDER vs NO_IMAGE) accurately', async () => {
+    const {
+      evaluateSectionImageDecision,
+      formatCompactAiPlaceholderTag,
+      parseCompactAiPlaceholderTag,
+    } = await import('./smartImageOrchestrator.ts');
+
+    // 1. WEB_SEARCH for Bosch ME7.4.4 Pinout / Connector
+    const pinoutDecision = evaluateSectionImageDecision({
+      chapterNumber: 1,
+      chapterTitle: 'فصل ۱: سخت‌افزار ایسیو بوش',
+      sectionIndex: 1,
+      sectionTitle: 'نقشه پین‌اوت و سوکت‌های ایسیو Bosch ME7.4.4',
+      blocks: [
+        {
+          type: 'paragraph',
+          id: 'p1',
+          text: 'در این بخش آرایش کامل پین‌اوت، پایه‌های تغذیه +12V، بدنه GND و خطوط ارتباطی K-Line در سوکت ایسیو Bosch ME7.4.4 موتور TU5 بررسی می‌شود تا اتصال روی میز کار بدون خطا انجام گیرد.',
+        },
+      ],
+    });
+    assert.equal(pinoutDecision.strategy, 'WEB_SEARCH');
+    assert.equal(pinoutDecision.imageCategory, 'ecu_pinout');
+    assert.ok(pinoutDecision.searchQuery?.includes('Bosch ME7.4.4'));
+
+    // 2. AI_PLACEHOLDER for conceptual combustion / knock flame-front physics
+    const conceptualDecision = evaluateSectionImageDecision({
+      chapterNumber: 2,
+      chapterTitle: 'فصل ۲: تئوری احتراق و ناک',
+      sectionIndex: 2,
+      sectionTitle: 'مکانیزم شکل‌گیری جبهه شعله و پدیده ناک در اتاق احتراق',
+      blocks: [
+        {
+          type: 'paragraph',
+          id: 'p2',
+          text: 'هنگامی که پیش‌رسانی جرقه بیش از حد مجاز افزایش یابد، برخورد جبهه شعله اصلی با کانون‌های خودسوزی در انتهای اتاق احتراق باعث نوسان شدید فشار سیلندر و ایجاد ضربه ناک می‌شود که راندمان حرارتی و گشتاور خروجی را کاهش می‌دهد.',
+        },
+      ],
+    });
+    assert.equal(conceptualDecision.strategy, 'AI_PLACEHOLDER');
+    assert.ok(conceptualDecision.aiPlaceholderSpec);
+    assert.ok(conceptualDecision.aiPlaceholderSpec?.compactTag.startsWith('[[AI_IMAGE_PLACEHOLDER'));
+
+    const parsedTag = parseCompactAiPlaceholderTag(
+      formatCompactAiPlaceholderTag({
+        typeFa: 'شماتیک فنی مقطع عرضی',
+        subjectFa: 'برخورد جبهه شعله و ناک',
+        elementsFa: 'پیستون، شمع، جبهه شعله',
+        labelsFa: 'Normal Flame, Knock Zone, TDC',
+      }),
+      'IMG-AI-02-02'
+    );
+    assert.ok(parsedTag);
+    assert.equal(parsedTag?.codeId, 'IMG-AI-02-02');
+    assert.equal(parsedTag?.typeFa, 'شماتیک فنی مقطع عرضی');
+    assert.equal(parsedTag?.labelsFa, 'Normal Flame, Knock Zone, TDC');
+
+    // 3. NO_IMAGE when section already contains a data table
+    const noImageDecision = evaluateSectionImageDecision({
+      chapterNumber: 3,
+      chapterTitle: 'فصل ۳: جداول مرجع',
+      sectionIndex: 1,
+      sectionTitle: 'جدول مقادیر پین‌اوت',
+      blocks: [
+        {
+          type: 'table',
+          id: 't1',
+          headers: ['Pin', 'Signal'],
+          rows: [
+            ['A1', '+12V'],
+            ['A2', 'GND'],
+            ['A3', 'K-Line'],
+          ],
+        },
+      ],
+    });
+    assert.equal(noImageDecision.strategy, 'NO_IMAGE');
+  });
+
+  it('executes bounded parallel web image resolution and automatically falls back to 3-line AI_PLACEHOLDER on timeout or missing web image', async () => {
+    const { DEFAULT_DOCX_CONFIG } = await import('./bookTypes.ts');
+    type ParsedBookType = import('./bookTypes.ts').ParsedBook;
+    const {
+      injectSmartImageAnchorsIntoBook,
+      resolveBookWebImagesParallel,
+    } = await import('./smartImageOrchestrator.ts');
+
+    const sampleBook: ParsedBookType = {
+      title: 'کتاب مرجع تست تصاویر هوشمند',
+      subtitle: 'تست موازی',
+      editionNote: '',
+      sourceFiles: ['test.md'],
+      volumes: [{ id: 'v1', index: 1, title: 'جلد ۱' }],
+      chapters: [
+        {
+          id: 'ch1',
+          chapterNumber: 1,
+          title: 'فصل ۱: سخت‌افزار و تیونینگ Bosch ME7.4.4',
+          volumeIndex: 1,
+          volumeTitle: 'جلد ۱',
+          meta: [],
+          introBlocks: [],
+          sourceFileName: 'test.md',
+          sections: [
+            {
+              id: 'sec1',
+              numberLabel: '۱-۱',
+              title: 'نقشه پین‌اوت سوکت ایسیو Bosch ME7.4.4',
+              originalTitle: 'نقشه پین‌اوت سوکت ایسیو Bosch ME7.4.4',
+              blocks: [
+                {
+                  type: 'paragraph' as const,
+                  id: 'b1',
+                  text: 'بررسی کامل پین‌اوت و کانکتور ایسیو Bosch ME7.4.4 همراه با پایه‌های تغذیه و خط ارتباطی K-Line روی میز کار.',
+                },
+              ],
+            },
+            {
+              id: 'sec2',
+              numberLabel: '۱-۲',
+              title: 'کالیبراسیون نقشه KFZW در WinOLS 2.24',
+              originalTitle: 'کالیبراسیون نقشه KFZW در WinOLS 2.24',
+              blocks: [
+                {
+                  type: 'paragraph' as const,
+                  id: 'b2',
+                  text: 'در نرم‌افزار WinOLS 2.24 نقشه آوانس جرقه KFZW در آدرس 0x1C200 در نمای 2D و 3D با ضریب فاکتور 0.75 اصلاح می‌شود.',
+                },
+              ],
+            },
+          ],
+        },
+      ],
+      footnotes: [],
+      glossary: [],
+      tableIndex: [],
+      cheatSheets: [],
+      visualSuggestions: [],
+      sourceMapRows: [],
+    };
+
+    const injected = injectSmartImageAnchorsIntoBook(sampleBook, DEFAULT_DOCX_CONFIG);
+    assert.equal(injected.webSearchSlotsCount, 2);
+
+    // Simulate parallel resolution where slot 1 succeeds and slot 2 returns null (triggers automatic fallback to 3-line AI_PLACEHOLDER)
+    const parallelRes = await resolveBookWebImagesParallel(sampleBook, {
+      concurrency: 2,
+      timeoutMs: 1500,
+      fetcher: async ({ anchorId }) => {
+        if (anchorId.endsWith('sec1')) {
+          return {
+            imageUrl: 'data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg"></svg>',
+            sourceTitle: 'Bosch ME7.4.4 Pinout Reference',
+            sourceUri: 'https://commons.wikimedia.org/wiki/Bosch_ME7.4.4',
+          };
+        }
+        return null;
+      },
+    });
+
+    assert.equal(parallelRes.totalWebSlots, 2);
+    assert.equal(parallelRes.resolvedFromWebCount, 1);
+    assert.equal(parallelRes.fallbackToAiPlaceholderCount, 1);
+
+    const fig1 = sampleBook.chapters[0].sections[0].blocks.find((b) => b.type === 'figure');
+    const fig2 = sampleBook.chapters[0].sections[1].blocks.find((b) => b.type === 'figure');
+    assert.equal(fig1?.type, 'figure');
+    assert.equal(fig2?.type, 'figure');
+    if (fig1?.type === 'figure' && fig2?.type === 'figure') {
+      assert.equal(fig1.resolutionStatus, 'resolved_web');
+      assert.ok(fig1.imageUrl);
+      assert.equal(fig2.resolutionStatus, 'fallback_placeholder');
+      assert.ok(fig2.aiPlaceholderSpec?.compactTag.includes('AI_IMAGE_PLACEHOLDER'));
+    }
+  });
+});
+
+
 

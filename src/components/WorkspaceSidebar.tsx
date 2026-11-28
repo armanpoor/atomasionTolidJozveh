@@ -37,7 +37,10 @@ import {
   WorkflowMode,
 } from '../lib/bookTypes';
 import {
+  AI_PROVIDER_LIST,
+  AI_PROVIDER_METADATA,
   AiProviderConfig,
+  AiProviderType,
   AiQuotaProbeResponse,
   getProviderDisplaySummary,
   GOOGLE_MODEL_OPTIONS,
@@ -127,6 +130,7 @@ interface WorkspaceSidebarProps {
   onSetFileRole: (id: string, role: FileRole) => void;
   onBulkSetFileRole?: (ids: string[], role: FileRole) => void;
   onChangeConfig: (patch: Partial<DocxExportConfig>) => void;
+  onChangeProviderConfig?: (next: AiProviderConfig) => void;
   onChangeOptimization: (patch: Partial<DocxExportConfig['optimization']>) => void;
   onStartPipeline: () => Promise<void>;
   onJumpToSearchResult?: (params: {
@@ -168,6 +172,7 @@ export const WorkspaceSidebar: React.FC<WorkspaceSidebarProps> = ({
   onSetFileRole,
   onBulkSetFileRole,
   onChangeConfig,
+  onChangeProviderConfig,
   onChangeOptimization,
   onStartPipeline,
   onJumpToSearchResult,
@@ -1071,47 +1076,202 @@ export const WorkspaceSidebar: React.FC<WorkspaceSidebarProps> = ({
               {/* Provider & Custom Base URL / API Key Button */}
               {(() => {
                 const summary = getProviderDisplaySummary(providerConfig, config.aiModel);
+                const activeProviderMeta = AI_PROVIDER_METADATA[providerConfig.provider];
+                const activeProviderEntry = providerConfig.providers[providerConfig.provider];
+                const currentModelId =
+                  providerConfig.provider === 'google_aistudio'
+                    ? config.aiModel || activeProviderEntry?.modelId || 'gemini-4-neon'
+                    : activeProviderEntry?.modelId || activeProviderMeta.defaultModelId;
+                const isBuiltInNeonQuota =
+                  providerConfig.provider === 'google_aistudio' &&
+                  providerConfig.googleKeyMode !== 'personal' &&
+                  !activeProviderEntry?.apiKey?.trim();
+
                 return (
-                  <div className="flex items-center justify-between gap-2 rounded-lg border border-[#DDE6F0] bg-[#F5F8FC] px-2.5 py-2">
-                    <div className="min-w-0">
-                      <div className="font-bold text-[#1E3A5F] truncate">
-                        {summary.providerLabel} · {summary.keySourceLabel}
+                  <div className="space-y-2.5">
+                    <div className="flex items-center justify-between gap-2 rounded-lg border border-[#DDE6F0] bg-[#F5F8FC] px-2.5 py-2">
+                      <div className="min-w-0">
+                        <div className="font-bold text-[#1E3A5F] truncate">
+                          {summary.providerLabel} · {summary.keySourceLabel}
+                        </div>
+                        <div className="text-[10.5px] text-[#57534E] truncate">
+                          مدل فعال: <strong className="font-mono text-[#1E3A5F]" dir="ltr">{currentModelId}</strong>
+                        </div>
                       </div>
-                      <div className="text-[10.5px] text-[#57534E] truncate">
-                        {summary.modelLabel}
+                      <button
+                        type="button"
+                        data-testid="sidebar-open-provider-modal-btn"
+                        onClick={onOpenProviderSettings}
+                        className="inline-flex min-h-[30px] shrink-0 items-center gap-1 rounded-md border border-[#1E3A5F] bg-white px-2.5 py-1 text-[11px] font-bold text-[#1E3A5F] hover:bg-[#EEF3F8] cursor-pointer"
+                      >
+                        <KeyRound className="h-3 w-3" />
+                        <span>کلید و API</span>
+                      </button>
+                    </div>
+
+                    {isBuiltInNeonQuota && (
+                      <div
+                        data-testid="sidebar-builtin-neon-quota-badge"
+                        className="rounded-lg border border-[#BBF7D0] bg-[#F0FDF4] px-2.5 py-1.5 text-[10.5px] leading-5 text-[#14532D]"
+                      >
+                        <strong>سهمیه داخلی پلتفرم فعال است (Gemini 4 Neon):</strong> تا پایان آپلود و پایداری فایل‌های شما، هیچ کلید API خارجی مصرف نمی‌شود. در هر زمان می‌توانید هر مدل، پرووایدر یا API دلخواه را از منوی زیر انتخاب کنید.
+                      </div>
+                    )}
+
+                    {/* Quick Provider Switcher (Any Provider / Gateway) */}
+                    {onChangeProviderConfig && (
+                      <div className="space-y-1">
+                        <label
+                          htmlFor="sidebar-ai-provider-select"
+                          className="block font-bold text-[#1A1816]"
+                        >
+                          ارائه‌دهنده هوش مصنوعی (Provider / API)
+                        </label>
+                        <select
+                          id="sidebar-ai-provider-select"
+                          data-testid="sidebar-ai-provider-select"
+                          value={providerConfig.provider}
+                          onChange={(e) => {
+                            const nextProvider = e.target.value as AiProviderType;
+                            const nextMeta = AI_PROVIDER_METADATA[nextProvider];
+                            const existingCreds = providerConfig.providers[nextProvider];
+                            const nextModel =
+                              existingCreds?.modelId?.trim() || nextMeta.defaultModelId;
+                            onChangeProviderConfig({
+                              ...providerConfig,
+                              provider: nextProvider,
+                              providers: {
+                                ...providerConfig.providers,
+                                [nextProvider]: {
+                                  baseUrl: existingCreds?.baseUrl || nextMeta.defaultBaseUrl,
+                                  apiKey: existingCreds?.apiKey || '',
+                                  modelId: nextModel,
+                                },
+                              },
+                            });
+                            if (nextProvider === 'google_aistudio') {
+                              onChangeConfig({ aiModel: nextModel as AiModelId });
+                            }
+                          }}
+                          className="w-full rounded-lg border border-[#D6D0C4] bg-[#FAF9F6] px-2.5 py-2 text-xs text-[#1A1816]"
+                        >
+                          {AI_PROVIDER_LIST.map((p) => (
+                            <option key={p.id} value={p.id}>
+                              {p.nameFa}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                    )}
+
+                    {/* Preset Model Selector + Universal Custom Model ID Input */}
+                    <div className="space-y-1.5">
+                      <label
+                        htmlFor="sidebar-ai-model-preset-select"
+                        className="block font-bold text-[#1A1816]"
+                      >
+                        انتخاب مدل آماده یا ورود آزاد هر شناسه مدل (Model ID)
+                      </label>
+                      {providerConfig.provider === 'google_aistudio' ? (
+                        <select
+                          id="sidebar-ai-model-preset-select"
+                          data-testid="sidebar-ai-model-preset-select"
+                          value={
+                            GOOGLE_MODEL_OPTIONS.some((m) => m.id === config.aiModel)
+                              ? config.aiModel
+                              : 'gemini-4-neon'
+                          }
+                          onChange={(e) => {
+                            const nextModel = e.target.value as AiModelId;
+                            onChangeConfig({ aiModel: nextModel });
+                            if (onChangeProviderConfig) {
+                              onChangeProviderConfig({
+                                ...providerConfig,
+                                providers: {
+                                  ...providerConfig.providers,
+                                  google_aistudio: {
+                                    ...providerConfig.providers.google_aistudio,
+                                    modelId: nextModel,
+                                  },
+                                },
+                              });
+                            }
+                          }}
+                          className="w-full rounded-lg border border-[#D6D0C4] bg-[#FAF9F6] px-2.5 py-2 text-xs text-[#1A1816]"
+                        >
+                          {GOOGLE_MODEL_OPTIONS.map((m) => (
+                            <option key={m.id} value={m.id}>
+                              {m.labelFa}
+                            </option>
+                          ))}
+                        </select>
+                      ) : (
+                        activeProviderMeta.presets &&
+                        activeProviderMeta.presets.length > 0 && (
+                          <select
+                            id="sidebar-ai-model-preset-select"
+                            data-testid="sidebar-ai-model-preset-select"
+                            value={currentModelId}
+                            onChange={(e) => {
+                              const nextModel = e.target.value;
+                              if (onChangeProviderConfig) {
+                                onChangeProviderConfig({
+                                  ...providerConfig,
+                                  customModelId: nextModel,
+                                  providers: {
+                                    ...providerConfig.providers,
+                                    [providerConfig.provider]: {
+                                      ...providerConfig.providers[providerConfig.provider],
+                                      modelId: nextModel,
+                                    },
+                                  },
+                                });
+                              }
+                            }}
+                            className="w-full rounded-lg border border-[#D6D0C4] bg-[#FAF9F6] px-2.5 py-2 text-xs text-[#1A1816]"
+                          >
+                            {activeProviderMeta.presets.map((preset) => (
+                              <option key={preset.modelId} value={preset.modelId}>
+                                {preset.label} ({preset.modelId})
+                              </option>
+                            ))}
+                          </select>
+                        )
+                      )}
+
+                      <div className="flex items-center gap-1.5">
+                        <input
+                          type="text"
+                          dir="ltr"
+                          data-testid="sidebar-custom-model-id-input"
+                          value={currentModelId}
+                          onChange={(e) => {
+                            const nextId = e.target.value.trim();
+                            if (providerConfig.provider === 'google_aistudio') {
+                              onChangeConfig({ aiModel: (nextId || 'gemini-4-neon') as AiModelId });
+                            }
+                            if (onChangeProviderConfig) {
+                              onChangeProviderConfig({
+                                ...providerConfig,
+                                customModelId: nextId,
+                                providers: {
+                                  ...providerConfig.providers,
+                                  [providerConfig.provider]: {
+                                    ...providerConfig.providers[providerConfig.provider],
+                                    modelId: nextId,
+                                  },
+                                },
+                              });
+                            }
+                          }}
+                          placeholder="شناسه هر مدل دلخواه (مثلاً gemini-4-neon، claude-opus-5-5، gpt-6.2-sol...)"
+                          className="w-full rounded-lg border border-[#D6D0C4] bg-white px-2.5 py-1.5 font-mono text-[11px] text-[#1A1816] focus:border-[#1E3A5F] focus:outline-none"
+                        />
                       </div>
                     </div>
-                    <button
-                      type="button"
-                      onClick={onOpenProviderSettings}
-                      className="inline-flex min-h-[30px] shrink-0 items-center gap-1 rounded-md border border-[#1E3A5F] bg-white px-2.5 py-1 text-[11px] font-bold text-[#1E3A5F] hover:bg-[#EEF3F8] cursor-pointer"
-                    >
-                      <KeyRound className="h-3 w-3" />
-                      <span>تغییر</span>
-                    </button>
                   </div>
                 );
               })()}
-
-              {/* Model (Strictly Gemini 4 Hydrogen & Gemini 3.8 Flash) */}
-              {providerConfig.provider === 'google_aistudio' && (
-                <div className="space-y-1.5">
-                  <label className="block font-bold text-[#1A1816]">مدل هوش مصنوعی Google AI Studio</label>
-                  <select
-                    value={config.aiModel}
-                    onChange={(e) =>
-                      onChangeConfig({ aiModel: e.target.value as AiModelId })
-                    }
-                    className="w-full rounded-lg border border-[#D6D0C4] bg-[#FAF9F6] px-2.5 py-2 text-xs text-[#1A1816]"
-                  >
-                    {GOOGLE_MODEL_OPTIONS.map((m) => (
-                      <option key={m.id} value={m.id}>
-                        {m.labelFa}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-              )}
 
               {/* Thinking level */}
               {providerConfig.provider === 'google_aistudio' && (
@@ -1127,7 +1287,10 @@ export const WorkspaceSidebar: React.FC<WorkspaceSidebarProps> = ({
                     <option value="HIGH">بالا (HIGH — پیش‌فرض)</option>
                     <option value="MEDIUM">متوسط (MEDIUM)</option>
                     <option value="LOW">پایین (LOW)</option>
-                    {config.aiModel === 'gemini-4-hydrogen' && (
+                    {(config.aiModel === 'gemini-4-neon' ||
+                      config.aiModel === 'gemini-4-carbon' ||
+                      config.aiModel === 'gemini-4-argon' ||
+                      config.aiModel === 'gemini-4-hydrogen') && (
                       <option value="XHIGH">بسیار عمیق (XHIGH)</option>
                     )}
                   </select>

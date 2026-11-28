@@ -400,7 +400,7 @@ const TIER_LABELS_FA: Record<ModelTierId | 'primary', string> = {
 export function resolveProviderForTaskFromRequest(
   req: Request,
   taskType: AiTaskType,
-  fallbackGoogleModel = 'gemini-4-hydrogen',
+  fallbackGoogleModel = 'gemini-4-neon',
   overrideTier?: ModelTierId
 ): TaskResolvedAiContext {
   const primary = resolveAiProviderFromRequest(req);

@@ -77,11 +77,30 @@ export interface ListBlock extends BlockProvenance {
   items: string[];
 }
 
+export interface AiImagePlaceholderSpec {
+  codeId: string;
+  typeFa: string;
+  subjectFa: string;
+  elementsFa: string;
+  labelsFa: string;
+  compactTag: string;
+}
+
 export interface FigureBlock extends BlockProvenance {
   type: 'figure';
   id: string;
   caption: string;
   description: string;
+  imageStrategy?: 'WEB_SEARCH' | 'AI_PLACEHOLDER';
+  resolutionStatus?: 'resolved_web' | 'ai_placeholder' | 'fallback_placeholder';
+  anchorId?: string;
+  searchQuery?: string;
+  targetEntity?: string;
+  imageCategory?: 'ecu_pinout' | 'pcb_boot' | 'winols_map' | 'waveform_component';
+  imageUrl?: string;
+  sourceUri?: string;
+  sourceTitle?: string;
+  aiPlaceholderSpec?: AiImagePlaceholderSpec;
 }
 
 export interface EmbeddedImageBlock extends BlockProvenance {
@@ -487,7 +506,7 @@ export const DEFAULT_DOCX_CONFIG: DocxExportConfig = {
   paperSize: 'A4',
   baseFontSizePt: 11,
   bodyAlignment: 'both',
-  aiModel: 'gemini-4-hydrogen',
+  aiModel: 'gemini-4-neon',
   aiThinkingLevel: 'HIGH',
   useAiBackend: true,
   googleSearchMode: 'conflicts_only',

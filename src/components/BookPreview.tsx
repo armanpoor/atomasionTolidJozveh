@@ -300,6 +300,101 @@ function BlockRenderer({
 
     case 'figure': {
       const figTheme = SPECIAL_FRAME_THEMES.figure;
+      const isResolvedWeb =
+        block.imageStrategy === 'WEB_SEARCH' &&
+        block.resolutionStatus === 'resolved_web' &&
+        Boolean(block.imageUrl);
+      const isAiPlaceholder =
+        block.imageStrategy === 'AI_PLACEHOLDER' ||
+        block.resolutionStatus === 'ai_placeholder' ||
+        block.resolutionStatus === 'fallback_placeholder' ||
+        Boolean(block.aiPlaceholderSpec && !block.imageUrl);
+
+      if (isResolvedWeb && block.imageUrl) {
+        return wrapWithProvenance(
+          <figure
+            data-testid="smart-figure-web-resolved"
+            className="my-6 overflow-hidden rounded-xl border border-[#CBD5E1] bg-[#FCFBF8] shadow-[0_1px_2px_rgba(26,24,22,0.03)]"
+          >
+            <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[#E2E8F0] bg-[#EEF3F8] px-4 py-2.5 text-xs font-bold text-[#1E3A5F]">
+              <div className="flex items-center gap-2">
+                <span className="flex h-6 w-6 items-center justify-center rounded-md bg-[#1E3A5F] text-white">
+                  <ImageIcon className="h-3.5 w-3.5" />
+                </span>
+                <span>{block.caption}</span>
+              </div>
+              <span className="rounded bg-white px-2 py-0.5 text-[10px] font-bold text-[#14532D] border border-[#BBF7D0]">
+                تصویر فنی مرجع (WEB_SEARCH)
+              </span>
+            </div>
+
+            <div className="p-3 bg-white">
+              <img
+                src={block.imageUrl}
+                alt={block.caption}
+                className="mx-auto max-h-[380px] w-full object-contain rounded-lg"
+              />
+            </div>
+
+            <figcaption className="flex flex-wrap items-center justify-between gap-2 border-t border-[#E4DFD4] bg-[#F4F1EA] px-4 py-2 text-[11px] text-[#44403C]">
+              <span className="font-semibold text-[#1E3A5F]">
+                {block.searchQuery ? `کوئری فنی: ${block.searchQuery}` : block.description}
+              </span>
+              {block.sourceUri && (
+                <a
+                  href={block.sourceUri}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="inline-flex items-center gap-1 rounded border border-[#CBD5E1] bg-white px-2 py-0.5 text-[10.5px] font-bold text-[#1E3A5F] hover:bg-[#EEF3F8]"
+                >
+                  <ExternalLink className="h-3 w-3 shrink-0" />
+                  <span>{block.sourceTitle || 'مشاهده مرجع فنی'}</span>
+                </a>
+              )}
+            </figcaption>
+          </figure>
+        );
+      }
+
+      if (isAiPlaceholder && block.aiPlaceholderSpec) {
+        const spec = block.aiPlaceholderSpec;
+        return wrapWithProvenance(
+          <aside
+            data-testid="smart-figure-ai-placeholder"
+            className="my-5 overflow-hidden rounded-xl border border-dashed border-[#B45309] bg-[#FFFBEB] shadow-[0_1px_2px_rgba(26,24,22,0.03)]"
+          >
+            <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[#FDE68A] bg-[#FEF3C7] px-4 py-2.5 text-xs font-extrabold text-[#92400E]">
+              <div className="flex items-center gap-2">
+                <span className="flex h-6 w-6 items-center justify-center rounded-md bg-[#B45309] text-white">
+                  <ImageIcon className="h-3.5 w-3.5" />
+                </span>
+                <span>
+                  [تصویر تولیدی AI | شناسه: {spec.codeId} | نوع: {spec.typeFa}]
+                </span>
+              </div>
+              <span className="rounded bg-white px-2 py-0.5 text-[10px] font-bold text-[#92400E] border border-[#FCD34D]">
+                قالب خلاصه ۳ خطی (۰ توکن تولید تصویر)
+              </span>
+            </div>
+
+            <div className="px-4 py-3 space-y-1.5 text-[12.5px] leading-6 text-[#292524]">
+              <div>
+                <strong className="text-[#92400E]">• موضوع:</strong> {spec.subjectFa}
+              </div>
+              <div>
+                <strong className="text-[#92400E]">• عناصر کلیدی:</strong> {spec.elementsFa}
+              </div>
+              <div>
+                <strong className="text-[#92400E]">• برچسب‌های الزامی روی تصویر:</strong>{' '}
+                <span className="font-mono text-[11.5px] font-semibold text-[#1E3A5F]" dir="ltr">
+                  {spec.labelsFa}
+                </span>
+              </div>
+            </div>
+          </aside>
+        );
+      }
+
       return (
         <div className={`my-5 overflow-hidden rounded-xl border ${figTheme.outerBorderClass} ${figTheme.bodyBgClass}`}>
           <div className={`flex items-center gap-2 border-b ${figTheme.headerBorderClass} ${figTheme.headerBgClass} px-4 py-2.5 text-xs font-bold ${figTheme.accentTextClass}`}>

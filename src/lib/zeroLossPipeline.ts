@@ -27,6 +27,7 @@ import {
   type EntityMicroRoutingReport,
   runStage2EntityMicroRouting,
 } from './entityMicroRouter.ts';
+import { injectSmartImageAnchorsIntoBook } from './smartImageOrchestrator.ts';
 
 // ============================================================================
 // DETERMINISTIC NORMALIZATION, HASHING & TOKEN SIMILARITY
@@ -2225,6 +2226,13 @@ export function assembleFinalBookAndAudit(params: {
     outlineNodes: params.outlineNodes,
   });
 
+  // Anchor-First Smart Image & 3-Line AI Placeholder Injection (0ms network latency, 0 image tokens)
+  const smartImageSummary = injectSmartImageAnchorsIntoBook(book, params.config);
+  if (book.audit) {
+    book.audit.visualSuggestionsCount =
+      smartImageSummary.webSearchSlotsCount + smartImageSummary.aiPlaceholderSlotsCount;
+  }
+
   // Compute Entity-Centric Micro-Routing Report for Stage 2 & Stage 5 Audit Views
   const entityMicroRoutingReport = runStage2EntityMicroRouting({
     projectId: params.projectId,
@@ -2253,6 +2261,7 @@ export function assembleFinalBookAndAudit(params: {
         winolsGuideReport,
         winolsGoogleCoverage,
         entityMicroRoutingReport,
+        smartImageSummary,
         perFileCoverage: params.sourceFiles.map((f) => {
           const fUnits = params.units.filter((u) => u.sourceFileId === f.id);
           const fCovered = fUnits.filter(

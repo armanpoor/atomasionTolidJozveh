@@ -2215,6 +2215,7 @@ export default function App() {
             onSetFileRole={handleSetFileRole}
             onBulkSetFileRole={handleBulkSetFileRole}
             onChangeConfig={handleChangeConfig}
+            onChangeProviderConfig={setProviderConfig}
             onChangeOptimization={handleChangeOptimization}
             onStartPipeline={handleRunStage1Ingest}
             onJumpToSearchResult={handleJumpToSearchResult}
@@ -2284,6 +2285,7 @@ export default function App() {
                 onSetFileRole={handleSetFileRole}
                 onBulkSetFileRole={handleBulkSetFileRole}
                 onChangeConfig={handleChangeConfig}
+                onChangeProviderConfig={setProviderConfig}
                 onChangeOptimization={handleChangeOptimization}
                 onStartPipeline={handleRunStage1Ingest}
                 onJumpToSearchResult={handleJumpToSearchResult}

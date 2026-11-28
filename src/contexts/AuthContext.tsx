@@ -108,7 +108,22 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   }, []);
 
   useEffect(() => {
+    // Immediate direct guest entry when ?guest=1 or ?autostart=1 is in the URL
+    if (!autoGuestAttemptedRef.current && typeof window !== 'undefined') {
+      const params = new URLSearchParams(window.location.search);
+      if (params.get('guest') === '1' || params.get('autostart') === '1') {
+        autoGuestAttemptedRef.current = true;
+        setLoading(false);
+        void enterGuestMode();
+      }
+    }
+
+    const fallbackTimer = setTimeout(() => {
+      setLoading(false);
+    }, 2500);
+
     const unsub = onAuthStateChanged(auth, async (nextUser) => {
+      clearTimeout(fallbackTimer);
       setFirebaseUser(nextUser);
       if (nextUser) {
         guestTokenRef.current = null;
@@ -127,7 +142,6 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         workspaceTokenRef.current = null;
         setWorkspaceAccessToken(null);
         setLoading(false);
-        // Optional ?guest=1 or ?autostart=1 support for direct guest entry
         if (!autoGuestAttemptedRef.current && typeof window !== 'undefined') {
           const params = new URLSearchParams(window.location.search);
           if (params.get('guest') === '1' || params.get('autostart') === '1') {
@@ -137,7 +151,10 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         }
       }
     });
-    return () => unsub();
+    return () => {
+      clearTimeout(fallbackTimer);
+      unsub();
+    };
   }, [enterGuestMode]);
 
   const signInWithGoogle = useCallback(async () => {
