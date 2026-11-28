@@ -1,4 +1,4 @@
-import { HistoryRunRecord } from './bookTypes';
+import type { HistoryRunRecord } from './bookTypes.ts';
 
 const DB_NAME = 'persian_docx_studio_history_v1';
 const STORE_NAME = 'runs';

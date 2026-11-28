@@ -548,6 +548,7 @@ export interface SourceFileDto {
   unitCount: number;
   checksum: string;
   uploadedAt: string;
+  metadataJson?: Record<string, unknown> | null;
 }
 
 export interface ContentUnitDto {

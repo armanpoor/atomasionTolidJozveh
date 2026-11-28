@@ -1,4 +1,4 @@
-import { DeepReviewFinding, DeepReviewReportDto, ProjectBundleDto } from './bookTypes.ts';
+import type { DeepReviewFinding, DeepReviewReportDto, ProjectBundleDto } from './bookTypes.ts';
 
 export interface DeepReviewProgressEvent {
   type: 'progress';

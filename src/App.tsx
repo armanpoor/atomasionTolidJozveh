@@ -3,6 +3,7 @@ import {
   AlertCircle,
   ArrowLeft,
   ArrowRight,
+  BookMarked,
   BookOpen,
   Brain,
   CheckCircle2,
@@ -27,6 +28,7 @@ import { AuthGate } from './components/AuthGate';
 import { WorkspaceSidebar } from './components/WorkspaceSidebar';
 import { PipelineStepper } from './components/PipelineStepper';
 import { OutlineEditorView } from './components/OutlineEditorView';
+import type { QuickDraftStrategy } from './lib/quickDraftBuilder';
 import { AuditConflictsView } from './components/AuditConflictsView';
 import { StageExportView, StageIngestView } from './components/WorkflowStageViews';
 import { ProjectsDashboardWidget } from './components/ProjectsDashboardWidget';
@@ -41,6 +43,8 @@ import { AiProviderModal } from './components/AiProviderModal';
 import { ProjectChangeLogModal } from './components/ProjectChangeLogModal';
 import { GoogleWorkspaceModal } from './components/GoogleWorkspaceModal';
 import { PrintPreviewModal } from './components/PrintPreviewModal';
+import { MasterEncyclopediaAdminModal } from './components/MasterEncyclopediaAdminModal';
+import { CollaborativeHubShell } from './components/collaborative/CollaborativeHubShell';
 import { ChapterSidebar, SelectedChapterKey } from './components/ChapterSidebar';
 import { QueuedUploadFile } from './components/FileDropzone';
 import { useHarnessRunner } from './hooks/useHarnessRunner';
@@ -83,6 +87,13 @@ import {
   exportBookToMarkdown,
   toPersianDigits,
 } from './lib/formatParsers';
+import {
+  appendPersistentUploadHistoryEntries,
+  loadPersistentUploadHistory,
+  PersistentUploadHistoryEntry,
+  preprocessIncomingSourceFile,
+  savePersistentUploadHistory,
+} from './lib/filePreprocessEngine';
 import {
   FirestoreProjectLiveState,
   subscribeProjectLiveState,
@@ -169,6 +180,77 @@ export default function App() {
   const [highlightedOutlineNodeId, setHighlightedOutlineNodeId] = useState<string | null>(null);
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
   const [mobileChaptersOpen, setMobileChaptersOpen] = useState(false);
+  const [canManageEncyclopedia, setCanManageEncyclopedia] = useState(false);
+  const [encyclopediaAdminOpen, setEncyclopediaAdminOpen] = useState(false);
+  const [serverPersonalOutputAllowed, setServerPersonalOutputAllowed] = useState(false);
+  const [enableUserPersonalOutput, setEnableUserPersonalOutput] = useState<boolean>(() => {
+    try {
+      return (
+        typeof window !== 'undefined' &&
+        new URLSearchParams(window.location.search).get('view') === 'studio'
+      );
+    } catch {
+      return false;
+    }
+  });
+  const [workspaceView, setWorkspaceView] = useState<'collaborative_hub' | 'personal_studio'>(
+    () => {
+      try {
+        return typeof window !== 'undefined' &&
+          new URLSearchParams(window.location.search).get('view') === 'studio'
+          ? 'personal_studio'
+          : 'collaborative_hub';
+      } catch {
+        return 'collaborative_hub';
+      }
+    }
+  );
+
+  useEffect(() => {
+    let cancelled = false;
+    const isDirectStudioUrl =
+      typeof window !== 'undefined' &&
+      new URLSearchParams(window.location.search).get('view') === 'studio';
+
+    if (!user) {
+      setCanManageEncyclopedia(false);
+      setEncyclopediaAdminOpen(false);
+      setServerPersonalOutputAllowed(false);
+      if (!isDirectStudioUrl) {
+        setEnableUserPersonalOutput(false);
+        setWorkspaceView('collaborative_hub');
+      }
+      return;
+    }
+    api
+      .getAuthCapabilities()
+      .then((cap) => {
+        if (!cancelled) {
+          setCanManageEncyclopedia(Boolean(cap.canManageEncyclopedia));
+          const serverAllowed = Boolean(
+            (cap as { enableUserPersonalOutput?: boolean }).enableUserPersonalOutput
+          );
+          setServerPersonalOutputAllowed(serverAllowed);
+          const personalEnabled = isDirectStudioUrl || serverAllowed;
+          setEnableUserPersonalOutput(personalEnabled);
+          if (isDirectStudioUrl) {
+            setWorkspaceView('personal_studio');
+          } else if (!personalEnabled) {
+            setWorkspaceView('collaborative_hub');
+          }
+        }
+      })
+      .catch(() => {
+        if (!cancelled && !isDirectStudioUrl) {
+          setCanManageEncyclopedia(false);
+          setServerPersonalOutputAllowed(false);
+          setEnableUserPersonalOutput(false);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [api, user, isGuest]);
 
   const [queuedFiles, setQueuedFiles] = useState<QueuedUploadFile[]>([]);
   const [workflowMode, setWorkflowMode] = useState<WorkflowMode>('multi_merge');
@@ -201,6 +283,7 @@ export default function App() {
   const [transcribingAudio, setTranscribingAudio] = useState(false);
   const [savingOutline, setSavingOutline] = useState(false);
   const [finalizing, setFinalizing] = useState(false);
+  const [applyingQuickDraft, setApplyingQuickDraft] = useState(false);
   const [exportingDocx, setExportingDocx] = useState(false);
   const [groundingNodeId, setGroundingNodeId] = useState<string | null>(null);
   const [enrichingFullGoogle, setEnrichingFullGoogle] = useState(false);
@@ -213,6 +296,7 @@ export default function App() {
 
   const [bannerError, setBannerError] = useState<string | null>(null);
   const [bannerToast, setBannerToast] = useState<string | null>(null);
+  const [ingestingWorkspaceQueue, setIngestingWorkspaceQueue] = useState(false);
   const pauseRequestedRef = useRef(false);
 
   // Sync Firestore real-time state for active project (skipped in Guest Mode — no Firebase Auth session)
@@ -423,15 +507,22 @@ export default function App() {
     [activeProjectId, api, config.aiModel, handleLogProjectActivity, handleRunLiveProbe]
   );
 
-  // Automatic live quota probe once per active project
+  // Automatic live quota probe once per active project (ONLY when Personal Studio is active & server personal AI is enabled)
   useEffect(() => {
-    if (!user || !activeProjectId) return;
+    if (
+      !user ||
+      !activeProjectId ||
+      workspaceView !== 'personal_studio' ||
+      !serverPersonalOutputAllowed
+    ) {
+      return;
+    }
     if (lastAutoProbedProjectRef.current === activeProjectId) return;
     lastAutoProbedProjectRef.current = activeProjectId;
     void handleRunLiveProbe();
-  }, [user, activeProjectId, handleRunLiveProbe]);
+  }, [user, activeProjectId, workspaceView, serverPersonalOutputAllowed, handleRunLiveProbe]);
 
-  // Initial Cloud SQL projects load on sign-in or Guest entry
+  // Initial Cloud SQL projects load on sign-in or Guest entry (ONLY when Personal Studio is active & enabled)
   useEffect(() => {
     if (!user) {
       setProjects([]);
@@ -440,6 +531,10 @@ export default function App() {
       setRevisions([]);
       setChangeLogOpen(false);
       setPrintPreviewOpen(false);
+      return;
+    }
+    if (workspaceView !== 'personal_studio' || !enableUserPersonalOutput) {
+      setLoadingProjects(false);
       return;
     }
     let cancelled = false;
@@ -492,7 +587,7 @@ export default function App() {
     return () => {
       cancelled = true;
     };
-  }, [user, isGuest, api, loadProjectBundle]);
+  }, [user, isGuest, workspaceView, enableUserPersonalOutput, api, loadProjectBundle]);
 
   const refreshProjectsList = useCallback(async () => {
     try {
@@ -641,26 +736,80 @@ export default function App() {
     [activeProjectId, api, refreshProjectsList]
   );
 
+  const [uploadHistory, setUploadHistory] = useState<PersistentUploadHistoryEntry[]>(() =>
+    loadPersistentUploadHistory()
+  );
+
+  const handleClearUploadHistory = useCallback(() => {
+    savePersistentUploadHistory([]);
+    setUploadHistory([]);
+  }, []);
+
   const handleAddFiles = useCallback(
     (files: File[]) => {
+      const additions: QueuedUploadFile[] = files.map((f, idx) => ({
+        id: `qf_${Date.now()}_${idx}_${Math.random().toString(36).slice(2, 7)}`,
+        name: f.name,
+        format: detectFileFormat(f.name),
+        sizeBytes: f.size,
+        role:
+          workflowMode === 'master_update'
+            ? idx === 0
+              ? 'master'
+              : 'supplement'
+            : 'standard',
+        file: f,
+        uploadStatus: 'pending',
+        uploadProgress: 0,
+      }));
+
       setQueuedFiles((prev) => {
         const hasMaster = prev.some((p) => p.role === 'master');
-        const additions: QueuedUploadFile[] = files.map((f, idx) => ({
-          id: `qf_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
-          name: f.name,
-          format: detectFileFormat(f.name),
-          sizeBytes: f.size,
+        const normalizedAdditions = additions.map((item, idx) => ({
+          ...item,
           role:
             workflowMode === 'master_update'
               ? !hasMaster && idx === 0
-                ? 'master'
-                : 'supplement'
-              : 'standard',
-          file: f,
+                ? ('master' as FileRole)
+                : ('supplement' as FileRole)
+              : ('standard' as FileRole),
         }));
-        return [...prev, ...additions];
+        return [...prev, ...normalizedAdditions];
       });
       setBannerError(null);
+
+      // Run zero-token client-side format-specific preprocessing on text/md/csv/json/html files
+      void Promise.all(
+        additions.map(async (item) => {
+          if (!item.file || item.format === 'docx' || item.format === 'pdf') {
+            return null;
+          }
+          try {
+            const rawText = await item.file.text();
+            const report = preprocessIncomingSourceFile({
+              fileName: item.name,
+              format: item.format,
+              rawText,
+            });
+            return { id: item.id, report };
+          } catch {
+            return null;
+          }
+        })
+      ).then((results) => {
+        const valid = results.filter(
+          (r): r is { id: string; report: ReturnType<typeof preprocessIncomingSourceFile> } =>
+            r !== null
+        );
+        if (valid.length === 0) return;
+        const mapById = new Map(valid.map((v) => [v.id, v.report]));
+        setQueuedFiles((prev) =>
+          prev.map((qf) => {
+            const rep = mapById.get(qf.id);
+            return rep ? { ...qf, preprocessReport: rep } : qf;
+          })
+        );
+      });
     },
     [workflowMode]
   );
@@ -670,7 +819,7 @@ export default function App() {
       if (items.length === 0) return;
       setQueuedFiles((prev) => {
         const hasMaster = prev.some((p) => p.role === 'master');
-        const normalized = items.map((item, idx) => ({
+        const normalized: QueuedUploadFile[] = items.map((item, idx) => ({
           ...item,
           role:
             workflowMode === 'master_update'
@@ -678,6 +827,8 @@ export default function App() {
                 ? ('master' as FileRole)
                 : ('supplement' as FileRole)
               : ('standard' as FileRole),
+          uploadStatus: 'pending',
+          uploadProgress: 0,
         }));
         return [...prev, ...normalized];
       });
@@ -695,6 +846,19 @@ export default function App() {
       prev.map((f) => {
         if (f.id === id) return { ...f, role };
         if (role === 'master' && f.role === 'master') return { ...f, role: 'supplement' };
+        return f;
+      })
+    );
+  }, []);
+
+  const handleBulkSetFileRole = useCallback((ids: string[], role: FileRole) => {
+    const idSet = new Set(ids);
+    if (idSet.size === 0) return;
+    setQueuedFiles((prev) =>
+      prev.map((f) => {
+        if (idSet.has(f.id)) {
+          return { ...f, role };
+        }
         return f;
       })
     );
@@ -729,6 +893,13 @@ export default function App() {
         sizeBytes: new Blob([file1Text]).size,
         role: workflowMode === 'master_update' ? 'master' : 'standard',
         presetText: file1Text,
+        uploadStatus: 'pending',
+        uploadProgress: 0,
+        preprocessReport: preprocessIncomingSourceFile({
+          fileName: 'راهنمای_فنی_نسخه_۱.md',
+          format: 'md',
+          rawText: file1Text,
+        }),
       },
       {
         id: `demo_2_${Date.now()}`,
@@ -737,6 +908,13 @@ export default function App() {
         sizeBytes: new Blob([file2Text]).size,
         role: workflowMode === 'master_update' ? 'supplement' : 'standard',
         presetText: file2Text,
+        uploadStatus: 'pending',
+        uploadProgress: 0,
+        preprocessReport: preprocessIncomingSourceFile({
+          fileName: 'جزوه_تکمیلی_کارگاه_۲.md',
+          format: 'md',
+          rawText: file2Text,
+        }),
       },
     ]);
     setBannerToast('۲ فایل نمونه (دارای هم‌پوشانی و یک تناقض عددی ۴ بار در برابر ۶ بار) آماده پردازش شد.');
@@ -762,6 +940,15 @@ export default function App() {
     setBannerError(null);
     setBannerToast(null);
     setMobileSidebarOpen(false);
+
+    // Initialize all queued files to 'pending' before starting batches
+    setQueuedFiles((prev) =>
+      prev.map((qf) => ({
+        ...qf,
+        uploadStatus: 'pending',
+        uploadProgress: 5,
+      }))
+    );
 
     try {
       await api.updateProject(activeProjectId, {
@@ -789,6 +976,17 @@ export default function App() {
         }
 
         const slice = queuedFiles.slice(i, i + batchSize);
+        const sliceIds = new Set(slice.map((s) => s.id));
+
+        // Transition current batch slice to 'uploading'
+        setQueuedFiles((prev) =>
+          prev.map((qf) =>
+            sliceIds.has(qf.id)
+              ? { ...qf, uploadStatus: 'uploading', uploadProgress: 55 }
+              : qf
+          )
+        );
+
         await syncFirestoreJobState(activeProjectId, {
           stage: 1,
           status: 'ingesting',
@@ -844,9 +1042,71 @@ export default function App() {
         latestBundle = res.bundle;
         setBundle(res.bundle);
         processedCount += slice.length;
+
+        // Record each ingested file in persistent cross-session Upload History
+        const projectTitleForHistory =
+          res.bundle?.project.title ||
+          projects.find((p) => p.id === activeProjectId)?.title ||
+          'پروژه فعال';
+        const historyEntries: PersistentUploadHistoryEntry[] = (res.ingested || []).map(
+          (ing, idx) => {
+            const matchedSlice =
+              slice.find((s) => s.name === ing.fileName) || slice[idx];
+            return {
+              id: `hist_${activeProjectId}_${Date.now()}_${idx}_${Math.random().toString(36).slice(2, 6)}`,
+              fileName: ing.fileName,
+              format: matchedSlice?.format || detectFileFormat(ing.fileName),
+              fileRole: matchedSlice?.role || 'standard',
+              sizeBytes: matchedSlice?.sizeBytes || 0,
+              wordCount: ing.wordCount || 0,
+              unitCount: ing.unitCount || 0,
+              projectId: activeProjectId,
+              projectTitle: projectTitleForHistory,
+              ingestedAt: new Date().toISOString(),
+              classification:
+                ing.classification ||
+                matchedSlice?.preprocessReport?.classification ||
+                'pure_automotive',
+              prunedOffTopicSegmentsCount:
+                ing.prunedOffTopicSegmentsCount ??
+                matchedSlice?.preprocessReport?.prunedOffTopicSegmentsCount ??
+                0,
+              keptAutomotiveSegmentsCount:
+                ing.keptAutomotiveSegmentsCount ??
+                matchedSlice?.preprocessReport?.keptAutomotiveSegmentsCount ??
+                ing.unitCount ??
+                1,
+              estimatedTokensSaved:
+                ing.estimatedTokensSaved ??
+                matchedSlice?.preprocessReport?.estimatedTokensSaved ??
+                0,
+              tokenSavingsPercent:
+                ing.tokenSavingsPercent ??
+                matchedSlice?.preprocessReport?.tokenSavingsPercent ??
+                0,
+              summaryFa:
+                ing.preprocessSummaryFa ||
+                matchedSlice?.preprocessReport?.summaryFa ||
+                `استخراج موفق ${toPersianDigits(ing.unitCount)} واحد متنی (${toPersianDigits(ing.wordCount)} کلمه)`,
+            };
+          }
+        );
+        if (historyEntries.length > 0) {
+          const updatedHistory = appendPersistentUploadHistoryEntries(historyEntries);
+          setUploadHistory(updatedHistory);
+        }
+
+        // Mark current batch slice as 'complete' (100%)
+        setQueuedFiles((prev) =>
+          prev.map((qf) =>
+            sliceIds.has(qf.id)
+              ? { ...qf, uploadStatus: 'complete', uploadProgress: 100 }
+              : qf
+          )
+        );
       }
 
-      setQueuedFiles([]);
+      // Keep completed items visible with 'complete' (100%) status bar in the queue
       await refreshProjectsList();
       await syncFirestoreJobState(activeProjectId, {
         stage: 1,
@@ -856,9 +1116,20 @@ export default function App() {
         workflowMode,
       });
 
+      const hybridPrunedTotal = queuedFiles.reduce(
+        (sum, qf) => sum + (qf.preprocessReport?.prunedOffTopicSegmentsCount || 0),
+        0
+      );
+      const savedTokensTotal = queuedFiles.reduce(
+        (sum, qf) => sum + (qf.preprocessReport?.estimatedTokensSaved || 0),
+        0
+      );
+
       setActiveStage(1);
       setBannerToast(
-        `مرحله ۱ تکمیل شد: ${toPersianDigits(latestBundle?.sourceFiles.length ?? processedCount)} فایل و ${toPersianDigits(latestBundle?.contentUnits.length ?? 0)} واحد متنی استخراج شد. پس از بررسی، دکمه اجرای مرحله ۲ را بزنید.`
+        hybridPrunedTotal > 0
+          ? `مرحله ۱ تکمیل شد: ${toPersianDigits(latestBundle?.sourceFiles.length ?? processedCount)} فایل و ${toPersianDigits(latestBundle?.contentUnits.length ?? 0)} واحد متنی استخراج شد (${toPersianDigits(hybridPrunedTotal)} بخش غیرخودرویی هرس شد · صرفه‌جویی ${toPersianDigits(savedTokensTotal)} توکن).`
+          : `مرحله ۱ تکمیل شد: ${toPersianDigits(latestBundle?.sourceFiles.length ?? processedCount)} فایل و ${toPersianDigits(latestBundle?.contentUnits.length ?? 0)} واحد متنی استخراج شد. پس از بررسی، دکمه اجرای مرحله ۲ را بزنید.`
       );
     } catch (err) {
       setBannerError(err instanceof Error ? err.message : 'خطا هنگام اجرای مرحله ۱ (استخراج فایل‌ها).');
@@ -881,6 +1152,7 @@ export default function App() {
     workflowMode,
     config,
     queuedFiles,
+    projects,
     syncFirestoreJobState,
     refreshProjectsList,
   ]);
@@ -1022,6 +1294,66 @@ export default function App() {
     refreshProjectsList,
   ]);
 
+  const handleIngestWorkspaceQueue = useCallback(async () => {
+    setIngestingWorkspaceQueue(true);
+    setBannerError(null);
+    setBannerToast(null);
+    setMobileSidebarOpen(false);
+
+    try {
+      let targetProjectId = activeProjectId;
+      if (!targetProjectId) {
+        const created = await api.createProject({
+          title: 'دایرةالمعارف جامع ایسیوها، ریمپ، داینو و تیونینگ خودرو',
+          workflowMode: 'master_update',
+          settingsJson: config as unknown as Record<string, unknown>,
+        });
+        targetProjectId = created.project.id;
+        setBundle(created);
+        setActiveProjectId(created.project.id);
+      }
+
+      await syncFirestoreJobState(targetProjectId, {
+        stage: 2,
+        status: 'deduping',
+        progressPercent: 50,
+        message: 'در حال استخراج ۷ فایل آپلودشده + ۱۰ تصویر J34، ترمیم جداول و خوشه‌بندی تک‌خطی ایسیوها...',
+        workflowMode: 'master_update',
+      });
+
+      const res = await api.ingestWorkspaceQueue(targetProjectId);
+      setBundle(res.bundle);
+      setQueuedFiles([]);
+      await refreshProjectsList();
+
+      await syncFirestoreJobState(targetProjectId, {
+        stage: 2,
+        status: 'awaiting_outline',
+        progressPercent: 100,
+        message: 'مرحله ۲ (ممیزی و خوشه‌بندی موجودیت‌محور تمامی ایسیوها) تکمیل شد.',
+        workflowMode: 'master_update',
+      });
+
+      const microReport = (res.bundle.auditReport?.detailsJson as Record<string, unknown> | undefined)
+        ?.entityMicroRoutingReport as { inlineSentencesRoutedCount?: number; fullUnitsRelocatedCount?: number } | undefined;
+      const inlineCount = microReport?.inlineSentencesRoutedCount ?? 0;
+      const unitCount = microReport?.fullUnitsRelocatedCount ?? 0;
+
+      setActiveStage(2);
+      setBannerToast(
+        `۷ فایل آپلودشده + ۱۰ تصویر Valeo J34 با ۰٪ مصرف سهمیه شخصی واکشی و خوشه‌بندی شدند (${toPersianDigits(res.bundle.contentUnits.length)} واحد متنی · ${toPersianDigits(inlineCount)} گزاره تک‌خطی و ${toPersianDigits(unitCount)} واحد کامل به خوشه‌های مرجع ایسیو منتقل شدند).`
+      );
+    } catch (err) {
+      setBannerError(
+        err instanceof Error
+          ? err.message
+          : 'خطا هنگام واکشی و خوشه‌بندی فایل‌های آپلودشده در فضای کاری.'
+      );
+    } finally {
+      setIngestingWorkspaceQueue(false);
+    }
+  }, [activeProjectId, api, config, refreshProjectsList, syncFirestoreJobState]);
+
   const handleSaveOutline = useCallback(
     async (
       nextNodes: OutlineNodeDto[],
@@ -1160,6 +1492,37 @@ export default function App() {
       }
     },
     [activeProjectId, api, workflowMode, config.validationDomain, refreshProjectsList, syncFirestoreJobState]
+  );
+
+  const handleGenerateQuickDraft = useCallback(
+    async (options: { strategy: QuickDraftStrategy; openStage4Preview: boolean }) => {
+      if (!activeProjectId) return;
+      setApplyingQuickDraft(true);
+      setBannerError(null);
+      try {
+        const updated = await api.generateQuickDraft(activeProjectId, options);
+        setBundle(updated);
+        if (options.openStage4Preview) {
+          setSelectedView({ kind: 'cover' });
+          setActiveStage(4);
+          await refreshProjectsList();
+          setBannerToast(
+            'پیش‌نویس سریع بدون غنی‌سازی ساخته شد و در مرحله ۴ آماده بررسی ساختار است. هر زمان خواستید می‌توانید غنی‌سازی یا بازبینی کامل را اجرا کنید.'
+          );
+        } else {
+          setBannerToast(
+            `ساختار اولیه با ${toPersianDigits(updated.outlineNodes.length)} فصل از روی فایل‌های استخراج‌شده و عناوین درختی در مرحله ۳ اعمال شد.`
+          );
+        }
+      } catch (err) {
+        setBannerError(
+          err instanceof Error ? err.message : 'خطا در ایجاد پیش‌نویس سریع ساختار فصل‌ها.'
+        );
+      } finally {
+        setApplyingQuickDraft(false);
+      }
+    },
+    [activeProjectId, api, refreshProjectsList]
   );
 
   const handleEnrichNodeWithGoogle = useCallback(
@@ -1502,6 +1865,39 @@ export default function App() {
     return <AuthGate />;
   }
 
+  if (workspaceView === 'collaborative_hub' || !enableUserPersonalOutput) {
+    return (
+      <>
+        <CollaborativeHubShell
+          apiClient={api}
+          userDisplayName={user.displayName || ''}
+          userEmail={user.email || null}
+          isGuest={isGuest}
+          workspaceAccessToken={workspaceAccessToken}
+          onConnectWorkspace={connectGoogleWorkspace}
+          onSignOut={() => void signOut()}
+          onSwitchToPersonalStudio={() => {
+            if (enableUserPersonalOutput) {
+              setWorkspaceView('personal_studio');
+            }
+          }}
+          onOpenAdvancedAdminModal={() => setEncyclopediaAdminOpen(true)}
+          onPersonalOutputFlagChange={(enabled) => {
+            setEnableUserPersonalOutput(enabled);
+            if (!enabled) setWorkspaceView('collaborative_hub');
+          }}
+        />
+        {canManageEncyclopedia && (
+          <MasterEncyclopediaAdminModal
+            open={encyclopediaAdminOpen}
+            onClose={() => setEncyclopediaAdminOpen(false)}
+            api={api}
+          />
+        )}
+      </>
+    );
+  }
+
   const activeBook = bundle?.project.bookSnapshotJson ?? null;
   const openConflictsCount =
     bundle?.conflicts.filter((c) => c.status === 'open').length ?? 0;
@@ -1609,8 +2005,31 @@ export default function App() {
           })}
         </nav>
 
-        {/* Trailing Controls: Drive/Sheets + Change Log + Assistant Drawer Toggle + User / Guest */}
+        {/* Trailing Controls: Return to Collaborative Hub + Owner Encyclopedia Panel + Drive/Sheets + Change Log + Assistant + User */}
         <div className="flex items-center gap-2 shrink-0">
+          <button
+            type="button"
+            onClick={() => setWorkspaceView('collaborative_hub')}
+            title="بازگشت به پلتفرم مشارکتی دیتابیس و کتاب‌های مرجع خودرو"
+            className="inline-flex min-h-[38px] items-center gap-1.5 rounded-lg border border-[#1E3A5F]/35 bg-[#FAF9F6] px-2.5 sm:px-3 py-1.5 text-xs font-extrabold text-[#1E3A5F] transition-colors hover:bg-[#EEF3F8] whitespace-nowrap shrink-0 cursor-pointer"
+          >
+            <ArrowRight className="h-3.5 w-3.5 shrink-0" />
+            <span className="hidden lg:inline">پلتفرم مشارکتی خودرو</span>
+          </button>
+
+          {canManageEncyclopedia && (
+            <button
+              type="button"
+              data-testid="owner-encyclopedia-admin-button"
+              onClick={() => setEncyclopediaAdminOpen(true)}
+              title="مدیریت دایرةالمعارف مرجع خودرو (اختصاصی مالک پلتفرم)"
+              className="inline-flex min-h-[38px] items-center gap-1.5 rounded-lg border border-[#1E3A5F] bg-[#EEF3F8] px-2.5 sm:px-3 py-1.5 text-xs font-extrabold text-[#1E3A5F] transition-colors hover:bg-[#DFE9F4] whitespace-nowrap shrink-0 cursor-pointer"
+            >
+              <BookMarked className="h-3.5 w-3.5 shrink-0" />
+              <span className="hidden xl:inline">دایرةالمعارف مرجع</span>
+            </button>
+          )}
+
           <button
             type="button"
             onClick={() => {
@@ -1794,10 +2213,13 @@ export default function App() {
             }
             onClearFiles={() => setQueuedFiles([])}
             onSetFileRole={handleSetFileRole}
+            onBulkSetFileRole={handleBulkSetFileRole}
             onChangeConfig={handleChangeConfig}
             onChangeOptimization={handleChangeOptimization}
             onStartPipeline={handleRunStage1Ingest}
             onJumpToSearchResult={handleJumpToSearchResult}
+            uploadHistory={uploadHistory}
+            onClearUploadHistory={handleClearUploadHistory}
           />
         </div>
 
@@ -1860,10 +2282,13 @@ export default function App() {
                 }
                 onClearFiles={() => setQueuedFiles([])}
                 onSetFileRole={handleSetFileRole}
+                onBulkSetFileRole={handleBulkSetFileRole}
                 onChangeConfig={handleChangeConfig}
                 onChangeOptimization={handleChangeOptimization}
                 onStartPipeline={handleRunStage1Ingest}
                 onJumpToSearchResult={handleJumpToSearchResult}
+                uploadHistory={uploadHistory}
+                onClearUploadHistory={handleClearUploadHistory}
               />
             </div>
             <div
@@ -1953,6 +2378,8 @@ export default function App() {
                 onRunStage2Dedup={handleRunStage2Dedup}
                 onGoToStage2={() => setActiveStage(2)}
                 onLoadDemoFiles={handleLoadQuickDemoFiles}
+                onIngestWorkspaceQueue={handleIngestWorkspaceQueue}
+                ingestingWorkspaceQueue={ingestingWorkspaceQueue}
                 onOpenMobileSidebar={() => setMobileSidebarOpen(true)}
                 onOpenGoogleDriveImport={() => {
                   setGoogleWorkspaceInitialTab('import');
@@ -1971,7 +2398,9 @@ export default function App() {
                 hasDedupResults={workflowProgress.hasDedupResults}
                 hasOutline={workflowProgress.hasOutline}
                 runningDedup={processing}
+                ingestingWorkspaceQueue={ingestingWorkspaceQueue}
                 onRunDedup={handleRunStage2Dedup}
+                onIngestWorkspaceQueue={handleIngestWorkspaceQueue}
                 onProceedToOutline={() => setActiveStage(3)}
                 onRescanConflicts={handleRescanConflicts}
                 onCheckConflictWithGoogle={handleCheckConflictWithGoogle}
@@ -1988,12 +2417,14 @@ export default function App() {
                 highlightedNodeId={highlightedOutlineNodeId}
                 saving={savingOutline}
                 finalizing={finalizing}
+                applyingQuickDraft={applyingQuickDraft}
                 groundingNodeId={groundingNodeId}
                 enrichingAllGoogle={enrichingFullGoogle}
                 runningDeepReview={runningDeepReview}
                 deepReviewProgress={deepReviewProgress}
                 onSaveOutline={handleSaveOutline}
                 onApproveAndFinalize={handleApproveAndFinalize}
+                onGenerateQuickDraft={handleGenerateQuickDraft}
                 onEnrichNodeWithGoogle={handleEnrichNodeWithGoogle}
                 onEnrichAllWithGoogle={handleEnrichFullDocumentWithGoogle}
                 onRunDeepReview={handleRunDeepAiReview}
@@ -2286,6 +2717,14 @@ export default function App() {
         onRollback={handleRollbackRevision}
         onCreateCheckpoint={handleCreateManualCheckpoint}
       />
+
+      {canManageEncyclopedia && (
+        <MasterEncyclopediaAdminModal
+          open={encyclopediaAdminOpen}
+          onClose={() => setEncyclopediaAdminOpen(false)}
+          api={api}
+        />
+      )}
 
       <GoogleWorkspaceModal
         open={googleWorkspaceModalOpen}

@@ -225,6 +225,29 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         return current.getIdToken(forceRefresh);
       }
       if (guestTokenRef.current) {
+        if (forceRefresh) {
+          const res = await fetch('/api/auth/guest', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+          });
+          const data = (await res.json().catch(() => null)) as {
+            token?: string;
+            uid?: string;
+            displayName?: string;
+            email?: string;
+          } | null;
+          if (res.ok && data?.token && data?.uid) {
+            guestTokenRef.current = data.token;
+            setGuestUser({
+              uid: data.uid,
+              email: data.email || null,
+              displayName: data.displayName || 'کاربر مهمان',
+              photoURL: null,
+              isGuest: true,
+            });
+            return data.token;
+          }
+        }
         return guestTokenRef.current;
       }
       throw new Error('لطفاً ابتدا با حساب گوگل یا حالت مهمان وارد شوید.');

@@ -3,6 +3,7 @@ import { toPersianDigits } from '../formatParsers.ts';
 import type { AiProviderType } from '../tokenOptimizer.ts';
 import { estimatePersianTokensConservative } from '../tokenOptimizer.ts';
 import { deterministicHash } from '../zeroLossPipeline.ts';
+import { buildUniversalSystemPromptBlock } from '../universalSystemPrompt.ts';
 import { resolveProviderCapabilityProfile } from './providerGuard.ts';
 import type {
   BlueprintSection,
@@ -212,10 +213,14 @@ export function buildImmutableCachedPrefix(
     ? '4. اگر در قطعات منبع هشدار ایمنی، خطای بحرانی یا نکته بازدارنده (خطر، هشدار، حیاتی، اتصال کوتاه، آسیب، خطای مهلک) وجود دارد، حتماً حداقل یک بلوک callout_warning متصل به همان sourceChunkId تولید کن.'
     : '4. اگر در قطعات منبع هشدار ایمنی حیاتی (سوختن، ناک، ایموبلایزر، قفل شدن، چک‌سام، بکاپ، اتصال کوتاه، خطر، هشدار) وجود دارد، حتماً حداقل یک بلوک callout_warning متصل به همان sourceChunkId تولید کن.';
 
+  const universalConstitution = buildUniversalSystemPromptBlock({ mode: 'full' });
+
   return [
     '=== IMMUTABLE SYSTEM PREFIX (DO NOT ALTER PER SECTION) ===',
-    `نقش: سردبیر و مؤلف ارشد جزوات تخصصی در حوزه ${domain}.`,
-    `لحن نگارش: ${tone}.`,
+    `نقش: سردبیر و مؤلف ارشد کتاب‌های آموزشی و جزوات تخصصی در حوزه ${domain}.`,
+    `لحن نگارش: ${tone} (رسمی اما شیرین، روان، ساده‌خوان و بدون کلمات قلمبه‌سلمبه).`,
+    '',
+    universalConstitution,
     '',
     'قوانین غیرقابل‌نقض هارنس (Zero-Hallucination, Anti-Injection & Zero-Loss):',
     '1. هرگونه تولید تگ خام HTML یا CSS (مانند <div>, <span>, <table>, style=...) مطلقاً ممنوع است. فقط Semantic IR تولید کن.',
@@ -362,6 +367,7 @@ export function buildLayer2JudgePrompt(params: {
     '1. توهم معنایی یا ادعای فنی غیرمستند خارج از منبع (hallucination).',
     '2. حذف مفهوم کلیدی، آدرس، پارامتر، شرط ایمنی یا گام عملیاتی مهم موجود در منبع (omission -> ثبت در missingTechnicalFacts و issues).',
     '3. ناسازگاری اصطلاحات با واژه‌نامه یا پرش آموزشی/تناقض منطقی.',
+    buildUniversalSystemPromptBlock({ mode: 'judge' }),
     'خروجی باید صرفاً JSON معتبر با ساختار دقیق زیر باشد:',
     '{"passed": true|false, "score": 0-100, "summaryFa": "خلاصه دقیق و مستند ارزیابی", "checkedClaims": [{"blockId":"blk-1", "claimFa":"ادعای فنی بررسی‌شده", "supported": true|false, "sourceChunkId":"شناسه قطعه منبع"}], "missingTechnicalFacts": ["فهرست نکات فنی حذف‌شده از منبع (در صورت عدم حذف خالی باشد)"], "issues": [{"id":"l2-1", "blockId":"شناسه بلوک معیوب یا خالی", "category":"hallucination|omission|terminology|clarity|structure", "severity":"error|warning", "messageFa":"شرح دقیق خطا", "suggestedFixFa":"پیشنهاد ترمیم جراحی"}]}',
   ].join('\n');

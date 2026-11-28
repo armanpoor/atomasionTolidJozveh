@@ -40,8 +40,10 @@ function renderBidiRuns(chunk: string, keyPrefix: string) {
 }
 
 export function RichText({ text, footnoteMap, onSelectFootnote }: RichTextProps) {
+  const safeText = typeof text === 'string' ? text : '';
+  if (!safeText) return null;
   const tokenRx = /(\*\*[^*]+\*\*|\[\[\d+\]\]\(#footnote-\d+\)|`[^`]+`)/g;
-  const parts = text.split(tokenRx).filter(Boolean);
+  const parts = safeText.split(tokenRx).filter(Boolean);
 
   return (
     <>

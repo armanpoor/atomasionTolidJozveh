@@ -1,4 +1,4 @@
-import {
+import type {
   AiAnalysisPayload,
   AiAnalysisReport,
   AiModelId,
@@ -11,9 +11,9 @@ import {
   ProcessingEngineMode,
   SectionNode,
   TableBlock,
-} from './bookTypes';
-import { createDiagramBlock, rasterizeSvgToPng } from './diagramRenderer';
-import { toPersianDigits } from './formatParsers';
+} from './bookTypes.ts';
+import { createDiagramBlock, rasterizeSvgToPng } from './diagramRenderer.ts';
+import { toPersianDigits } from './formatParsers.ts';
 
 export interface SectionCatalogItem {
   sectionId: string;

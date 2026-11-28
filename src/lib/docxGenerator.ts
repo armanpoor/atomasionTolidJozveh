@@ -21,22 +21,22 @@ import {
   TextRun,
   WidthType,
 } from 'docx';
-import {
+import type {
   CalloutBlock,
   ContentBlock,
   DocxExportConfig,
   ParsedBook,
   TableBlock,
-} from './bookTypes';
-import { rasterizeBookDiagrams } from './aiOrganizer';
-import { getCalloutTheme, SPECIAL_FRAME_THEMES } from './calloutThemes';
+} from './bookTypes.ts';
+import { rasterizeBookDiagrams } from './aiOrganizer.ts';
+import { getCalloutTheme, SPECIAL_FRAME_THEMES } from './calloutThemes.ts';
 import {
   computeContentWidthDxa,
   enforceRtlOoxmlIntegrity,
   HEADER_CHAPTER_STYLEREF_MARKER,
-} from './docxRtlPostProcessor';
-import { segmentBidiTechnicalRuns } from './ecuTechnicalIntegrity';
-import { toPersianDigits } from './formatParsers';
+} from './docxRtlPostProcessor.ts';
+import { segmentBidiTechnicalRuns } from './ecuTechnicalIntegrity.ts';
+import { toPersianDigits } from './formatParsers.ts';
 
 const COLORS = {
   primary: '1E3A5F',       // Deep Lapis Ink

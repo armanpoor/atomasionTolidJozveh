@@ -23,14 +23,14 @@ export interface BidiRunSegment {
  *  - Multi-char Latin technical tokens & acronyms with numbers/hyphens/dots/slashes: CAN-BUS, ECU/TCU, OBD-II, AFR=12.5
  */
 const LTR_CODE_PATTERN =
-  /(?:0x[0-9A-Fa-f]{2,8}(?:\s*[-–→]\s*0x[0-9A-Fa-f]{2,8})?|\$[0-9A-Fa-f]{3,8}\b|\b[PCBU][0-3][0-9A-Fa-f]{3}\b)/;
+  /(?:0x[0-9A-Fa-f]{2,8}(?:\s*[-–→]\s*0x[0-9A-Fa-f]{2,8})?|\$[0-9A-Fa-f]{3,8}\b|\b[PCBU][0-3][0-9A-Fa-f]{3}(?:-[0-9A-Fa-f]{2})?\b)/;
 
 const LTR_TECH_PATTERN = new RegExp(
   [
-    // Hex addresses / ranges & OBD-II DTCs (captured first)
+    // Hex addresses / ranges & OBD-II / UDS 3-Byte DTCs (captured first)
     '0x[0-9A-Fa-f]{2,8}(?:\\s*[-–→]\\s*0x[0-9A-Fa-f]{2,8})?',
     '\\$[0-9A-Fa-f]{3,8}\\b',
-    '\\b[PCBU][0-3][0-9A-Fa-f]{3}\\b',
+    '\\b[PCBU][0-3][0-9A-Fa-f]{3}(?:-[0-9A-Fa-f]{2})?\\b',
     // Ratios like 14.7:1 or 12.5:1
     '\\b\\d+(?:\\.\\d+)?\\s*:\\s*\\d+(?:\\.\\d+)?\\b',
     // Matrix / map dimensions like 16x16, 16×16, 12x16
@@ -123,25 +123,39 @@ const ECU_PLATFORM_PATTERNS: Array<{ canonical: string; regex: RegExp }> = [
   { canonical: 'bosch_me745', regex: /\bme\s*7\.?4\.?5\b|بوش\s*۷\.?۴\.?۵|بوش\s*7\.?4\.?5/i },
   { canonical: 'bosch_me749', regex: /\bme\s*7\.?4\.?9\b|بوش\s*۷\.?۴\.?۹|بوش\s*7\.?4\.?9/i },
   { canonical: 'bosch_me17', regex: /\bme\s*17(?:\.\d+)*\b|بوش\s*۱۷|بوش\s*17/i },
-  { canonical: 'bosch_med17', regex: /\bmed\s*17(?:\.\d+)*\b/i },
+  { canonical: 'bosch_med17', regex: /\bmedg?\s*17(?:\.\d+)*\b/i },
+  { canonical: 'bosch_meg17', regex: /\bmeg\s*17(?:\.\d+)*\b/i },
   { canonical: 'bosch_edc17', regex: /\bedc\s*17[a-z0-9]*\b/i },
-  { canonical: 'bosch_m797', regex: /\bm\s*7\.?9\.?7\b/i },
-  { canonical: 'siemens_sim2k', regex: /\bsim2k(?:[-_\s]?\d+)?\b|زیمنس\s*سیم\s*۲کا/i },
-  { canonical: 'siemens_ci1', regex: /\b(?:ci[1-6]|cge|cgm|cix)\b|زیمنس\s*(?:بایفیول|تک\s*سوز)/i },
-  { canonical: 'sagem_s2000', regex: /\bs2000(?:[-_\s]?[a-z0-9]+)?\b|ساژم\s*(?:۲۰۰۰|2000)/i },
-  { canonical: 'valeo_j34', regex: /\bj34[a-z]?\b|والئو\s*(?:جی\s*۳۴|j34)/i },
-  { canonical: 'valeo_j35', regex: /\bj35[a-z]?\b|والئو\s*(?:جی\s*۳۵|j35)/i },
+  { canonical: 'bosch_m797', regex: /\bm(?:e)?\s*7\.?9\.?[78](?:\.\d+)?\b/i },
+  { canonical: 'bosch_me788', regex: /\bme?\s*7\.?8(?:\.8)?\b/i },
+  { canonical: 'bosch_mg1', regex: /\bm[gd]1(?:cs|us)?\d*\b/i },
+  { canonical: 'bosch_mp50', regex: /\bmp\s*5\.?0\b|بوش\s*ام[‌\s]?پی\s*5/i },
+  { canonical: 'bosch_mp73', regex: /\bmp\s*7\.?3\b|بوش\s*ام[‌\s]?پی\s*7/i },
+  { canonical: 'bosch_s2', regex: /\bbosch\s*s2\b|بوش\s*اس\s*2|بوش\s*s2/i },
+  { canonical: 'siemens_sim2k', regex: /\bsim2?k(?:[-_\s]?\d+(?:vr)?)?\b|زیمنس\s*سیم\s*۲کا/i },
+  { canonical: 'siemens_5wp4', regex: /\b5wp4(?:\.\d+)?\b/i },
+  { canonical: 'siemens_ci1', regex: /\b(?:ci[1-8]|cio|cip|cir|cid|cge|cee|cbm\s*e4|c4e|cgm|cgx|cgs|cgd|ciz|ciu|cix(?:34|48)?|cr[1-3]|ccx|cbr|cbar|cbir|cvr|ptp|pgm\s*10|s48)\b|زیمنس\s*(?:بایفیول|تک\s*سوز|سی[‌\s]?جی|کروز)/i },
+  { canonical: 'siemens_noflash', regex: /\bno[-_\s]?flash\b|\b9b00\b|نو[‌\s]?فلش/i },
+  { canonical: 'sagem_s2000', regex: /\bs2000(?:[-_\s]?[a-z0-9]+)?\b|\bsl96\b|ساژم\s*(?:۲۰۰۰|2000)?/i },
+  { canonical: 'valeo_j34', regex: /\bj34[a-z]?\b|\b9661960880\b|والئو\s*(?:جی\s*۳۴|j34)|والیو\s*(?:جی\s*۳۴|j34)/i },
+  { canonical: 'valeo_j35', regex: /\bj35[a-z]?\b|\bv4[026]\b|\bs3000\b|والئو\s*(?:جی\s*۳۵|j35)|والیو/i },
   { canonical: 'valeo_pl4', regex: /\bpl4\b/i },
   { canonical: 'continental_ems', regex: /\bems\s*\d{3,4}[a-z]?\b/i },
+  { canonical: 'delphi_mt', regex: /\bmt(?:20u2?|22(?:\.1(?:\.1)?|u)?|34|38|60|62\.1|80|86|92(?:\.1)?)\b|\bdcm\d(?:\.\d)?\b|دلفی|delphi/i },
+  { canonical: 'ezu_easyu', regex: /\bezu\b|\beasyu(?:\s*2\.[058])?\b|ایزی[‌\s]?یو/i },
   { canonical: 'ssat', regex: /\bssat\b|ایسیو\s*اس\s*ست|اس‌ست/i },
-  { canonical: 'lznf', regex: /\blznf\b/i },
-  { canonical: 'maw', regex: /\bmaw\b|ایسیو\s*ماو/i },
-  { canonical: 'kesens', regex: /\bkesens\b|کسنس/i },
-  { canonical: 'engine_tu5', regex: /\btu5\b|تی‌یو۵|تیو۵/i },
+  { canonical: 'lznf', regex: /\blznf\b|\bspc56\b/i },
+  { canonical: 'gharb_steel', regex: /غرب\s*استیل|\bgharb\s*steel\b/i },
+  { canonical: 'maw', regex: /\bmaw\b|ایسیو\s*ماو|ام\s*ای\s*دبلیو/i },
+  { canonical: 'acs', regex: /\bacs\b|ایسیو\s*ای\s*سی\s*اس/i },
+  { canonical: 'kesens', regex: /\bkesens\b|کسنس|کیسنس/i },
+  { canonical: 'kefico', regex: /\bkefico\b|\bcpegd\d*\b|\bcpgdsh\d*\b|کفیکو/i },
+  { canonical: 'engine_tu5', regex: /\btu5(?:jp4|p)?\b|تی‌یو۵|تیو۵/i },
   { canonical: 'engine_ef7', regex: /\bef7(?:\s*tc|\s*turbo)?\b|ای‌اف۷|موتور\s*ملی/i },
-  { canonical: 'engine_xu7', regex: /\bxu7p?\b|ایکس‌یو۷/i },
-  { canonical: 'engine_k4m', regex: /\bk4m\b/i },
-  { canonical: 'engine_m15', regex: /\bm15\b/i },
+  { canonical: 'engine_xu7', regex: /\bxu7(?:p|\s*plus|jp4)?\b|\bxup\b|ایکس‌یو۷/i },
+  { canonical: 'engine_k4m', regex: /\bk4m\b|\bme16\b/i },
+  { canonical: 'engine_m15', regex: /\bm1[35](?:tc|gsi)?\b/i },
+  { canonical: 'engine_z24', regex: /\bz24\b|زامیاد|نیسان\s*آبی/i },
 ];
 
 export function extractEcuPlatforms(text: string): Set<string> {
@@ -364,7 +378,7 @@ const KNOWN_ECU_MAP_NAMES_RX =
   /\b(?:KFZW2?|KFZWOP2?|KFZWMS|LAMFA|KFLBTS|KFMIRL|KFMIOP|LDRXN|KFLDHBN|KFLDIMX|KFLDRL|KFPED|KFVPDKSD|NMAX(?:OG)?|VMAX|KRKTE|TVUB|TEMIN|KFFWL|KFLF|FKKVS|KFKHFM|MLHFM|ESKONF|CDKAT|CWDLSAHK|CWKONLS|SOI|EOI|IQ|DW|SMOKE|SVBL|N75|EGR|DPF|IMMO)\b/g;
 
 const KNOWN_ECU_MODEL_CODES_RX =
-  /\b(?:ME\s?7\.4\.[459]|ME\s?17(?:\.\d+){1,2}|MED\s?17(?:\.\d+){1,2}|EDC\s?17[A-Z0-9]{0,5}|M\s?7\.9\.7|SIM2K(?:-\d{2,3})?|S2000(?:-[A-Z0-9]+)?|J34P?|J35|EMS\s?\d{3,4}[A-Z]?|SSAT|LZNF|MAW|PL4)\b/gi;
+  /\b(?:ME\s?7\.4\.[459]|ME\s?7\.8\.8|ME\s?17(?:\.\d+){1,2}|MEG\s?17(?:\.\d+){0,2}|MED\s?17(?:\.\d+){1,2}|MEVD\s?17(?:\.\d+){0,2}|EDC\s?1[567][A-Z0-9._-]{0,6}|M[GD]1(?:C[SP][0-9A-Z]+)?|M\s?7\.9\.7(?:\.1)?|SIM2K(?:-\d{2,3}[A-Z]?)?|S[23]000(?:-[A-Z0-9]+)?|SL96|J34P?|J35|V4[026]|EMS\s?\d{3,4}[A-Z]?|EZU|EASY[-_]?U(?:2(?:\.[0-9A-Z]+)?)?|MT(?:20U2?|22(?:\.[15])?|34|38|60|62\.1|80|86|92)|KEFICO|KESENS|SSAT|LZNF|MAW|PL4)\b/gi;
 
 export function extractTechnicalEntities(text: string): ExtractedTechnicalEntities {
   const ascii = toAsciiDigits(text || '');
@@ -376,7 +390,7 @@ export function extractTechnicalEntities(text: string): ExtractedTechnicalEntiti
   for (const m of ascii.matchAll(/\b0x[0-9A-Fa-f]{2,8}\b/g)) {
     hexSet.add(m[0].toUpperCase().replace(/^0X/, '0x'));
   }
-  for (const m of ascii.matchAll(/\b[PCBU][0-3][0-9A-Fa-f]{3}\b/g)) {
+  for (const m of ascii.matchAll(/\b[PCBU][0-3][0-9A-Fa-f]{3}(?:-[0-9A-Fa-f]{2})?\b/g)) {
     dtcSet.add(m[0].toUpperCase());
   }
   for (const m of ascii.matchAll(KNOWN_ECU_MODEL_CODES_RX)) {

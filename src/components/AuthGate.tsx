@@ -28,10 +28,10 @@ export const AuthGate: React.FC = () => {
           </div>
           <div>
             <h1 className="text-base sm:text-lg font-bold text-[#1A1816]">
-              استودیو صفحه‌آرایی و ادغام بدون افت اسناد
+              پلتفرم مشارکتی دیتابیس و کتاب‌های مرجع تخصصی خودرو
             </h1>
             <p className="text-xs text-[#57534E]">
-              تدوین حرفه‌ای Word فارسی · فونت وزیر مدیوم · ممیزی پوشش ۱۰۰٪
+              تکمیل تیمی دانش فنی خودرو · ۶ جلد کتاب مرجع · مدیریت فایل‌های WinOLS 2.24 و Google Workspace
             </p>
           </div>
         </div>
@@ -43,14 +43,15 @@ export const AuthGate: React.FC = () => {
           <div className="lg:col-span-7 space-y-6">
             <div className="space-y-3">
               <p className="text-xs font-semibold text-[#1E3A5F] tracking-wide">
-                پلتفرم تدوین، ادغام بدون افت و غنی‌سازی اسناد فارسی
+                پایگاه دانش تیمی خودرو، ECU، مالتی‌پلکس، دیاگ و WinOLS 2.24
               </p>
               <h2 className="text-2xl sm:text-3xl font-extrabold text-[#1A1816] leading-snug text-balance">
-                از یک فایل ساده تا ادغام ۱۰۰ سند ورد — بدون حذف حتی یک نکته کلیدی
+                با مشارکت تیمی، جامع‌ترین کتاب‌ها و دیتابیس مرجع تخصصی خودرو را بسازید
               </h2>
               <p className="text-sm sm:text-base text-[#57534E] leading-8">
-                اسناد Word، PDF، Markdown و یادداشت‌های پراکنده خود را یکپارچه کنید؛
-                ساختار فصل‌بندی را به‌صورت تعاملی بچینید، تناقض‌های عددی را با جستجوی گوگل بررسی کنید و خروجی استاندارد ورد (راست‌چین، فونت وزیر مدیوم، پیش‌نمایش چاپ A4 و تاریخچه تغییرات) بگیرید.
+                جزوات متنی، فایل‌های PDF و Word، فایل‌های صوتی تخصصی و پروژه‌های WinOLS 2.24 (.ols و .kp) را
+                بارگذاری کنید؛ سامانه بخش‌های جدید را به‌صورت هوشمند (Delta-Merge) به ۶ جلد مرجع می‌افزاید،
+                فایل‌ها را در Google Drive دسته‌بندی می‌کند و گزارش مشارکت و امتیاز شما را ثبت می‌نماید.
               </p>
             </div>
 
@@ -58,40 +59,40 @@ export const AuthGate: React.FC = () => {
               <div className="bg-white border border-[#E5E2DC] rounded-xl p-4 space-y-1.5">
                 <div className="flex items-center gap-2 text-[#1E3A5F] font-semibold text-sm">
                   <Layers className="w-4 h-4 shrink-0" />
-                  ۴ حالت پردازش تعمیم‌یافته
+                  ۶ جلد کتاب مرجع خودرشدشونده
                 </div>
                 <p className="text-xs text-[#57534E] leading-6">
-                  پالایش تک‌فایل، ادغام بدون افت چندفایلی، به‌روزرسانی سند مرجع (Master) و تبدیل یادداشت خام به سند رسمی.
+                  از مکانیک، برق و مالتی‌پلکس و دیاگ تا ساختار ECU، نقشه‌خوانی پیشرفته WinOLS و خودروهای هیبریدی/برقی.
                 </p>
               </div>
 
               <div className="bg-white border border-[#E5E2DC] rounded-xl p-4 space-y-1.5">
                 <div className="flex items-center gap-2 text-[#14532D] font-semibold text-sm">
                   <ShieldCheck className="w-4 h-4 shrink-0" />
-                  تضمین پوشش ۱۰۰٪ و تاریخچه تغییرات
+                  دروازه‌بان هوشمند و صفر-مصرف توکن تکراری
                 </div>
                 <p className="text-xs text-[#57534E] leading-6">
-                  تمامی اقدامات کاربر و هوش مصنوعی با قابلیت بازگشت یک‌کلیکی به نسخه‌های قبلی ثبت و نگهداری می‌شوند.
+                  فایل‌های تکراری (SHA-256) و غیرمرتبط با خودرو پیش از مصرف هوش مصنوعی شناسایی شده و فقط دانش جدید اضافه می‌شود.
                 </p>
               </div>
 
               <div className="bg-white border border-[#E5E2DC] rounded-xl p-4 space-y-1.5">
                 <div className="flex items-center gap-2 text-[#1E3A5F] font-semibold text-sm">
                   <Sparkles className="w-4 h-4 shrink-0" />
-                  پیش‌نمایش استاندارد چاپ A4 و ورد
+                  فضای کاری باز با Drive، Docs، Sheets و PDF
                 </div>
                 <p className="text-xs text-[#57534E] leading-6">
-                  نمایش دقیق صفحات A4 با حاشیه‌های استاندارد چاپ، کادرهای رنگی موضوعی و خروجی مستقیم PDF و Word.
+                  مطالعه کتاب‌ها و PDF درون اپلیکیشن، ویرایش در Google Docs، مرور پوشه‌های .ols/.kp در Drive و گزارش زنده Google Sheets.
                 </p>
               </div>
 
               <div className="bg-white border border-[#E5E2DC] rounded-xl p-4 space-y-1.5">
                 <div className="flex items-center gap-2 text-[#854D0E] font-semibold text-sm">
                   <Mic className="w-4 h-4 shrink-0" />
-                  دستیار هوشمند و ویرایش صوتی زنده
+                  تبدیل صوت تخصصی، امتیازدهی و نیازهای دیتابیس
                 </div>
                 <p className="text-xs text-[#57534E] leading-6">
-                  مکالمه متنی و صوتی فارسی برای دیکته کردن مطالب جدید، ساخت جدول و جابه‌جایی فصل‌ها.
+                  تبدیل فایل صوتی به متن تخصصی خودرو، محاسبه شفاف درصد محتوای جدید، امتیاز مشارکت و جدول برترین‌های تیم.
                 </p>
               </div>
             </div>
@@ -105,10 +106,10 @@ export const AuthGate: React.FC = () => {
                   <CheckCircle2 className="w-6 h-6" />
                 </div>
                 <h3 className="text-lg font-bold text-[#1A1816]">
-                  ورود به میز کار استودیو
+                  ورود به پلتفرم مشارکتی خودرو
                 </h3>
                 <p className="text-xs sm:text-sm text-[#57534E] leading-6">
-                  برای نگهداری دائمی پروژه‌ها با حساب گوگل وارد شوید یا بدون نیاز به ثبت‌نام به‌صورت مهمان شروع کنید.
+                  با حساب گوگل وارد شوید تا امتیازها و همگام‌سازی Drive/Docs/Sheets به نام شما ثبت شود، یا به‌صورت مهمان مشارکت کنید.
                 </p>
               </div>
 
@@ -182,8 +183,33 @@ export const AuthGate: React.FC = () => {
                 </button>
               </div>
 
+              <div
+                data-testid="authgate-automotive-notice"
+                className="rounded-xl border border-[#DFD8CA] bg-[#FAF8F3] p-3.5 space-y-1.5 text-right"
+              >
+                <div className="flex items-center gap-1.5 text-xs font-bold text-[#1E3A5F]">
+                  <ShieldCheck className="w-4 h-4 shrink-0" />
+                  <span>شفافیت حریم خصوصی و تخصص‌گرایی حوزه خودرو</span>
+                </div>
+                <ul className="space-y-1 text-[11px] leading-5 text-[#57534E]">
+                  <li>
+                    <strong className="text-[#1A1816]">۱. صرفاً اسناد خودرو:</strong>{' '}
+                    پلتفرم ویژه تمامی حوزه‌های خودرو (مکانیک، برق و مالتی‌پلکس، دیاگ، گیربکس، هیبرید/برقی، داینو و ریمپ) است.
+                  </li>
+                  <li>
+                    <strong className="text-[#1A1816]">۲. غنی‌سازی ناشناس دانش فنی:</strong>{' '}
+                    داده‌های فنی پس از حذف کامل اطلاعات شخصی، تماس، پلاک و شاسی برای ارتقای دانش مرجع استفاده می‌شوند.
+                  </li>
+                  <li>
+                    <strong className="text-[#1A1816]">۳. مدیریت امن فایل‌های WinOLS و ECU:</strong>{' '}
+                    فایل‌های <span className="font-mono">.ols / .kp</span> با متادیتای خودرو و ECU در پوشه‌های دسته‌بندی‌شده Google Drive آرشیو می‌شوند و باینری‌های خام{' '}
+                    <span className="font-mono">.bin / .ori / .mod</span> صرفاً در حافظه تحلیل و پاک‌سازی می‌گردند.
+                  </li>
+                </ul>
+              </div>
+
               <p className="text-[11px] text-center text-[#78716C] leading-5">
-                در حالت مهمان، نشست اختصاصی و ایزوله برای شما ساخته می‌شود و تمامی امکانات تدوین، تاریخچه تغییرات و پیش‌نمایش چاپ A4 بلافاصله در دسترس است.
+                در حالت مهمان نیز می‌توانید فایل تخصصی ارسال کنید، کتابخانه مرجع و فایل‌های PDF/Drive را مرور نمایید و امتیاز مشارکت بگیرید.
               </p>
             </div>
           </div>
@@ -191,7 +217,7 @@ export const AuthGate: React.FC = () => {
       </main>
 
       <footer className="max-w-5xl w-full mx-auto border-t border-[#E5E2DC] pt-4 text-center text-xs text-[#78716C]">
-        خروجی استاندارد مایکروسافت ورد (.docx) · پیش‌نمایش چاپ A4 · راست‌چین کامل · فونت وزیر مدیوم
+        پلتفرم مشارکتی دانش و دیتابیس مرجع خودرو · ۶ جلد مرجع · WinOLS 2.24 (.ols/.kp) · یکپارچه با Google Drive، Docs و Sheets
       </footer>
     </div>
   );

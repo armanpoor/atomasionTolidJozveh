@@ -1,5 +1,5 @@
-import { SourceFileFormat } from './bookTypes';
-import { toPersianDigits } from './formatParsers';
+import type { SourceFileFormat } from './bookTypes.ts';
+import { toPersianDigits } from './formatParsers.ts';
 
 export const SUPPORTED_UPLOAD_EXTENSIONS = [
   '.docx',

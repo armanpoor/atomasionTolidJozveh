@@ -1,4 +1,4 @@
-import { CalloutVariant } from './bookTypes.ts';
+import type { CalloutVariant } from './bookTypes.ts';
 
 export interface CalloutThemeSpec {
   variant: CalloutVariant;

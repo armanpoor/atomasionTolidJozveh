@@ -19,6 +19,21 @@ import { issueGuestSession } from './src/server/guestSession.ts';
 import { getOrCreateUser } from './src/db/repository.ts';
 import { resolveServerBindConfig } from './src/server/serverBindConfig.ts';
 import { requireAuth } from './src/middleware/auth.ts';
+import { buildUniversalSystemPromptBlock } from './src/lib/universalSystemPrompt.ts';
+import {
+  createAuthCapabilitiesRouter,
+  createAutomotiveGatekeeperRouter,
+  createMasterEncyclopediaAdminRouter,
+  registerMasterEncyclopediaWorkerProcessor,
+} from './src/server/masterEncyclopediaRoutes.ts';
+import {
+  startMasterIngestWorker,
+  stopMasterIngestWorker,
+} from './src/server/masterIngestWorker.ts';
+import { runEncyclopediaIsolated } from './src/lib/masterEncyclopedia/featureFlag.ts';
+import { createCollaborationRouter } from './src/server/collaborationRoutes.ts';
+import { requirePersonalOutputEnabled } from './src/middleware/personalOutputGuard.ts';
+import { checkGuestUploadRateLimit } from './src/lib/masterEncyclopedia/automotiveGatekeeper.ts';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -150,8 +165,20 @@ async function startServer() {
   const app = express();
   app.use(express.json({ limit: '30mb' }));
 
-  app.post('/api/auth/guest', async (_req, res) => {
+  app.post('/api/auth/guest', async (req, res) => {
     try {
+      const forwardedFor = typeof req.headers['x-forwarded-for'] === 'string'
+        ? req.headers['x-forwarded-for'].split(',')[0]?.trim()
+        : '';
+      const clientIp = forwardedFor || req.socket.remoteAddress || 'unknown';
+      const rate = checkGuestUploadRateLimit(`guest-session-ip:${clientIp}`, 30, 60 * 60 * 1000);
+      if (!rate.allowed) {
+        res.status(429).json({
+          error: `تعداد درخواست ایجاد نشست مهمان بیش از حد مجاز است. لطفاً پس از ${rate.retryAfterSeconds} ثانیه دوباره تلاش کنید.`,
+        });
+        return;
+      }
+
       const session = issueGuestSession();
       await getOrCreateUser(session.uid, session.email, session.displayName, null);
       res.status(201).json(session);
@@ -161,6 +188,14 @@ async function startServer() {
     }
   });
 
+  app.get('/healthz', (_req, res) => {
+    res.status(200).json({ ok: true });
+  });
+
+  app.use('/api/auth', createAuthCapabilitiesRouter());
+  app.use('/api/automotive', createAutomotiveGatekeeperRouter());
+  app.use('/api/admin/encyclopedia', createMasterEncyclopediaAdminRouter());
+  app.use('/api/collab', createCollaborationRouter());
   app.use('/api/projects', createProjectRouter());
 
   app.get('/api/ai/status', (_req, res) => {
@@ -183,7 +218,7 @@ async function startServer() {
     });
   });
 
-  app.post('/api/ai/analyze', requireAuth, async (req, res) => {
+  app.post('/api/ai/analyze', requireAuth, requirePersonalOutputEnabled, async (req, res) => {
     try {
       const body = req.body as {
         model?: string;
@@ -234,11 +269,12 @@ async function startServer() {
       };
 
       const systemInstruction = [
-        'شما یک سردبیر ارشد فنی و معمار مستندات فارسی هستید.',
+        'شما یک سردبیر ارشد فنی و معمار کتاب‌های آموزشی فارسی هستید.',
         'وظیفه شما تحلیل فهرست بخش‌های یک یا چند فایل ورودی و ارائه طرح یکپارچه‌سازی بدون حذف هیچ مفهوم علمی یا فنی است.',
-        'قوانین قطعی:',
-        '۱. تمام خروجی‌ها باید به زبان فارسی استاندارد، روان و با نیم‌فاصله صحیح باشد.',
-        '۲. هر sectionId موجود در ورودی باید دقیقاً در یکی از فصل‌های thematicChapters قرار گیرد تا هیچ مفهومی حذف نشود.',
+        buildUniversalSystemPromptBlock({ mode: 'analysis' }),
+        'قوانین قطعی ساختار خروجی:',
+        '۱. تمام خروجی‌ها باید به زبان فارسی رسمی، شیرین، روان، بدون کلمات قلمبه‌سلمبه و با نیم‌فاصله صحیح باشد.',
+        '۲. هر sectionId موجود در ورودی باید دقیقاً در یکی از فصل‌های thematicChapters قرار گیرد تا هیچ مفهومی حذف نشود و ترتیب فصل‌ها از پیش‌نیازهای پایه (شروع از صفر) به مباحث پیشرفته باشد.',
         '۳. اگر موضوع واحدی به شکل پراکنده در چند فایل یا چند بخش تکرار شده، آن‌ها را در یک فصل موضوعی منسجم تجمیع کرده و در semanticDuplicates گزارش دهید.',
         allowTables
           ? '۴. فقط در صورت وجود داده‌های مقایسه‌ای یا پارامتری واقعی در متن، ۲ تا ۵ جدول خلاصه/مقایسه‌ای (generatedTables) بدون جعل عدد یا آدرس هگز تولید کنید.'
@@ -286,16 +322,18 @@ async function startServer() {
       res.json({
         ok: true,
         model: result.modelUsed,
-        thinkingLevel: rawLevel,
+        thinkingLevel: resolvedLevel,
         analyzedAt: new Date().toISOString(),
         analysis: parsed,
       });
     } catch (err) {
-      const message = err instanceof Error ? err.message : 'خطای ناشناخته در ارتباط با سرویس هوش مصنوعی.';
+      const message = err instanceof Error ? err.message : '';
       const status = (err as { status?: number })?.status;
+      console.error('[server] POST /api/ai/analyze error:', err);
       if (status === 403 || status === 400 || message.includes('API_KEY')) {
         res.status(status === 403 ? 403 : 400).json({
-          error: `خطای احراز هویت یا کلید API هوش مصنوعی: ${message} — لطفاً کلید API را در بخش Settings > Secrets بررسی کنید.`,
+          error:
+            'خطای احراز هویت یا پیکربندی کلید API هوش مصنوعی — لطفاً تنظیمات کلید API را در بخش Settings > Secrets بررسی کنید.',
         });
         return;
       }
@@ -306,7 +344,7 @@ async function startServer() {
         return;
       }
       res.status(503).json({
-        error: message,
+        error: 'سرویس تحلیل هوشمند موقتاً در دسترس نیست. لطفاً چند لحظه بعد دوباره تلاش کنید.',
       });
     }
   });
@@ -315,16 +353,20 @@ async function startServer() {
   const server = http.createServer(app);
   attachLiveVoiceWebSocket(server);
 
+  let viteServer: { close: () => Promise<void> } | null = null;
+
   if (!isProd) {
     const { createServer: createViteServer } = await import('vite');
+    const hmrDisabled = disableHmr || process.env.ENABLE_HMR !== 'true';
     const vite = await createViteServer({
       server: {
         middlewareMode: true,
-        hmr: disableHmr ? false : { server },
-        watch: disableHmr ? null : undefined,
+        hmr: hmrDisabled ? false : true,
+        watch: hmrDisabled ? null : undefined,
       },
       appType: 'spa',
     });
+    viteServer = vite;
     app.use(vite.middlewares);
   } else {
     const distPath = path.resolve(__dirname, 'dist');
@@ -339,15 +381,44 @@ async function startServer() {
     process.exit(1);
   });
 
+  let shuttingDown = false;
   const shutdown = () => {
-    server.close(() => process.exit(0));
-    setTimeout(() => process.exit(0), 2000).unref();
+    if (shuttingDown) return;
+    shuttingDown = true;
+    stopMasterIngestWorker();
+    const forceTimer = setTimeout(() => process.exit(0), 2000);
+    forceTimer.unref();
+    Promise.resolve(viteServer?.close())
+      .catch(() => undefined)
+      .finally(() => {
+        server.close(() => process.exit(0));
+      });
   };
   process.once('SIGTERM', shutdown);
   process.once('SIGINT', shutdown);
 
+  process.on('unhandledRejection', (reason) => {
+    console.error('[server] Unhandled promise rejection (kept alive):', reason);
+  });
+  process.on('uncaughtException', (err) => {
+    console.error('[server] Uncaught exception:', err);
+    if ((err as NodeJS.ErrnoException)?.code === 'EADDRINUSE') {
+      process.exit(1);
+    }
+  });
+
   server.listen(port, host, () => {
     console.log(`Server listening on http://${host}:${port}`);
+    // Initialize Master Encyclopedia background worker after HTTP server is ready
+    void runEncyclopediaIsolated(
+      'worker-bootstrap',
+      async () => {
+        registerMasterEncyclopediaWorkerProcessor();
+        startMasterIngestWorker(15000);
+        return true;
+      },
+      false
+    );
   });
 }
 

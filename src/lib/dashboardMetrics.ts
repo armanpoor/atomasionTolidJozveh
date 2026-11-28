@@ -3,7 +3,7 @@ import { getGoogleModelMeta } from './aiProviderConfig.ts';
 import {
   estimateWordPagesFromTokens,
   extractAiUsageFromCheckpoint,
-  QuotaStatusLevel,
+  type QuotaStatusLevel,
 } from './aiUsageMetrics.ts';
 import type { BookWorkflowStageId } from './bookWorkflow.ts';
 

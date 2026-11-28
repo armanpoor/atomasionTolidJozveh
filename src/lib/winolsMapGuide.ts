@@ -1,5 +1,6 @@
 import type { ContentUnitDto, OutlineNodeDto, ParsedBook, SourceFileDto, TableBlock } from './bookTypes.ts';
 import { toAsciiDigits, toPersianDigits } from './formatParsers.ts';
+import { buildUniversalSystemPromptBlock } from './universalSystemPrompt.ts';
 
 // ============================================================================
 // PART 1: BOUNDED AI EDITORIAL POLICY (REWRITE LEVEL + TONE + CUSTOM PROMPT)
@@ -108,6 +109,12 @@ export const QUICK_CUSTOM_PROMPT_PRESETS: Array<{
     promptText:
       'در پایان هر فصل یک جدول جمع‌بندی سریع شامل نام نقشه، محدوده RPM/بار هدف در WinOLS و مقدار تغییر مجاز استوک در برابر استیج ۱ تولید کن.',
   },
+  {
+    id: 'zero_to_hero_book',
+    labelFa: 'کتاب آموزشی از صفر (رسمی و شیرین)',
+    promptText:
+      'کتاب را طوری تدوین کن که خواننده بدون هیچ پیش‌زمینه‌ای از صفرِ صفر و پله‌پله تا سطح پیشرفته یاد بگیرد؛ لحن رسمی اما شیرین، ساده و بدون کلمات قلمبه‌سلمبه باشد و مفاهیم کلیدی با مثال روزمره، توضیح ساده، فرمول با مثال عددی و جدول/باکس آموزشی شفاف شوند.',
+  },
 ];
 
 const HARD_TECHNICAL_FREEZE_CLAUSE = [
@@ -180,7 +187,13 @@ export function buildEditorialSystemDirective(
       'لحن خروجی: چکیده و مرجع سریع کارگاه. از حاشیه‌روی پرهیز کن، اطلاعات را فشرده، عددی و جدولی ارائه بده تا تیونر در چند ثانیه مقدار و محدوده تغییر را پیدا کند.',
   };
 
+  const universalRulesBlock = buildUniversalSystemPromptBlock({
+    mode: 'compact',
+    respectZeroTouch: cfg.aiRewriteLevel === 'strict_zero_touch',
+  });
+
   const sections = [
+    universalRulesBlock,
     levelDirectiveMap[cfg.aiRewriteLevel],
     toneDirectiveMap[cfg.outputTone],
     HARD_TECHNICAL_FREEZE_CLAUSE,

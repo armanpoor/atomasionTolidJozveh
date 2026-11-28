@@ -13,6 +13,11 @@ import type {
   TableBlock,
   VolumeNode,
 } from './bookTypes.ts';
+import { scrubRawSourceArtifacts } from './universalSystemPrompt.ts';
+import {
+  resolveUploadedMediaUrl,
+  stitchAndEnrichParsedBookTables,
+} from './tableStitcherAndConsolidator.ts';
 
 const PERSIAN_DIGITS = '۰۱۲۳۴۵۶۷۸۹';
 
@@ -170,10 +175,8 @@ export function extractFootnoteTermKey(rawText: string): string {
  * into structured Markdown headings when the input file has few or no explicit `#` headings.
  */
 export function preprocessMessyRemapText(rawContent: string): string {
-  const normalized = rawContent
-    .replace(/^\uFEFF/, '')
-    .replace(/\r\n/g, '\n')
-    .replace(/\r/g, '\n')
+  const scrubbed = scrubRawSourceArtifacts(rawContent);
+  const normalized = scrubbed
     // Strip invisible directional junk while strictly keeping Persian ZWNJ (\u200c)
     .replace(/[\u200e\u200f\u202a-\u202e\u2066-\u2069]/g, '')
     // Collapse 4+ blank lines into 2
@@ -193,39 +196,45 @@ export function preprocessMessyRemapText(rawContent: string): string {
     return normalized;
   }
 
+  const PERSIAN_ORDINAL_OR_NUM =
+    '(?:[۰-۹0-9]+|صفر|اول|یکم|دوم|سوم|چهارم|پنجم|ششم|هفتم|هشتم|نهم|دهم|یازدهم|دوازدهم|سیزدهم|چهاردهم|پانزدهم|شانزدهم|هفدهم|هجدهم|نوزدهم|بیستم)';
+  const h2ToH1Re = new RegExp(`^#{2,4}\\s+(?:درس|فصل|جلسه|فاز)\\s+${PERSIAN_ORDINAL_OR_NUM}`);
+  const plainHeadingRe = new RegExp(
+    `^(?:\\*\\*)?(?:درس|فصل|جلسه|فاز|بخش)\\s+${PERSIAN_ORDINAL_OR_NUM}(?:\\s*[:：\\-—–(]|\\s+[\\u0600-\\u06FFA-Za-z])`
+  );
+  const strictColonHeadingRe = new RegExp(
+    `^(?:\\*\\*)?(?:درس|فصل|جلسه|فاز)\\s+${PERSIAN_ORDINAL_OR_NUM}\\s*[:：\\-—–]`
+  );
+
   const out: string[] = [];
   for (let i = 0; i < lines.length; i++) {
     const raw = lines[i];
     const trimmed = raw.trim();
 
     // Promote "### درس 8 (فصل هشتم ...)" to H1 when file has zero H1 headings (like real multi-part split notebooks)
-    if (
-      explicitH1Count === 0 &&
-      /^#{2,4}\s+(?:درس|فصل|جلسه)\s+[۰-۹0-9]+/.test(trimmed) &&
-      trimmed.length <= 220
-    ) {
+    if (explicitH1Count === 0 && h2ToH1Re.test(trimmed) && trimmed.length <= 220) {
       out.push(`# ${trimmed.replace(/^#{2,4}\s+/, '')}`);
       continue;
     }
 
-    // Promote plain unstructured chapter/lesson lines in messy TXT/Word notes (not inside tables or bullet lists)
+    // Promote plain unstructured chapter/lesson/phase lines in messy TXT/Word/Pandoc notes (not inside tables or bullet lists)
     if (
       explicitH1Count === 0 &&
       !trimmed.startsWith('|') &&
       !trimmed.startsWith('#') &&
       !trimmed.startsWith('-') &&
-      !trimmed.startsWith('*') &&
+      !trimmed.startsWith('* ') &&
       trimmed.length >= 6 &&
-      trimmed.length <= 140 &&
-      /^(?:\*\*)?(?:درس|فصل|جلسه|بخش)\s+[۰-۹0-9]+(?:\s*[:：\-—–(]|\s+[\u0600-\u06FFA-Za-z])/.test(trimmed) &&
+      trimmed.length <= 160 &&
+      plainHeadingRe.test(trimmed) &&
       !/[.؟!]$/.test(trimmed)
     ) {
       const prevEmpty =
-        i === 0 ||
-        lines[i - 1].trim() === '' ||
-        /^(?:\*\*)?(?:درس|فصل|جلسه)\s+[۰-۹0-9]+\s*[:：\-—–]/.test(trimmed);
+        i === 0 || lines[i - 1].trim() === '' || strictColonHeadingRe.test(trimmed);
       if (prevEmpty) {
-        out.push(`# ${trimmed.replace(/^\*\*|\*\*$/g, '').trim()}`);
+        const cleanTitle = trimmed.replace(/^\*\*|\*\*$/g, '').trim();
+        const isSubSection = /^(?:\*\*)?بخش\s+/.test(trimmed);
+        out.push(`${isSubSection ? '##' : '#'} ${cleanTitle}`);
         continue;
       }
     }
@@ -621,6 +630,30 @@ export function parseMarkdownDocument(rawContent: string, fileName: string): Par
       continue;
     }
 
+    // Markdown Image: ![alt](src) optionally followed by inline caption text (e.g. ![](j34_files/media/image1.png)جدول جرقه قبل از تغییرات)
+    const mdImgMatch = line.match(/^!\[([^\]]*)\]\(([^)]+)\)\s*(.*)$/);
+    if (mdImgMatch) {
+      const altText = mdImgMatch[1].trim();
+      const rawSrc = mdImgMatch[2].trim();
+      const trailingCaption = mdImgMatch[3].trim();
+      const resolvedUrl = resolveUploadedMediaUrl(rawSrc);
+      const caption =
+        trailingCaption ||
+        altText ||
+        `تصویر جدول کالیبراسیون (${rawSrc.split('/').pop() || 'تصویر فنی'})`;
+      pushBlock({
+        type: 'image',
+        id: nextId('img'),
+        dataUrl: resolvedUrl,
+        mimeType: resolvedUrl.toLowerCase().endsWith('.jpg') || resolvedUrl.toLowerCase().endsWith('.jpeg')
+          ? 'image/jpeg'
+          : 'image/png',
+        caption,
+      });
+      i++;
+      continue;
+    }
+
     // Figure placeholder: [تصویر مهندسی: ...]
     const figMatch = line.match(/^\[تصویر[^\]]*:\s*([^\]]+)\]$/);
     if (figMatch) {
@@ -670,6 +703,9 @@ export function parseMarkdownDocument(rawContent: string, fileName: string): Par
     i++;
   }
 
+  // Automatically stitch broken multi-fragment tables, merge wrapped continuation rows, normalize RTL columns, and enrich Valeo J34 image tables
+  stitchAndEnrichParsedBookTables(chapters);
+
   return {
     title: bookTitle,
     subtitle: bookSubtitle,
@@ -691,14 +727,22 @@ export function parseMarkdownDocument(rawContent: string, fileName: string): Par
 // ============================================================================
 
 function decodeXmlEntities(str: string): string {
+  const safeFromCodePoint = (cp: number, fallback: string): string => {
+    if (!Number.isInteger(cp) || cp < 0 || cp > 0x10ffff) return fallback;
+    try {
+      return String.fromCodePoint(cp);
+    } catch {
+      return fallback;
+    }
+  };
   return str
-    .replace(/&amp;/g, '&')
+    .replace(/&#(\d+);/g, (match, num) => safeFromCodePoint(Number.parseInt(num, 10), match))
+    .replace(/&#x([0-9a-fA-F]+);/g, (match, hex) => safeFromCodePoint(Number.parseInt(hex, 16), match))
     .replace(/&lt;/g, '<')
     .replace(/&gt;/g, '>')
     .replace(/&quot;/g, '"')
     .replace(/&apos;/g, "'")
-    .replace(/&#(\d+);/g, (_, num) => String.fromCharCode(Number(num)))
-    .replace(/&#x([0-9a-fA-F]+);/g, (_, hex) => String.fromCharCode(parseInt(hex, 16)));
+    .replace(/&amp;/g, '&');
 }
 
 function extractTextFromWXml(xmlChunk: string, preserveInlineBold = false): string {

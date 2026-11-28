@@ -23,6 +23,10 @@ import {
 import { toAsciiDigits, toPersianDigits } from './formatParsers.ts';
 import { analyzeNumericDiscrepancies } from './numericDiscrepancyAnalyzer.ts';
 import { analyzeWinolsGoogleEnrichment, extractWinolsMapGuides } from './winolsMapGuide.ts';
+import {
+  type EntityMicroRoutingReport,
+  runStage2EntityMicroRouting,
+} from './entityMicroRouter.ts';
 
 // ============================================================================
 // DETERMINISTIC NORMALIZATION, HASHING & TOKEN SIMILARITY
@@ -715,22 +719,51 @@ function getNonNumericSkeletonTokens(sentence: string): string[] {
 }
 
 function isSentencePairGenuineConflict(sentA: string, sentB: string): boolean {
-  // 1. Key-value / equation mappings ("X = Y")
-  const mapsA = extractKeyValueMappings(sentA);
-  const mapsB = extractKeyValueMappings(sentB);
-  if (mapsA.length > 0 && mapsB.length > 0) {
-    for (const ma of mapsA) {
-      for (const mb of mapsB) {
-        if (ma.lhsNorm === mb.lhsNorm && ma.rhsNorm !== mb.rhsNorm) {
-          return true;
+  // 1. Key-value / equation mappings ("X = Y") — fast check for '=' before regex
+  if (sentA.includes('=') && sentB.includes('=')) {
+    const mapsA = extractKeyValueMappings(sentA);
+    const mapsB = extractKeyValueMappings(sentB);
+    if (mapsA.length > 0 && mapsB.length > 0) {
+      for (const ma of mapsA) {
+        for (const mb of mapsB) {
+          if (ma.lhsNorm === mb.lhsNorm && ma.rhsNorm !== mb.rhsNorm) {
+            return true;
+          }
         }
       }
+      // Both sentences are key-value mappings with completely distinct LHS keys -> complementary rows, NOT conflicts
+      return false;
     }
-    // Both sentences are key-value mappings with completely distinct LHS keys -> complementary rows, NOT conflicts
+  }
+
+  // 2. Fast pre-filter: require strong non-numeric subject/predicate alignment (>= 4 shared tokens & Jaccard >= 0.72)
+  // before running expensive Latin/ECU/measurement regexes!
+  const skelA = getNonNumericSkeletonTokens(sentA);
+  const skelB = getNonNumericSkeletonTokens(sentB);
+  if (skelA.length < 4 || skelB.length < 4) {
+    return false;
+  }
+  const skelSetA = new Set(skelA);
+  const skelSetB = new Set(skelB);
+  let sharedCount = 0;
+  for (const t of skelSetA) {
+    if (skelSetB.has(t)) sharedCount++;
+  }
+  if (sharedCount < 4) {
+    return false;
+  }
+  const unionSize = skelSetA.size + skelSetB.size - sharedCount;
+  const skelSim = unionSize === 0 ? 0 : sharedCount / unionSize;
+  if (skelSim < 0.72) {
     return false;
   }
 
-  // 2. Distinct Latin entity identifiers / letters / codes (e.g., B vs E, P0135 vs P0141)
+  // 3. Opposing / distinct operating conditions (e.g., cold vs hot, idle vs full-throttle, stock vs stage 1)
+  if (hasOpposingCondition(skelSetA, skelSetB)) {
+    return false;
+  }
+
+  // 4. Distinct Latin entity identifiers / letters / codes (e.g., B vs E, P0135 vs P0141)
   const latinA = extractLatinIdentifiers(sentA);
   const latinB = extractLatinIdentifiers(sentB);
   if (latinA.size > 0 && latinB.size > 0) {
@@ -741,7 +774,7 @@ function isSentencePairGenuineConflict(sentA: string, sentB: string): boolean {
     }
   }
 
-  // 3. Distinct entity-index tags (e.g., "پین 11" vs "پین 14", "مرحله 1" vs "مرحله 2", "عدد 11" vs "عدد 14")
+  // 5. Distinct entity-index tags (e.g., "پین 11" vs "پین 14", "مرحله 1" vs "مرحله 2", "عدد 11" vs "عدد 14")
   const idxA = extractEntityIndexTags(sentA);
   const idxB = extractEntityIndexTags(sentB);
   if (idxA.size > 0 && idxB.size > 0) {
@@ -752,27 +785,8 @@ function isSentencePairGenuineConflict(sentA: string, sentB: string): boolean {
     }
   }
 
-  // 3B. Disjoint ECU / engine platforms (e.g., Bosch ME7.4.4 vs Siemens SIM2K-241 -> never contradictory!)
+  // 5B. Disjoint ECU / engine platforms (e.g., Bosch ME7.4.4 vs Siemens SIM2K-241 -> never contradictory!)
   if (hasDisjointEcuPlatforms(sentA, sentB)) {
-    return false;
-  }
-
-  // 4. Opposing / distinct operating conditions (e.g., cold vs hot, idle vs full-throttle, stock vs stage 1)
-  const skelA = getNonNumericSkeletonTokens(sentA);
-  const skelB = getNonNumericSkeletonTokens(sentB);
-  const skelSetA = new Set(skelA);
-  const skelSetB = new Set(skelB);
-  if (hasOpposingCondition(skelSetA, skelSetB)) {
-    return false;
-  }
-
-  // 5. Require strong non-numeric subject/predicate alignment (>= 4 shared tokens & Jaccard >= 0.72)
-  let sharedCount = 0;
-  for (const t of skelSetA) {
-    if (skelSetB.has(t)) sharedCount++;
-  }
-  const skelSim = computeJaccardSimilarity(skelA, skelB);
-  if (sharedCount < 4 || skelSim < 0.72) {
     return false;
   }
 
@@ -824,8 +838,9 @@ function isSentencePairGenuineConflict(sentA: string, sentB: string): boolean {
  * (never for parallel examples, hex/decimal mapping rows, distinct conditions, or elaborations).
  */
 export function isGenuineNumericConflict(textA: string, textB: string): boolean {
-  const sentsA = splitPersianSentences(textA);
-  const sentsB = splitPersianSentences(textB);
+  if (!/[0-9۰-۹=]/.test(textA) || !/[0-9۰-۹=]/.test(textB)) return false;
+  const sentsA = splitPersianSentences(textA).filter((s) => /[0-9۰-۹=]/.test(s));
+  const sentsB = splitPersianSentences(textB).filter((s) => /[0-9۰-۹=]/.test(s));
   if (sentsA.length === 0 || sentsB.length === 0) return false;
 
   for (const sa of sentsA) {
@@ -911,6 +926,7 @@ export interface DedupPipelineOutput {
     excerptB: string;
     status: 'open';
   }>;
+  entityMicroRoutingReport?: EntityMicroRoutingReport;
 }
 
 export function runDeterministicLosslessDedup(params: {
@@ -921,8 +937,17 @@ export function runDeterministicLosslessDedup(params: {
 }): DedupPipelineOutput {
   const fileMap = new Map(params.sourceFiles.map((f) => [f.id, f]));
 
+  // Pass 0: Stage 2 Entity-Centric Micro-Routing (routes single-line ECU mentions to canonical Master ECU Clusters with origin cross-references)
+  const microRouting = runStage2EntityMicroRouting({
+    projectId: params.projectId,
+    sourceFiles: params.sourceFiles,
+    units: params.units,
+  });
+  const routedInputUnits = microRouting.routedUnits;
+  const origUnitById = new Map(params.units.map((u) => [u.id, u]));
+
   // Sort units so 'master' role files ALWAYS become canonical anchors first in master_update mode
-  const sortedUnits = [...params.units].sort((a, b) => {
+  const sortedUnits = [...routedInputUnits].sort((a, b) => {
     const fA = fileMap.get(a.sourceFileId);
     const fB = fileMap.get(b.sourceFileId);
     const rankA = fA?.fileRole === 'master' ? 0 : 1;
@@ -1338,12 +1363,23 @@ export function runDeterministicLosslessDedup(params: {
       canonicalUnitId: null,
       rawText: u.rawText,
     };
+    const orig = origUnitById.get(u.id);
+    const headingChanged = orig && orig.headingPath !== u.headingPath;
+    const textChangedByRouting = orig && orig.rawText !== u.rawText;
+    const mergedPayloadJson =
+      st.payloadJson || headingChanged || textChangedByRouting
+        ? {
+            ...(u.metadataJson || {}),
+            ...(st.payloadJson || {}),
+            headingPath: u.headingPath,
+          }
+        : undefined;
     return {
       id: u.id,
       status: st.status,
       canonicalUnitId: st.canonicalUnitId,
       rawText: st.rawText,
-      ...(st.payloadJson ? { payloadJson: st.payloadJson } : {}),
+      ...(mergedPayloadJson ? { payloadJson: mergedPayloadJson } : {}),
     };
   });
 
@@ -1351,6 +1387,7 @@ export function runDeterministicLosslessDedup(params: {
     unitUpdates,
     clusters,
     conflicts: detectedConflicts,
+    entityMicroRoutingReport: microRouting.report,
   };
 }
 
@@ -1513,6 +1550,19 @@ export function buildInitialOutline(params: {
     }
 
     const REMAP_DOMAIN_TOPICS: readonly DomainTopicRule[] = [
+      // Canonical Master ECU Sections & Dyno Master Section (each isolated into its own dedicated Master Section)
+      { key: 'master_dyno', pedagogicalRank: 85, pattern: /^مرجع\s*جامع\s*دینامومتر/i },
+      { key: 'master_ecu_siemens', pedagogicalRank: 100, pattern: /^بخش\s*جامع\s*ایسیوهای\s*زیمنس/i },
+      { key: 'master_ecu_bosch', pedagogicalRank: 110, pattern: /^بخش\s*جامع\s*ایسیوهای\s*بوش/i },
+      { key: 'master_ecu_delphi', pedagogicalRank: 120, pattern: /^بخش\s*جامع\s*ایسیوهای\s*دلفی/i },
+      { key: 'master_ecu_valeo', pedagogicalRank: 130, pattern: /^بخش\s*جامع\s*ایسیوهای\s*والیو/i },
+      { key: 'master_ecu_sagem', pedagogicalRank: 140, pattern: /^بخش\s*جامع\s*ایسیوهای\s*ساژم/i },
+      { key: 'master_ecu_kesens', pedagogicalRank: 150, pattern: /^بخش\s*جامع\s*ایسیوهای\s*کیسنس/i },
+      { key: 'master_ecu_ezu', pedagogicalRank: 160, pattern: /^بخش\s*جامع\s*ایسیوهای\s*ایزی‌یو/i },
+      { key: 'master_ecu_gharb', pedagogicalRank: 170, pattern: /^بخش\s*جامع\s*ایسیوهای\s*غرب\s*استیل/i },
+      { key: 'master_ecu_acs', pedagogicalRank: 180, pattern: /^بخش\s*جامع\s*ایسیوهای\s*ای‌سی‌اس/i },
+      { key: 'master_ecu_kefico', pedagogicalRank: 190, pattern: /^بخش\s*جامع\s*ایسیوهای\s*کفیکو/i },
+      // General Remap Subsystem Rules (Pedagogical Rank 10..80)
       { key: 'ecu_basics', pedagogicalRank: 10, pattern: /(?:مقدمه|مبانی|ساختار\s*ایسیو|سخت.?افزار|پین.?اوت|بایوس|پروگرامر|بک.?آپ|کپچر|تبدیل\s*(?:هگز|دسیمال|باینری)|مفاهیم\s*پایه)/i },
       { key: 'winols_axes', pedagogicalRank: 20, pattern: /(?:وینولز|winols|آدرس.?یابی|داموس|damos|a2l|محور|axis|fce6|ضریب|factor|offset|آفست|هیگزا|16.?bit|8.?bit|تبدیل\s*داده)/i },
       { key: 'airflow_load', pedagogicalRank: 30, pattern: /(?:هوا|بار\s*موتور|load|دریچه\s*گاز|پدال|kfped|kfmiop|kfmirl|ve|راندمان\s*حجمی|مپ\s*سنسور|ماف|maf|توربو|بوست|ldrxn)/i },
@@ -1817,7 +1867,24 @@ export function assembleFinalBookAndAudit(params: {
     const sections: SectionNode[] = [];
     let secSeq = 0;
 
-    for (const [secTitle, secUnits] of sectionBuckets.entries()) {
+    // Sort sub-chapters cleanly when numbered (۱., ۲., ۳. or فاز اول..پنجم) so multi-file ECU sub-chapters appear in chronological generation order
+    const extractSectionSortOrder = (title: string, fallbackIdx: number): number => {
+      const ascii = toAsciiDigits(title.trim());
+      const numMatch = ascii.match(/^(\d+)[.،\-–)]/);
+      if (numMatch) return Number(numMatch[1]);
+      if (/^فاز\s*اول/.test(ascii)) return 1;
+      if (/^فاز\s*دوم/.test(ascii)) return 2;
+      if (/^فاز\s*سوم/.test(ascii)) return 3;
+      if (/^فاز\s*چهارم/.test(ascii)) return 4;
+      if (/^فاز\s*پنجم/.test(ascii)) return 5;
+      return 100 + fallbackIdx;
+    };
+    const orderedSectionEntries = Array.from(sectionBuckets.entries())
+      .map((entry, idx) => ({ entry, sortKey: extractSectionSortOrder(entry[0], idx), origIdx: idx }))
+      .sort((a, b) => (a.sortKey !== b.sortKey ? a.sortKey - b.sortKey : a.origIdx - b.origIdx))
+      .map((x) => x.entry);
+
+    for (const [secTitle, secUnits] of orderedSectionEntries) {
       secSeq += 1;
       const blocks = secUnits.map(toContentBlock);
       const secFiles = Array.from(
@@ -2158,6 +2225,13 @@ export function assembleFinalBookAndAudit(params: {
     outlineNodes: params.outlineNodes,
   });
 
+  // Compute Entity-Centric Micro-Routing Report for Stage 2 & Stage 5 Audit Views
+  const entityMicroRoutingReport = runStage2EntityMicroRouting({
+    projectId: params.projectId,
+    sourceFiles: params.sourceFiles,
+    units: params.units,
+  }).report;
+
   return {
     book,
     audit: {
@@ -2178,6 +2252,7 @@ export function assembleFinalBookAndAudit(params: {
         numericDiscrepancyReport,
         winolsGuideReport,
         winolsGoogleCoverage,
+        entityMicroRoutingReport,
         perFileCoverage: params.sourceFiles.map((f) => {
           const fUnits = params.units.filter((u) => u.sourceFileId === f.id);
           const fCovered = fUnits.filter(

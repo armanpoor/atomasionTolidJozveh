@@ -234,7 +234,8 @@ export type Layer1IssueKind =
   | 'broken_cross_reference'
   | 'cross_section_duplication'
   | 'source_drift_detected'
-  | 'output_truncated';
+  | 'output_truncated'
+  | 'physical_engineering_anomaly';
 
 export interface Layer1Issue {
   id: string;

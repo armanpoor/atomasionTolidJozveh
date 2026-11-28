@@ -1,4 +1,4 @@
-import {
+import type {
   AssistantChatResponse,
   ChatProposal,
   DeepReviewResponse,
@@ -8,35 +8,47 @@ import {
   SourceFileFormat,
   ValidationDomain,
   WorkflowMode,
-} from './bookTypes';
+} from './bookTypes.ts';
 import {
-  AiProviderConfig,
-  AiProviderType,
-  AiQuotaProbeResponse,
-  DiscoveredProviderModel,
+  type AiProviderConfig,
+  type AiProviderType,
+  type AiQuotaProbeResponse,
+  type DiscoveredProviderModel,
   getActiveProviderCredentials,
   getEffectiveAudioRoute,
   getEffectiveTierRouting,
   getEffectiveWebSearchRoute,
   normalizeKeyAuthMode,
-} from './aiProviderConfig';
+} from './aiProviderConfig.ts';
 import {
-  DeepReviewProgressEvent,
+  type DeepReviewProgressEvent,
   normalizeDeepReviewReport,
   parseNdjsonBuffer,
-} from './deepReviewStream';
-import type { ProjectRevisionDto } from './changeLogUtils';
+} from './deepReviewStream.ts';
+import type { ProjectRevisionDto } from './changeLogUtils.ts';
 import type {
   Stage5ComparativePieItem,
   Stage5QualityMetrics,
-} from './stage5QualityMetrics';
+} from './stage5QualityMetrics.ts';
 import type {
   GlossaryTermEntry,
   HarnessState,
   Layer1AuditResult,
   Layer2AuditResult,
   SemanticBlock,
-} from './harness/types';
+} from './harness/types.ts';
+import type {
+  AccessLevel,
+  AiTokenUsageLedger,
+  ChapterCommentItem,
+  KnowledgeWishlistItem,
+  LeaderboardEntry,
+  PlatformSettingsRecord,
+  TeamContributionRecord,
+  TeamUploadedAssetRecord,
+  VolumeGoogleDocLink,
+} from './collaboration/platformTypes.ts';
+import type { ProjectHealthMonitorReport } from './masterEncyclopedia/smartClusteringAndHealthMonitor.ts';
 
 function encodeUtf8Base64(input: string): string {
   try {
@@ -327,7 +339,17 @@ export class ApiClient {
     }
   ) {
     return this.request<{
-      ingested: Array<{ fileName: string; unitCount: number; wordCount: number }>;
+      ingested: Array<{
+        fileName: string;
+        unitCount: number;
+        wordCount: number;
+        classification?: 'pure_automotive' | 'mixed_hybrid_pruned' | 'rejected_non_automotive';
+        prunedOffTopicSegmentsCount?: number;
+        keptAutomotiveSegmentsCount?: number;
+        estimatedTokensSaved?: number;
+        tokenSavingsPercent?: number;
+        preprocessSummaryFa?: string;
+      }>;
       bundle: ProjectBundleDto;
     }>(`/api/projects/${encodeURIComponent(projectId)}/ingest`, {
       method: 'POST',
@@ -340,6 +362,16 @@ export class ApiClient {
       `/api/projects/${encodeURIComponent(projectId)}/dedup`,
       { method: 'POST', body: JSON.stringify({}) }
     );
+  }
+
+  ingestWorkspaceQueue(projectId: string) {
+    return this.request<{
+      ingested: Array<{ fileName: string; unitCount: number; wordCount: number }>;
+      bundle: ProjectBundleDto;
+    }>(`/api/projects/${encodeURIComponent(projectId)}/ingest-workspace-queue`, {
+      method: 'POST',
+      body: JSON.stringify({}),
+    });
   }
 
   saveOutline(
@@ -364,6 +396,22 @@ export class ApiClient {
       {
         method: 'PUT',
         body: JSON.stringify(payload),
+      }
+    );
+  }
+
+  generateQuickDraft(
+    projectId: string,
+    payload?: {
+      strategy?: 'heading_tree' | 'by_source_file';
+      openStage4Preview?: boolean;
+    }
+  ) {
+    return this.request<ProjectBundleDto>(
+      `/api/projects/${encodeURIComponent(projectId)}/quick-draft`,
+      {
+        method: 'POST',
+        body: JSON.stringify(payload || {}),
       }
     );
   }
@@ -716,5 +764,720 @@ export class ApiClient {
       method: 'POST',
       body: JSON.stringify({}),
     });
+  }
+
+  // ============================================================================
+  // MASTER AUTOMOTIVE ENCYCLOPEDIA CAPABILITIES & OWNER ADMIN ENDPOINTS
+  // ============================================================================
+
+  getAuthCapabilities() {
+    return this.request<{
+      masterEncyclopediaEnabled: boolean;
+      canManageEncyclopedia: boolean;
+    }>('/api/auth/capabilities');
+  }
+
+  getMasterEncyclopediaOverview() {
+    return this.request<{
+      summary: {
+        volumesCount: number;
+        publishedVolumesCount: number;
+        draftProposalsCount: number;
+        chaptersCount: number;
+        verifiedUnitsCount: number;
+        stagingUnitsCount: number;
+        openConflictsCount: number;
+        canonicalEntitiesCount: number;
+        totalWords: number;
+        totalEstimatedPages: number;
+        queuedJobsCount: number;
+        dlqJobsCount: number;
+      };
+      domainBreakdown: Array<{
+        domainId: string;
+        shortLabelFa: string;
+        unitCount: number;
+      }>;
+      volumes: Array<{
+        id: string;
+        volumeNumber: number;
+        title: string;
+        automotiveDomain: string;
+        wordCount: number;
+        estimatedPages: number;
+        status: string;
+        splitThresholdPages: number;
+        splitThresholdWords: number;
+        description: string | null;
+        chapters: Array<{
+          id: string;
+          volumeId: string;
+          title: string;
+          pedagogicalRank: number;
+          orderIndex: number;
+          wordCount: number;
+          unitCount: number;
+        }>;
+      }>;
+      recentLogsCount: number;
+    }>('/api/admin/encyclopedia/overview');
+  }
+
+  getMasterEncyclopediaJobsAndLogs() {
+    return this.request<{
+      jobs: Array<{
+        id: string;
+        ingestBatchId: string;
+        sourceUploadHash: string;
+        sourceFileName: string;
+        sourceFormat: string;
+        submittedByRole: string;
+        status: string;
+        attempts: number;
+        maxAttempts: number;
+        lastError: string | null;
+        createdAt: string;
+      }>;
+      logs: Array<{
+        id: string;
+        jobId: string;
+        ingestBatchId: string;
+        sourceUploadHash: string;
+        sourceFileName: string;
+        newUnitsCount: number;
+        duplicateUnitsCount: number;
+        mergedUnitsCount: number;
+        conflictsCount: number;
+        stagingUnitsCount: number;
+        durationMs: number;
+        status: string;
+        summaryFa: string | null;
+        createdAt: string;
+      }>;
+    }>('/api/admin/encyclopedia/jobs-and-logs');
+  }
+
+  rollbackMasterBatch(ingestBatchId: string) {
+    return this.request<{
+      ok: boolean;
+      revertedUnits: number;
+      deletedUnits: number;
+      removedConflicts: number;
+    }>('/api/admin/encyclopedia/rollback-batch', {
+      method: 'POST',
+      body: JSON.stringify({ ingestBatchId }),
+    });
+  }
+
+  takedownMasterSource(sourceUploadHash: string) {
+    return this.request<{
+      ok: boolean;
+      deletedUnits: number;
+      sanitizedCorroborations: number;
+      removedConflicts: number;
+    }>('/api/admin/encyclopedia/takedown', {
+      method: 'POST',
+      body: JSON.stringify({ sourceUploadHash }),
+    });
+  }
+
+  getMasterStaging() {
+    return this.request<{
+      stagingUnits: Array<{
+        id: string;
+        volumeId: string;
+        chapterId: string;
+        cleanText: string;
+        domainTag: string;
+        canonicalEntityId: string | null;
+        corroborationCount: number;
+        evidenceTier: string;
+        sourceUploadHash: string;
+        createdAt: string;
+      }>;
+      draftProposals: Array<{
+        id: string;
+        volumeNumber: number;
+        title: string;
+        automotiveDomain: string;
+        description: string | null;
+      }>;
+    }>('/api/admin/encyclopedia/staging');
+  }
+
+  moderateMasterStagingUnit(unitId: string, action: 'approve' | 'reject' | 'deprecate') {
+    return this.request<{ ok: boolean }>(
+      `/api/admin/encyclopedia/staging/units/${encodeURIComponent(unitId)}`,
+      {
+        method: 'POST',
+        body: JSON.stringify({ action }),
+      }
+    );
+  }
+
+  approveMasterVolumeProposal(volumeId: string) {
+    return this.request<{ ok: boolean }>(
+      `/api/admin/encyclopedia/volumes/${encodeURIComponent(volumeId)}/approve`,
+      {
+        method: 'POST',
+        body: JSON.stringify({}),
+      }
+    );
+  }
+
+  updateMasterVolumeSettings(
+    volumeId: string,
+    payload: { title?: string; splitThresholdPages?: number; splitThresholdWords?: number }
+  ) {
+    return this.request<{ ok: boolean }>(
+      `/api/admin/encyclopedia/volumes/${encodeURIComponent(volumeId)}`,
+      {
+        method: 'PATCH',
+        body: JSON.stringify(payload),
+      }
+    );
+  }
+
+  renameMasterChapter(chapterId: string, title: string, pedagogicalRank?: number) {
+    return this.request<{ ok: boolean }>(
+      `/api/admin/encyclopedia/chapters/${encodeURIComponent(chapterId)}`,
+      {
+        method: 'PATCH',
+        body: JSON.stringify({ title, pedagogicalRank }),
+      }
+    );
+  }
+
+  moveMasterChapter(chapterId: string, targetVolumeId: string) {
+    return this.request<{ ok: boolean }>('/api/admin/encyclopedia/chapters/move', {
+      method: 'POST',
+      body: JSON.stringify({ chapterId, targetVolumeId }),
+    });
+  }
+
+  mergeMasterChapters(sourceChapterId: string, targetChapterId: string) {
+    return this.request<{ ok: boolean; mergedUnits: number }>(
+      '/api/admin/encyclopedia/chapters/merge',
+      {
+        method: 'POST',
+        body: JSON.stringify({ sourceChapterId, targetChapterId }),
+      }
+    );
+  }
+
+  getMasterConflicts(status?: string) {
+    const q = status ? `?status=${encodeURIComponent(status)}` : '';
+    return this.request<{
+      conflicts: Array<{
+        id: string;
+        existingUnitId: string;
+        conflictType: string;
+        topic: string;
+        existingExcerpt: string;
+        incomingExcerpt: string;
+        conditionContext: string | null;
+        status: string;
+        resolutionNote: string | null;
+        ingestBatchId: string;
+        sourceUploadHash: string;
+        createdAt: string;
+      }>;
+    }>(`/api/admin/encyclopedia/conflicts${q}`);
+  }
+
+  resolveMasterConflict(
+    conflictId: string,
+    payload: {
+      resolution: 'approved_existing' | 'approved_incoming' | 'merged_conditional' | 'rejected';
+      resolutionNote?: string;
+      conditionContext?: string;
+    }
+  ) {
+    return this.request<{ ok: boolean }>(
+      `/api/admin/encyclopedia/conflicts/${encodeURIComponent(conflictId)}/resolve`,
+      {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      }
+    );
+  }
+
+  runMasterKnowledgeLinter() {
+    return this.request<{
+      orphanChapters: Array<{ chapterId: string; volumeId: string; title: string }>;
+      crossVolumeConflicts: Array<{
+        entityOrToken: string;
+        volumeIds: string[];
+        unitIds: string[];
+        detailFa: string;
+      }>;
+      deprecatedUnits: Array<{ unitId: string; volumeId: string; chapterId: string }>;
+      totalActiveVerifiedUnits: number;
+      healthy: boolean;
+    }>('/api/admin/encyclopedia/linter/run', {
+      method: 'POST',
+      body: JSON.stringify({}),
+    });
+  }
+
+  importMasterMarkdown(fileName: string, markdownText: string) {
+    return this.request<{
+      ok: boolean;
+      ingestBatchId: string;
+      sourceUploadHash: string;
+      newUnitsCount: number;
+      mergedUnitsCount: number;
+      conflictsCount: number;
+      summaryFa: string;
+    }>('/api/admin/encyclopedia/import-markdown', {
+      method: 'POST',
+      body: JSON.stringify({ fileName, markdownText }),
+    });
+  }
+
+  resetMasterEncyclopedia() {
+    return this.request<{ ok: boolean; messageFa: string }>('/api/admin/encyclopedia/reset', {
+      method: 'POST',
+      body: JSON.stringify({ confirmReset: 'RESET_MASTER_ENCYCLOPEDIA' }),
+    });
+  }
+
+  async downloadMasterExport(
+    format: 'md' | 'docx' | 'csv' | 'a2l' | 'xdf' | 'json',
+    volumeId?: string
+  ): Promise<{ blob: Blob; fileName: string }> {
+    const token = await this.getToken();
+    const qs = volumeId ? `?volumeId=${encodeURIComponent(volumeId)}` : '';
+    const res = await fetch(`/api/admin/encyclopedia/export/${format}${qs}`, {
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+    });
+    if (!res.ok) {
+      let msg = `خطا در دانلود خروجی (${res.status})`;
+      try {
+        const json = (await res.json()) as { error?: string };
+        if (json.error) msg = json.error;
+      } catch {
+        // ignore parse errors
+      }
+      throw new Error(msg);
+    }
+    const blob = await res.blob();
+    const extMap: Record<typeof format, string> = {
+      md: 'master-automotive-encyclopedia.md',
+      docx: 'master-automotive-encyclopedia.docx',
+      csv: 'master-automotive-calibration.csv',
+      a2l: 'master-automotive-winols.a2l',
+      xdf: 'master-automotive-tunerpro.xdf',
+      json: 'master-calibration-spec.json',
+    };
+    return { blob, fileName: extMap[format] };
+  }
+
+  // ============================================================================
+  // COLLABORATIVE AUTOMOTIVE KNOWLEDGE PLATFORM API (/api/collab/*)
+  // ============================================================================
+
+  getCollabBootstrap() {
+    return this.request<{
+      isOwner: boolean;
+      user: { uid: string; email?: string; name?: string; isGuest: boolean };
+      enableUserPersonalOutput: boolean;
+      access: {
+        library: boolean;
+        drive: boolean;
+        docs: boolean;
+        sheets: boolean;
+        levels: {
+          library: AccessLevel;
+          drive: AccessLevel;
+          docs: AccessLevel;
+          sheets: AccessLevel;
+        };
+      };
+      workspaceConfig: {
+        driveRootFolderId: string | null;
+        driveRootFolderName: string;
+        sheetsSpreadsheetId: string | null;
+        sheetsSpreadsheetUrl: string | null;
+        sheetsTabName: string;
+      };
+      stats: {
+        volumesCount: number;
+        totalWords: number;
+        contributionsCount: number;
+        acceptedContributionsCount: number;
+        winolsAssetsCount: number;
+        openWishlistCount: number;
+        pendingSheetSyncCount: number;
+      };
+      tokenLedger?: AiTokenUsageLedger;
+    }>('/api/collab/bootstrap');
+  }
+
+  submitCollabContribution(payload: {
+    fileName: string;
+    mimeType?: string;
+    extractedText?: string;
+    base64Data?: string;
+    vehicleModel?: string;
+    ecuModel?: string;
+    mapList?: string;
+    bountyId?: string;
+    driveFileId?: string;
+    driveWebViewLink?: string;
+    driveFolderPath?: string;
+  }) {
+    return this.request<{
+      ok: boolean;
+      contribution: TeamContributionRecord;
+      sheetRow: string[];
+      recommendedDriveFolder: {
+        categoryFolder: string;
+        subFolder: string;
+        displayPath: string;
+      } | null;
+      bountyFulfilled: KnowledgeWishlistItem | null;
+      transcriptPreview?: string | null;
+      conflictsDetected?: number;
+      crossReferenceRoutedCount?: number;
+      projectHealthReport?: ProjectHealthMonitorReport | null;
+    }>('/api/collab/contribute', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+  }
+
+  previewCollabIngest(payload: {
+    fileName?: string;
+    extractedText: string;
+    vehicleModel?: string;
+    ecuModel?: string;
+    mapList?: string;
+  }) {
+    return this.request<{
+      ok: boolean;
+      gatekeeperDecision: string;
+      gatekeeperReasonFa: string;
+      detectedDomain: string;
+      detectedVolumeId: string;
+      detectedVolumeTitle: string;
+      brokenTablesMergedCount: number;
+      primaryCluster: {
+        familyId: string;
+        clusterTitleFa: string;
+        subChapterTitleFa: string;
+      };
+      crossReferenceRoutedCount: number;
+      routedLinesPreview: Array<{
+        originChapterTitle: string;
+        targetClusterTitleFa: string;
+        targetSubChapterTitleFa: string;
+        signals: string[];
+      }>;
+      phoneticCorrectionsCount: number;
+      tokenAccounting: {
+        inputHexCount: number;
+        outputHexCount: number;
+        inputDtcCount: number;
+        outputDtcCount: number;
+        zeroLossVerified: boolean;
+      };
+      healthReport: ProjectHealthMonitorReport;
+    }>('/api/collab/preview-ingest', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+  }
+
+  updateCollabContributionWorkspaceSync(
+    contributionId: string,
+    payload: {
+      driveFileId?: string | null;
+      driveWebViewLink?: string | null;
+      driveFolderPath?: string | null;
+      sheetSynced?: boolean;
+    }
+  ) {
+    return this.request<{ ok: boolean; contribution: TeamContributionRecord }>(
+      `/api/collab/contributions/${encodeURIComponent(contributionId)}/workspace-sync`,
+      {
+        method: 'PATCH',
+        body: JSON.stringify(payload),
+      }
+    );
+  }
+
+  getCollabLibrary() {
+    return this.request<{
+      volumes: Array<{
+        id: string;
+        volumeNumber: number;
+        title: string;
+        automotiveDomain: string;
+        domainLabelFa: string;
+        wordCount: number;
+        estimatedPages: number;
+        status: string;
+        description: string | null;
+        googleDoc: VolumeGoogleDocLink | null;
+        pdfAssets: TeamUploadedAssetRecord[];
+        chapters: Array<{
+          id: string;
+          volumeId: string;
+          orderIndex: number;
+          pedagogicalRank: number;
+          title: string;
+          shortSummary: string | null;
+          wordCount: number;
+          unitsCount: number;
+          units: Array<{
+            id: string;
+            blockType: string;
+            cleanText: string;
+            domainTag: string;
+            canonicalEntityId: string | null;
+            evidenceTier: string;
+            verificationStatus: string;
+            corroborationCount: number;
+            ingestBatchId: string;
+            createdAt: string;
+            technicalMetadataJson: Record<string, unknown> | null;
+          }>;
+          contributors: Array<{
+            displayName: string;
+            email: string;
+            count: number;
+            lastBatchId: string;
+          }>;
+          recentBatches: Array<{
+            ingestBatchId: string;
+            sourceFileName: string;
+            contributorName: string;
+            createdAt: string;
+            unitsCount: number;
+          }>;
+        }>;
+      }>;
+      pdfAssets: TeamUploadedAssetRecord[];
+      canUseDocs: boolean;
+      isOwner: boolean;
+      totalContributions: number;
+    }>('/api/collab/library');
+  }
+
+  async fetchCollabPdfBlobUrl(assetId: string): Promise<string> {
+    const token = await this.getToken();
+    const res = await fetch(`/api/collab/library/pdf/${encodeURIComponent(assetId)}`, {
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+    });
+    if (!res.ok) {
+      throw new Error(`خطا در بارگذاری پیش‌نمایش PDF (کد ${res.status})`);
+    }
+    const blob = await res.blob();
+    return URL.createObjectURL(blob);
+  }
+
+  linkCollabVolumeGoogleDoc(
+    volumeId: string,
+    payload: {
+      googleDocId: string;
+      googleDocUrl: string;
+      pulledMarkdown?: string;
+    }
+  ) {
+    return this.request<{
+      ok: boolean;
+      googleDoc: VolumeGoogleDocLink;
+      mergeSummary: {
+        newUnitsCount: number;
+        mergedUnitsCount: number;
+        ingestBatchId: string;
+      } | null;
+    }>(`/api/collab/library/volumes/${encodeURIComponent(volumeId)}/doc-link`, {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+  }
+
+  getCollabChapterComments(chapterId: string) {
+    return this.request<{ comments: ChapterCommentItem[] }>(
+      `/api/collab/chapters/${encodeURIComponent(chapterId)}/comments`
+    );
+  }
+
+  addCollabChapterComment(
+    chapterId: string,
+    payload: {
+      volumeId: string;
+      commentType: 'comment' | 'correction';
+      body: string;
+    }
+  ) {
+    return this.request<{ ok: boolean; comment: ChapterCommentItem }>(
+      `/api/collab/chapters/${encodeURIComponent(chapterId)}/comments`,
+      {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      }
+    );
+  }
+
+  resolveCollabChapterComment(commentId: string) {
+    return this.request<{ ok: boolean; comment: ChapterCommentItem }>(
+      `/api/collab/chapters/comments/${encodeURIComponent(commentId)}/resolve`,
+      {
+        method: 'PATCH',
+        body: JSON.stringify({}),
+      }
+    );
+  }
+
+  rollbackCollabBatch(ingestBatchId: string) {
+    return this.request<{
+      ok: boolean;
+      revertedUnits: number;
+      deletedUnits: number;
+      removedConflicts: number;
+      revertedCount?: number;
+      deletedCount?: number;
+    }>(
+      `/api/collab/rollback/${encodeURIComponent(ingestBatchId)}`,
+      {
+        method: 'POST',
+        body: JSON.stringify({}),
+      }
+    );
+  }
+
+  searchCollabAll(query: string) {
+    return this.request<{
+      query: string;
+      bookMatches: Array<{
+        unitId: string;
+        volumeId: string;
+        volumeTitle: string;
+        chapterId: string;
+        chapterTitle: string;
+        excerpt: string;
+        domainTag: string;
+        evidenceTier: string;
+        canonicalEntityId: string | null;
+      }>;
+      assetMatches: TeamUploadedAssetRecord[];
+      contributionMatches: TeamContributionRecord[];
+    }>(`/api/collab/search?q=${encodeURIComponent(query)}`);
+  }
+
+  getCollabLeaderboard() {
+    return this.request<{
+      leaderboard: LeaderboardEntry[];
+      totalContributions: number;
+      totalScoreDistributed: number;
+    }>('/api/collab/leaderboard');
+  }
+
+  getCollabWishlist() {
+    return this.request<{ items: KnowledgeWishlistItem[] }>('/api/collab/wishlist');
+  }
+
+  createCollabWishlistItem(payload: {
+    title: string;
+    description: string;
+    domainId: string;
+    vehicleModel?: string;
+    ecuModel?: string;
+    wantedFormat?: string;
+    bonusScore?: number;
+  }) {
+    return this.request<{ ok: boolean; item: KnowledgeWishlistItem }>('/api/collab/wishlist', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+  }
+
+  deleteCollabWishlistItem(id: string) {
+    return this.request<{ ok: boolean }>(`/api/collab/wishlist/${encodeURIComponent(id)}`, {
+      method: 'DELETE',
+    });
+  }
+
+  getCollabDriveIndex(params?: {
+    q?: string;
+    format?: string;
+    vehicle?: string;
+    ecu?: string;
+    domain?: string;
+  }) {
+    const qs = new URLSearchParams();
+    if (params?.q) qs.set('q', params.q);
+    if (params?.format && params.format !== 'all') qs.set('format', params.format);
+    if (params?.vehicle) qs.set('vehicle', params.vehicle);
+    if (params?.ecu) qs.set('ecu', params.ecu);
+    if (params?.domain && params.domain !== 'all') qs.set('domain', params.domain);
+    const suffix = qs.toString() ? `?${qs.toString()}` : '';
+    return this.request<{
+      assets: TeamUploadedAssetRecord[];
+      totalCount: number;
+      driveRootFolderId: string | null;
+      driveRootFolderName: string;
+    }>(`/api/collab/drive-index${suffix}`);
+  }
+
+  getCollabSheetsReport() {
+    return this.request<{
+      headers: string[];
+      rows: Array<{
+        contributionId: string;
+        uploaderUid?: string;
+        canSyncRow?: boolean;
+        sheetSynced: boolean;
+        status: string;
+        score: number;
+        newPercent: number;
+        duplicatePercent: number;
+        driveWebViewLink: string | null;
+        cells: string[];
+      }>;
+      summary: {
+        totalRows: number;
+        acceptedCount: number;
+        winolsCount: number;
+        avgNewPercent: number;
+        pendingSyncCount: number;
+      };
+      spreadsheet: {
+        spreadsheetId: string | null;
+        spreadsheetUrl: string | null;
+        tabName: string;
+      };
+      isOwner: boolean;
+    }>('/api/collab/sheets-report');
+  }
+
+  getCollabOwnerSettings() {
+    return this.request<{ settings: PlatformSettingsRecord }>('/api/collab/owner/settings');
+  }
+
+  updateCollabOwnerSettings(
+    patch: Partial<{
+      enableUserPersonalOutput: boolean;
+      accessLibrary: AccessLevel;
+      accessDrive: AccessLevel;
+      accessDocs: AccessLevel;
+      accessSheets: AccessLevel;
+      driveRootFolderId: string | null;
+      driveRootFolderName: string;
+      sheetsSpreadsheetId: string | null;
+      sheetsSpreadsheetUrl: string | null;
+      sheetsTabName: string;
+    }>
+  ) {
+    return this.request<{ ok: boolean; settings: PlatformSettingsRecord }>(
+      '/api/collab/owner/settings',
+      {
+        method: 'PATCH',
+        body: JSON.stringify(patch),
+      }
+    );
   }
 }

@@ -211,15 +211,21 @@ export function parseDimensionsString(
     return { columns: 1, rows: 1, type: 'VALUE' };
   }
   const ascii = toAsciiDigits(dimStr || '');
-  const m = ascii.match(/(\d{1,2})\s*[x×*]\s*(\d{1,2})/i);
+  const m = ascii.match(/(\d{1,3})\s*[x×*]\s*(\d{1,3})/i);
   if (!m) {
     return { columns: 12, rows: 16, type: 'MAP' };
   }
-  const a = Math.max(1, Math.min(64, Number(m[1])));
-  const b = Math.max(1, Math.min(64, Number(m[2])));
-  if (a === 1 && b === 1) return { columns: 1, rows: 1, type: 'VALUE' };
-  if (a === 1 || b === 1) return { columns: Math.max(a, b), rows: 1, type: 'CURVE' };
-  return { columns: a, rows: b, type: 'MAP' };
+  const rawA = Math.max(1, Number(m[1]));
+  const rawB = Math.max(1, Number(m[2]));
+  if (rawA === 1 && rawB === 1) return { columns: 1, rows: 1, type: 'VALUE' };
+  if (rawA === 1 || rawB === 1) {
+    return { columns: Math.max(1, Math.min(512, Math.max(rawA, rawB))), rows: 1, type: 'CURVE' };
+  }
+  return {
+    columns: Math.max(1, Math.min(64, rawA)),
+    rows: Math.max(1, Math.min(64, rawB)),
+    type: 'MAP',
+  };
 }
 
 export function detectDefaultBaseAddressFromReport(report: WinolsExtractionReport): string {
@@ -579,6 +585,11 @@ export function generateWinols224A2l(options: {
       emitAxis(m.axisX, 'X');
     }
 
+    const perMapByteOrderLines =
+      m.byteOrder && m.byteOrder !== byteOrder
+        ? [`      BYTE_ORDER ${m.byteOrder === 'LoHi' ? 'MSB_LAST' : 'MSB_FIRST'}`]
+        : [];
+
     const lines = [
       `    /begin CHARACTERISTIC ${charName}`,
       `      "${desc}"`,
@@ -590,6 +601,7 @@ export function generateWinols224A2l(options: {
       `      ${lowerLimit}`,
       `      ${upperLimit}`,
       `      FORMAT "%.${m.precision}"`,
+      ...perMapByteOrderLines,
       ...axisDescrLines,
       `    /end CHARACTERISTIC`,
     ];
@@ -725,7 +737,12 @@ export function generateWinols224A2l(options: {
 // ============================================================================
 
 export function generateWinols224CsvMapPack(maps: WinolsDamosMapConfig[]): string {
-  const esc = (v: string | number | boolean) => `"${String(v ?? '').replace(/"/g, '""')}"`;
+  const esc = (v: string | number | boolean) => {
+    const raw = String(v ?? '');
+    const isPureSignedNum = typeof v === 'number' || /^[+-]?\d+(?:\.\d+)?%?$/.test(raw.trim());
+    const safe = !isPureSignedNum && /^[=+\-@\t\r]/.test(raw) ? `'${raw}` : raw;
+    return `"${safe.replace(/"/g, '""')}"`;
+  };
   const headers = [
     'IdName',
     'PersianName',

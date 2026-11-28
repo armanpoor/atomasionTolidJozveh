@@ -148,6 +148,10 @@ const UNIT_CONVERSION_TABLE: Record<string, { canonical: string; factor: number;
   c: { canonical: '°C', factor: 1 },
   'سانتی‌گراد': { canonical: '°C', factor: 1 },
   'درجه‌سانتی‌گراد': { canonical: '°C', factor: 1 },
+  '°f': { canonical: '°C', factor: 5 / 9, offset: -32 },
+  f: { canonical: '°C', factor: 5 / 9, offset: -32 },
+  'فارنهایت': { canonical: '°C', factor: 5 / 9, offset: -32 },
+  'درجه‌فارنهایت': { canonical: '°C', factor: 5 / 9, offset: -32 },
   // Voltage -> V
   v: { canonical: 'V', factor: 1 },
   'ولت': { canonical: 'V', factor: 1 },
@@ -184,21 +188,27 @@ function normalizeUnitToken(rawUnit: string | null | undefined): {
   unit: string | null;
   canonical: string | null;
   factor: number;
+  offset: number;
 } {
-  if (!rawUnit) return { unit: null, canonical: null, factor: 1 };
+  if (!rawUnit) return { unit: null, canonical: null, factor: 1, offset: 0 };
   const cleaned = toAsciiDigits(rawUnit)
     .replace(/ي/g, 'ی')
     .replace(/ك/g, 'ک')
     .replace(/[\u200e\u200f]/g, '')
     .trim();
-  if (!cleaned) return { unit: null, canonical: null, factor: 1 };
+  if (!cleaned) return { unit: null, canonical: null, factor: 1, offset: 0 };
 
   const compact = cleaned.replace(/\s+/g, '').toLowerCase();
   const entry = UNIT_CONVERSION_TABLE[cleaned.toLowerCase()] || UNIT_CONVERSION_TABLE[compact];
   if (entry) {
-    return { unit: cleaned, canonical: entry.canonical, factor: entry.factor };
+    return {
+      unit: cleaned,
+      canonical: entry.canonical,
+      factor: entry.factor,
+      offset: entry.offset ?? 0,
+    };
   }
-  return { unit: cleaned, canonical: compact, factor: 1 };
+  return { unit: cleaned, canonical: compact, factor: 1, offset: 0 };
 }
 
 /**
@@ -257,14 +267,14 @@ export function parseNumericMeasurement(
     return {
       rawDisplay: original,
       numericValue: Number(mid.toFixed(4)),
-      normalizedValue: Number((mid * uInfo.factor).toFixed(4)),
+      normalizedValue: Number(((mid + uInfo.offset) * uInfo.factor).toFixed(4)),
       unit: uInfo.unit,
       normalizedUnit: uInfo.canonical,
       isRange: true,
     };
   }
 
-  // 3. Single scalar with optional unit: "+2.5°", "-1.5 deg", "4.2 bar", "6500 RPM", "145 Nm"
+  // 3. Single scalar with optional unit: "+2.5°", "-1.5 deg", "4.2 bar", "6500 RPM", "145 Nm", "212 °F"
   const scalarMatch = ascii.match(
     /^([+-]?\d+(?:\.\d+)?)(?:\s*(°[CF]?|°|%|λ|mg\/str|mg\/stk|mg\/hub|g\/s|kg\/h|[A-Za-z]+|[آ-ی]+(?:\s+[آ-ی]+)?))?$/i
   );
@@ -275,7 +285,7 @@ export function parseNumericMeasurement(
     return {
       rawDisplay: original,
       numericValue: val,
-      normalizedValue: Number((val * uInfo.factor).toFixed(4)),
+      normalizedValue: Number(((val + uInfo.offset) * uInfo.factor).toFixed(4)),
       unit: uInfo.unit,
       normalizedUnit: uInfo.canonical,
       isRange: false,

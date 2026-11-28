@@ -4,6 +4,7 @@ import {
   extractTechnicalEntities,
 } from '../ecuTechnicalIntegrity.ts';
 import { toAsciiDigits } from '../formatParsers.ts';
+import { evaluateAutomotivePhysicalGuards } from '../masterEncyclopedia/telemetryAnalyzer.ts';
 import { computeJaccardSimilarity, tokenizeContent } from '../zeroLossPipeline.ts';
 import type {
   HarnessSourceChunk,
@@ -998,6 +999,25 @@ export function runLayer1DeterministicGuard(
             });
           }
         }
+      }
+    }
+
+    // 7b. Generation-2 Automotive Physical & Mechanical Guard (non-destructive warning for expert review)
+    if (
+      !isGeneralDomain &&
+      block.kind !== 'source_gap_flag' &&
+      block.kind !== 'source_conflict_flag'
+    ) {
+      const physGuard = evaluateAutomotivePhysicalGuards(flatText);
+      for (const pIssue of physGuard.issues) {
+        issues.push({
+          id: `l1-phys-${blockId}-${pIssue.kind}`,
+          kind: 'physical_engineering_anomaly',
+          severity: 'warning',
+          blockId,
+          offendingToken: pIssue.detectedValue ?? pIssue.kind,
+          messageFa: `گارد فیزیکی نسل ۲ (${pIssue.kind}) در بلوک ${blockId}: ${pIssue.messageFa}`,
+        });
       }
     }
   }

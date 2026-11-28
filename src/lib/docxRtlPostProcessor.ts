@@ -1,5 +1,5 @@
 import JSZip from 'jszip';
-import { DocxExportConfig, ParsedBook } from './bookTypes.ts';
+import type { DocxExportConfig, ParsedBook } from './bookTypes.ts';
 import { toPersianDigits } from './formatParsers.ts';
 
 export const HEADER_CHAPTER_STYLEREF_MARKER = '__DOCX_STYLEREF_CHAPTER_MARKER__';

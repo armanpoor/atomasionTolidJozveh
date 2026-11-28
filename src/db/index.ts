@@ -14,6 +14,21 @@ export const isSqlConfigured = (): boolean =>
       process.env.SQL_DB_NAME
   );
 
+export const isBenignIdlePoolDisconnect = (err: unknown): boolean => {
+  const msg = err instanceof Error ? err.message : String(err ?? '');
+  const code = (err as { code?: string } | null)?.code || '';
+  return (
+    /Connection terminated unexpectedly/i.test(msg) ||
+    /terminating connection due to administrator command/i.test(msg) ||
+    /Client has encountered a connection error and is not queryable/i.test(msg) ||
+    /ECONNRESET|EPIPE|ETIMEDOUT/i.test(msg) ||
+    code === '57P01' ||
+    code === '57P02' ||
+    code === '57P03' ||
+    code === 'ECONNRESET'
+  );
+};
+
 export const createPool = (): Pool | null => {
   if (!isSqlConfigured()) {
     return null;
@@ -25,11 +40,20 @@ export const createPool = (): Pool | null => {
       password: process.env.SQL_PASSWORD,
       database: process.env.SQL_DB_NAME,
       max: 10,
+      idleTimeoutMillis: 20000,
       connectionTimeoutMillis: 15000,
+      keepAlive: true,
+      keepAliveInitialDelayMillis: 10000,
+      allowExitOnIdle: true,
     });
 
     global._postgresPool.on('error', (err) => {
-      console.error('Unexpected error on idle SQL pool client:', err);
+      if (isBenignIdlePoolDisconnect(err)) {
+        // Cloud SQL Developer edition scales to zero or recycles idle TCP sockets;
+        // pg.Pool automatically evicts the closed idle client and reconnects on next query.
+        return;
+      }
+      console.warn('[SQL Pool] Non-fatal idle client warning:', err instanceof Error ? err.message : String(err));
     });
   }
   return global._postgresPool;

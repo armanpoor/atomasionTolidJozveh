@@ -1100,6 +1100,227 @@ export function resolveTierSlotForTask(
   };
 }
 
+export type ModelArchitectureFamily =
+  | 'google_gemini'
+  | 'anthropic_claude'
+  | 'openai_gpt'
+  | 'deepseek'
+  | 'other';
+
+export function detectModelArchitectureFamily(
+  modelId?: string | null,
+  provider?: AiProviderType
+): ModelArchitectureFamily {
+  const m = String(modelId || '').trim().toLowerCase();
+  if (m.includes('gemini') || provider === 'google_aistudio') return 'google_gemini';
+  if (m.includes('claude') || m.includes('haiku') || m.includes('sonnet') || m.includes('opus') || provider === 'anthropic') {
+    return 'anthropic_claude';
+  }
+  if (m.includes('gpt') || m.startsWith('o1') || m.startsWith('o3') || m.startsWith('o4') || provider === 'openai') {
+    return 'openai_gpt';
+  }
+  if (m.includes('deepseek')) return 'deepseek';
+  return 'other';
+}
+
+export interface ProviderSlotCircuitState {
+  slotId: string;
+  consecutiveFailures: number;
+  trippedOpenUntilMs: number | null;
+  lastErrorCode?: number | string | null;
+}
+
+const providerSlotCircuitBreakerMap = new Map<string, ProviderSlotCircuitState>();
+const CIRCUIT_BREAKER_FAILURE_THRESHOLD = 3;
+const CIRCUIT_BREAKER_COOLDOWN_MS = 60_000;
+
+export function recordProviderSlotFailure(
+  slotId: string,
+  errorCode?: number | string | null,
+  nowMs = Date.now()
+): ProviderSlotCircuitState {
+  const prev = providerSlotCircuitBreakerMap.get(slotId) ?? {
+    slotId,
+    consecutiveFailures: 0,
+    trippedOpenUntilMs: null,
+    lastErrorCode: null,
+  };
+  const nextFailures = prev.consecutiveFailures + 1;
+  const trippedOpenUntilMs =
+    nextFailures >= CIRCUIT_BREAKER_FAILURE_THRESHOLD
+      ? nowMs + CIRCUIT_BREAKER_COOLDOWN_MS
+      : prev.trippedOpenUntilMs;
+  const nextState: ProviderSlotCircuitState = {
+    slotId,
+    consecutiveFailures: nextFailures,
+    trippedOpenUntilMs,
+    lastErrorCode: errorCode ?? null,
+  };
+  providerSlotCircuitBreakerMap.set(slotId, nextState);
+  return nextState;
+}
+
+export function recordProviderSlotSuccess(slotId: string): void {
+  providerSlotCircuitBreakerMap.set(slotId, {
+    slotId,
+    consecutiveFailures: 0,
+    trippedOpenUntilMs: null,
+    lastErrorCode: null,
+  });
+}
+
+export function isProviderSlotCircuitOpen(slotId: string, nowMs = Date.now()): boolean {
+  const st = providerSlotCircuitBreakerMap.get(slotId);
+  if (!st || !st.trippedOpenUntilMs) return false;
+  if (nowMs >= st.trippedOpenUntilMs) {
+    // Half-open recovery after cooldown expires
+    providerSlotCircuitBreakerMap.set(slotId, {
+      ...st,
+      consecutiveFailures: 0,
+      trippedOpenUntilMs: null,
+    });
+    return false;
+  }
+  return true;
+}
+
+export function getCircuitBreakerSnapshot(nowMs = Date.now()): ProviderSlotCircuitState[] {
+  const list: ProviderSlotCircuitState[] = [];
+  for (const [slotId, st] of providerSlotCircuitBreakerMap.entries()) {
+    if (st.trippedOpenUntilMs && nowMs >= st.trippedOpenUntilMs) {
+      continue;
+    }
+    list.push({ ...st });
+  }
+  return list;
+}
+
+export function resetProviderCircuitBreakers(): void {
+  providerSlotCircuitBreakerMap.clear();
+}
+
+export interface SelectiveCascadeDecision {
+  initialTier: ModelTierId;
+  resolvedTier: ModelTierId;
+  escalated: boolean;
+  escalationReasonFa: string;
+}
+
+/**
+ * Selective Cascade Escalation Engine:
+ * Starts low/medium tasks on cost-efficient tiers (`economy` / `balanced`) and escalates
+ * to `flagship` only when zero-token complexity is `high` OR a prior Layer 1 / Layer 2 audit attempt failed.
+ */
+export function resolveSelectiveCascadeTier(params: {
+  baseTier: ModelTierId;
+  complexityBand?: 'low' | 'medium' | 'high';
+  priorFailedAttempts?: number;
+  layer1Failed?: boolean;
+  layer2Failed?: boolean;
+}): SelectiveCascadeDecision {
+  const {
+    baseTier,
+    complexityBand = 'medium',
+    priorFailedAttempts = 0,
+    layer1Failed = false,
+    layer2Failed = false,
+  } = params;
+
+  if (priorFailedAttempts > 0 || layer1Failed || layer2Failed) {
+    const nextTier: ModelTierId =
+      baseTier === 'economy' && priorFailedAttempts === 1 ? 'balanced' : 'flagship';
+    return {
+      initialTier: baseTier,
+      resolvedTier: nextTier,
+      escalated: nextTier !== baseTier,
+      escalationReasonFa: `ارتقای خودکار Selective Cascade از ${baseTier} به ${nextTier} پس از عدم تأیید گارد لایه ۱/۲ (تلاش ${priorFailedAttempts + 1}).`,
+    };
+  }
+
+  if (complexityBand === 'high' && baseTier !== 'flagship') {
+    return {
+      initialTier: baseTier,
+      resolvedTier: 'flagship',
+      escalated: true,
+      escalationReasonFa: 'ارتقای پیش‌دستانه به سطح پرچمدار (Flagship) به علت تراکم بالای آدرس‌های هگز و جداول کالیبراسیون.',
+    };
+  }
+
+  return {
+    initialTier: baseTier,
+    resolvedTier: baseTier,
+    escalated: false,
+    escalationReasonFa: `مسیر بهینه روی سطح ${baseTier} بدون نیاز به ارتقای پرهزینه.`,
+  };
+}
+
+export interface CrossFamilyJudgeSelection {
+  authorFamily: ModelArchitectureFamily;
+  judgeFamily: ModelArchitectureFamily;
+  judgeProvider: AiProviderType;
+  judgeModelId: string;
+  isCrossFamily: boolean;
+  antiSycophancyDirectiveFa: string;
+}
+
+/**
+ * Selects a Cross-Family Judge for Layer 2 `harness_judge` verification so a model does not
+ * rubber-stamp its own family's hallucinations. If only one family is configured, injects
+ * a strict Anti-Sycophancy adversarial verification contract.
+ */
+export function selectCrossFamilyJudge(
+  config: AiProviderConfig,
+  googleModelId: AiModelId,
+  authorProvider?: AiProviderType,
+  authorModelId?: string
+): CrossFamilyJudgeSelection {
+  const tr = getEffectiveTierRouting(config);
+  const effAuthorProvider = authorProvider ?? tr.tiers.flagship.provider ?? config.provider;
+  const effAuthorModel =
+    authorModelId ??
+    (tr.enabled ? tr.tiers.flagship.modelId : getActiveProviderCredentials(config).modelId || googleModelId);
+  const authorFamily = detectModelArchitectureFamily(effAuthorModel, effAuthorProvider);
+
+  // Candidate slots from tier routing + configured providers map
+  const configuredProviderEntries = Object.entries(config.providers || {}) as Array<
+    [AiProviderType, ProviderCredentials | undefined]
+  >;
+  const candidates: Array<{ provider: AiProviderType; modelId: string }> = [
+    { provider: tr.tiers.balanced.provider, modelId: tr.tiers.balanced.modelId },
+    { provider: tr.tiers.flagship.provider, modelId: tr.tiers.flagship.modelId },
+    { provider: tr.tiers.economy.provider, modelId: tr.tiers.economy.modelId },
+    ...configuredProviderEntries
+      .filter(([prov, creds]) => Boolean(creds?.modelId?.trim()) && !isProviderSlotCircuitOpen(prov))
+      .map(([prov, creds]) => ({ provider: prov, modelId: (creds?.modelId || '').trim() })),
+  ];
+
+  for (const cand of candidates) {
+    if (!cand.modelId) continue;
+    const fam = detectModelArchitectureFamily(cand.modelId, cand.provider);
+    if (fam !== authorFamily && fam !== 'other') {
+      return {
+        authorFamily,
+        judgeFamily: fam,
+        judgeProvider: cand.provider,
+        judgeModelId: cand.modelId,
+        isCrossFamily: true,
+        antiSycophancyDirectiveFa:
+          `ممیزی متقاطع بین‌خانواده‌ای فعال (${authorFamily} ← داور ${fam}): هر ادعای عددی، آدرس هگز و ضریب کالیبراسیون را بدون سوگیری هم‌خانواده در برابر منبع اصلی راستی‌آزمایی کن.`,
+      };
+    }
+  }
+
+  return {
+    authorFamily,
+    judgeFamily: authorFamily,
+    judgeProvider: effAuthorProvider,
+    judgeModelId: effAuthorModel,
+    isCrossFamily: false,
+    antiSycophancyDirectiveFa:
+      'قرارداد سخت‌گیرانه ضد چاپلوسی (Single-Family Anti-Sycophancy Judge): از آنجا که نویسنده و داور از یک خانواده مدل هستند، فرض پیش‌فرض را بر «عدم تطابق» بگذار و صرفاً ادعاهایی را تأیید کن که شواهد کلمه‌به‌کلمه در قطعات منبع دارند.',
+  };
+}
+
 export interface CapabilityRoutingPlan {
   primaryLabelFa: string;
   webSearchLabelFa: string;
@@ -1107,6 +1328,10 @@ export interface CapabilityRoutingPlan {
   isHybrid: boolean;
   tierRoutingEnabled: boolean;
   tierSummaryFa: string;
+  crossFamilyJudgeLabelFa?: string;
+  selectiveCascadePolicyFa?: string;
+  longPromptCliffLimitTokens?: number;
+  circuitBreakerOpenSlots?: number;
 }
 
 export function resolveCapabilityRoutingPlan(
@@ -1150,6 +1375,13 @@ export function resolveCapabilityRoutingPlan(
     ? `اقتصادی: ${fmtTierModel(tr.tiers.economy.modelId)} · متعادل: ${fmtTierModel(tr.tiers.balanced.modelId)} · پرچمدار: ${fmtTierModel(tr.tiers.flagship.modelId)}`
     : 'تک‌مدله (همه مراحل روی مدل اصلی)';
 
+  const judgeInfo = selectCrossFamilyJudge(config, googleModelId);
+  const crossFamilyJudgeLabelFa = judgeInfo.isCrossFamily
+    ? `داور غیرهم‌خانواده (${judgeInfo.judgeModelId})`
+    : `داور هم‌خانواده با سپر Anti-Sycophancy (${judgeInfo.judgeModelId})`;
+
+  const openCircuits = getCircuitBreakerSnapshot().filter((c) => c.trippedOpenUntilMs !== null).length;
+
   return {
     primaryLabelFa: `${primary.providerLabel} · ${primary.modelLabel}`,
     webSearchLabelFa,
@@ -1157,6 +1389,10 @@ export function resolveCapabilityRoutingPlan(
     isHybrid,
     tierRoutingEnabled: tr.enabled,
     tierSummaryFa,
+    crossFamilyJudgeLabelFa,
+    selectiveCascadePolicyFa: 'Selective Cascade (Economy → Balanced → Flagship)',
+    longPromptCliffLimitTokens: 160_000,
+    circuitBreakerOpenSlots: openCircuits,
   };
 }
 

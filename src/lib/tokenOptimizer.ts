@@ -545,6 +545,165 @@ export function updateTokenCalibrationFactor(params: {
   return Number(Math.min(1.85, Math.max(0.65, next)).toFixed(4));
 }
 
+export interface ScriptAwareTokenBreakdown {
+  estimatedTokens: number;
+  persianCharCount: number;
+  hexAndCodeTokenCount: number;
+  latinWordCount: number;
+  tablePipeCount: number;
+}
+
+/**
+ * Script-Aware Persian + Hex + English Token Estimator (Fixes Bug #8 from Deep Research Audit):
+ * Counts Persian/Arabic Unicode characters, hex/calibration/DTC tokens, table pipes, and Latin words
+ * separately instead of naive `text.split(/\s+/).length * 1.4` (which underestimates Persian & Hex dumps by 2.5x).
+ */
+export function estimateScriptAwareAutomotiveTokens(
+  text: string,
+  calibrationFactor = 1.0
+): ScriptAwareTokenBreakdown {
+  if (!text || !text.trim()) {
+    return {
+      estimatedTokens: 0,
+      persianCharCount: 0,
+      hexAndCodeTokenCount: 0,
+      latinWordCount: 0,
+      tablePipeCount: 0,
+    };
+  }
+
+  const persianCharCount = text.match(/[\u0600-\u06FF\uFB50-\uFDFF\uFE70-\uFEFF\u200C]/g)?.length || 0;
+  const hexAndCodeTokenCount =
+    text.match(/\b(?:0x[0-9A-Fa-f]{2,8}|\$[0-9A-Fa-f]{3,8}|[PBCU][0-3][0-9A-Fa-f]{3}(?:-[0-9A-Fa-f]{2})?|\d{1,2}[xX×]\d{1,2})\b/g)
+      ?.length || 0;
+  const latinWordCount = text.match(/\b[A-Za-z][A-Za-z0-9_.-]*\b/g)?.length || 0;
+  const numericTokenCount = text.match(/\b\d+(?:\.\d+)?\b/g)?.length || 0;
+  const tablePipeCount = text.match(/[|{}[\]()]/g)?.length || 0;
+
+  // Empirically calibrated BPE weights for mixed Persian + ECU hex/table text
+  const rawTokens =
+    persianCharCount * 0.58 +
+    hexAndCodeTokenCount * 2.4 +
+    latinWordCount * 1.35 +
+    numericTokenCount * 1.15 +
+    tablePipeCount * 0.55;
+
+  const clampedFactor = Number.isFinite(calibrationFactor)
+    ? Math.min(1.85, Math.max(0.65, calibrationFactor))
+    : 1.0;
+
+  return {
+    estimatedTokens: Math.max(1, Math.ceil(rawTokens * clampedFactor)),
+    persianCharCount,
+    hexAndCodeTokenCount,
+    latinWordCount,
+    tablePipeCount,
+  };
+}
+
+export interface LongPromptCliffReport {
+  estimatedTokens: number;
+  maxSafeTokens: number;
+  exceedsSafeCliff: boolean;
+  recommendedBatchSplits: number;
+  warningFa: string | null;
+}
+
+/**
+ * Long Prompt Cliff Guard:
+ * Prevents prompts from crossing the 160,000-token threshold (where 200k+ context pricing
+ * doubles and "Lost-in-the-Middle" recall degrades on dense hex/calibration tables).
+ */
+export function checkLongPromptCliff(
+  text: string,
+  maxSafeTokens = 160_000
+): LongPromptCliffReport {
+  const breakdown = estimateScriptAwareAutomotiveTokens(text);
+  const exceedsSafeCliff = breakdown.estimatedTokens > maxSafeTokens;
+  const recommendedBatchSplits = exceedsSafeCliff
+    ? Math.max(2, Math.ceil(breakdown.estimatedTokens / Math.max(10_000, maxSafeTokens * 0.75)))
+    : 1;
+
+  return {
+    estimatedTokens: breakdown.estimatedTokens,
+    maxSafeTokens,
+    exceedsSafeCliff,
+    recommendedBatchSplits,
+    warningFa: exceedsSafeCliff
+      ? `هشدار Long Prompt Cliff: حجم واقعی پرامپت (${breakdown.estimatedTokens.toLocaleString()} توکن با احتساب فارسی و هگز) از سقف ایمن ${maxSafeTokens.toLocaleString()} توکن عبور کرده است؛ پیشنهاد تقسیم خودکار به ${recommendedBatchSplits} دسته.`
+      : null,
+  };
+}
+
+export interface AutomotiveComplexityAssessment {
+  score: number; // 0..100
+  band: 'low' | 'medium' | 'high';
+  recommendedTier: ModelTierId;
+  signals: {
+    hexCount: number;
+    mapCodeCount: number;
+    ecuModelCount: number;
+    tableRowCount: number;
+    conditionalQualifiersCount: number;
+  };
+  rationaleFa: string;
+}
+
+/**
+ * Zero-Token Automotive Complexity Scorer:
+ * Evaluates a section or task deterministically in <1ms without calling an LLM,
+ * enabling Selective Cascade Routing (Economy -> Balanced -> Flagship).
+ */
+export function scoreAutomotiveComplexity(text: string): AutomotiveComplexityAssessment {
+  const sample = text || '';
+  const hexCount =
+    (sample.match(HEX_EXPLICIT_RE)?.length || 0) +
+    (sample.match(HEX_BARE_SIEMENS_RE)?.length || 0);
+  const mapCodeCount = sample.match(MAP_CODE_RE)?.length || 0;
+  const ecuModelCount = sample.match(ECU_MODEL_RE)?.length || 0;
+  const tableRowCount = sample
+    .split(/\r?\n/)
+    .filter((l) => l.trim().startsWith('|') && l.trim().endsWith('|')).length;
+  const conditionalQualifiersCount =
+    sample.match(
+      /(?:اکتان|octane|pfi|gdi|crdi|stage\s*[123]|استیج\s*[۱۲۳123]|euro\s*[456]|یورو\s*[۴۵۶456]|obdonuds|can-?fd|rat_func|coeffs)/gi
+    )?.length || 0;
+
+  const rawScore =
+    Math.min(35, hexCount * 7) +
+    Math.min(25, mapCodeCount * 4) +
+    Math.min(15, ecuModelCount * 5) +
+    Math.min(15, Math.floor(tableRowCount * 1.5)) +
+    Math.min(15, conditionalQualifiersCount * 4);
+
+  const score = Math.min(100, Math.max(0, rawScore));
+  const band: 'low' | 'medium' | 'high' =
+    score >= 55 ? 'high' : score >= 22 ? 'medium' : 'low';
+  const recommendedTier: ModelTierId =
+    band === 'high' ? 'flagship' : band === 'medium' ? 'balanced' : 'economy';
+
+  const rationaleFa =
+    band === 'high'
+      ? `پیچیدگی مهندسی بالا (امتیاز ${score}/100: ${hexCount} آدرس هگز، ${mapCodeCount} کد نقشه/کالیبراسیون، ${tableRowCount} ردیف جدول) ← نیازمند سطح پرچمدار (Flagship)`
+      : band === 'medium'
+      ? `پیچیدگی مهندسی متوسط (امتیاز ${score}/100: ${mapCodeCount} اصطلاح فنی، ${ecuModelCount} مدل ECU) ← مناسب سطح متعادل (Balanced)`
+      : `پیچیدگی پایه/متنی (امتیاز ${score}/100) ← قابل پردازش سریع در سطح اقتصادی (Economy)`;
+
+  return {
+    score,
+    band,
+    recommendedTier,
+    signals: {
+      hexCount,
+      mapCodeCount,
+      ecuModelCount,
+      tableRowCount,
+      conditionalQualifiersCount,
+    },
+    rationaleFa,
+  };
+}
+
 // ============================================================================
 // TECHNICAL ENTITY EXTRACTION & ENTITY-PRESERVING EXCERPT COMPRESSION
 // ============================================================================

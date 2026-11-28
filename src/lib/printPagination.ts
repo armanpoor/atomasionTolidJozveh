@@ -1,4 +1,4 @@
-import type { ParsedBook } from './bookTypes';
+import type { ParsedBook } from './bookTypes.ts';
 
 export const A4_WIDTH_MM = 210;
 export const A4_HEIGHT_MM = 297;

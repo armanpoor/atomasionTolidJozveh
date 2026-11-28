@@ -1,18 +1,25 @@
-import React, { useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import {
   BookCopy,
+  Clock,
+  FileDiff,
   FilePlus2,
   FileText,
   FolderOpen,
   Globe,
+  History,
   KeyRound,
   Layers,
   Loader2,
   Play,
+  Scissors,
+  Search,
+  ShieldCheck,
   SlidersHorizontal,
   Sparkles,
   Trash2,
   Wand2,
+  X,
 } from 'lucide-react';
 import {
   AiModelId,
@@ -40,8 +47,21 @@ import {
   OUTPUT_TONE_OPTIONS,
   QUICK_CUSTOM_PROMPT_PRESETS,
 } from '../lib/winolsMapGuide';
+import { UNIVERSAL_SYSTEM_PROMPT_RULES } from '../lib/universalSystemPrompt';
+import { formatCompactFileSize } from '../lib/dropzoneUtils';
+import { filterSourceFilesByName } from '../lib/fileDiffUtils';
+import {
+  appendPersistentUploadHistoryEntries,
+  loadPersistentUploadHistory,
+  PersistentUploadHistoryEntry,
+  savePersistentUploadHistory,
+} from '../lib/filePreprocessEngine';
 import { toPersianDigits } from '../lib/formatParsers';
 import { AiQuotaGauge } from './AiQuotaGauge';
+import {
+  AUTOMOTIVE_CONSENT_SESSION_KEY,
+  AutomotiveConsentBanner,
+} from './AutomotiveConsentBanner';
 import { FileDropzone, QueuedUploadFile } from './FileDropzone';
 import { SidebarContentSearch } from './SidebarContentSearch';
 
@@ -105,6 +125,7 @@ interface WorkspaceSidebarProps {
   onMoveFile: (id: string, dir: 'up' | 'down') => void;
   onClearFiles: () => void;
   onSetFileRole: (id: string, role: FileRole) => void;
+  onBulkSetFileRole?: (ids: string[], role: FileRole) => void;
   onChangeConfig: (patch: Partial<DocxExportConfig>) => void;
   onChangeOptimization: (patch: Partial<DocxExportConfig['optimization']>) => void;
   onStartPipeline: () => Promise<void>;
@@ -113,6 +134,8 @@ interface WorkspaceSidebarProps {
     outlineNodeId: string | null;
     sourceFileId: string;
   }) => void;
+  uploadHistory?: PersistentUploadHistoryEntry[];
+  onClearUploadHistory?: () => void;
 }
 
 export const WorkspaceSidebar: React.FC<WorkspaceSidebarProps> = ({
@@ -143,12 +166,203 @@ export const WorkspaceSidebar: React.FC<WorkspaceSidebarProps> = ({
   onMoveFile,
   onClearFiles,
   onSetFileRole,
+  onBulkSetFileRole,
   onChangeConfig,
   onChangeOptimization,
   onStartPipeline,
   onJumpToSearchResult,
+  uploadHistory,
+  onClearUploadHistory,
 }) => {
   const [showAdvanced, setShowAdvanced] = useState(false);
+  const [sourceFileFilter, setSourceFileFilter] = useState('');
+  const [requestedDiffFileId, setRequestedDiffFileId] = useState<string | null>(null);
+  const [selectedQueueIds, setSelectedQueueIds] = useState<string[]>([]);
+  const [bulkTargetRole, setBulkTargetRole] = useState<FileRole>('supplement');
+  const [filesSectionTab, setFilesSectionTab] = useState<'active_queue' | 'upload_history'>('active_queue');
+  const [uploadHistoryFilter, setUploadHistoryFilter] = useState('');
+  const [internalUploadHistory, setInternalUploadHistory] = useState<PersistentUploadHistoryEntry[]>(() =>
+    loadPersistentUploadHistory()
+  );
+  const [automotiveConsentAccepted, setAutomotiveConsentAccepted] = useState<boolean>(() => {
+    try {
+      return typeof window !== 'undefined' &&
+        window.sessionStorage.getItem(AUTOMOTIVE_CONSENT_SESSION_KEY) === 'accepted';
+    } catch {
+      return false;
+    }
+  });
+
+  const handleToggleAutomotiveConsent = (accepted: boolean) => {
+    setAutomotiveConsentAccepted(accepted);
+    try {
+      if (typeof window !== 'undefined') {
+        if (accepted) {
+          window.sessionStorage.setItem(AUTOMOTIVE_CONSENT_SESSION_KEY, 'accepted');
+        } else {
+          window.sessionStorage.removeItem(AUTOMOTIVE_CONSENT_SESSION_KEY);
+        }
+      }
+    } catch {
+      // Ignore storage errors in sandboxed iframes
+    }
+  };
+
+  useEffect(() => {
+    setSourceFileFilter('');
+    setRequestedDiffFileId(null);
+    setSelectedQueueIds([]);
+  }, [activeProjectId]);
+
+  // Keep selectedQueueIds synced with current queuedFiles
+  useEffect(() => {
+    setSelectedQueueIds((prev) => {
+      const validIds = new Set(queuedFiles.map((q) => q.id));
+      const filtered = prev.filter((id) => validIds.has(id));
+      return filtered.length === prev.length ? prev : filtered;
+    });
+  }, [queuedFiles]);
+
+  const handleToggleSelectQueuedFile = (id: string) => {
+    setSelectedQueueIds((prev) =>
+      prev.includes(id) ? prev.filter((item) => item !== id) : [...prev, id]
+    );
+  };
+
+  const handleSelectAllQueuedFiles = () => {
+    if (selectedQueueIds.length === queuedFiles.length) {
+      setSelectedQueueIds([]);
+    } else {
+      setSelectedQueueIds(queuedFiles.map((q) => q.id));
+    }
+  };
+
+  const handleApplyBulkFileRole = (roleToAssign: FileRole) => {
+    const targetIds =
+      selectedQueueIds.length > 0 ? selectedQueueIds : queuedFiles.map((q) => q.id);
+    if (targetIds.length === 0) return;
+
+    if (onBulkSetFileRole) {
+      onBulkSetFileRole(targetIds, roleToAssign);
+    } else {
+      targetIds.forEach((id, idx) => {
+        // When assigning 'master' to multiple files without bulk handler, first gets master, rest supplement
+        const effectiveRole: FileRole =
+          roleToAssign === 'master' && idx > 0 ? 'supplement' : roleToAssign;
+        onSetFileRole(id, effectiveRole);
+      });
+    }
+  };
+
+  const filteredSourceFiles = useMemo(
+    () => filterSourceFilesByName(sourceFiles, sourceFileFilter),
+    [sourceFiles, sourceFileFilter]
+  );
+
+  // Sync currently loaded project's sourceFiles into persistent cross-session upload history
+  useEffect(() => {
+    if (sourceFiles.length === 0) return;
+    const activeProjectTitle =
+      projects.find((p) => p.id === activeProjectId)?.title || 'پروژه فعال';
+    const syncedEntries: PersistentUploadHistoryEntry[] = sourceFiles.map((sf) => {
+      const meta = (sf.metadataJson || {}) as Record<string, unknown>;
+      const classificationRaw = String(meta.preprocessClassification || 'pure_automotive');
+      const classification: PersistentUploadHistoryEntry['classification'] =
+        classificationRaw === 'mixed_hybrid_pruned' ||
+        classificationRaw === 'rejected_non_automotive'
+          ? classificationRaw
+          : 'pure_automotive';
+      return {
+        id: `hist_${sf.id}`,
+        fileName: sf.fileName,
+        format: sf.format,
+        fileRole: sf.fileRole || 'standard',
+        sizeBytes: sf.sizeBytes || 0,
+        wordCount: sf.wordCount || 0,
+        unitCount: sf.unitCount || 0,
+        projectId: sf.projectId || activeProjectId,
+        projectTitle: activeProjectTitle,
+        ingestedAt: sf.uploadedAt || new Date().toISOString(),
+        classification,
+        prunedOffTopicSegmentsCount: Number(meta.prunedOffTopicSegmentsCount || 0),
+        keptAutomotiveSegmentsCount: Number(meta.keptAutomotiveSegmentsCount || sf.unitCount || 1),
+        estimatedTokensSaved: Number(meta.estimatedTokensSaved || 0),
+        tokenSavingsPercent: Number(meta.tokenSavingsPercent || 0),
+        summaryFa:
+          typeof meta.preprocessSummaryFa === 'string' && meta.preprocessSummaryFa.trim().length > 0
+            ? meta.preprocessSummaryFa
+            : `استخراج موفق ${toPersianDigits(sf.unitCount)} واحد متنی (${toPersianDigits(sf.wordCount)} کلمه)`,
+      };
+    });
+    const next = appendPersistentUploadHistoryEntries(syncedEntries);
+    setInternalUploadHistory(next);
+  }, [sourceFiles, activeProjectId, projects]);
+
+  const effectiveUploadHistory = useMemo(() => {
+    const base = uploadHistory && uploadHistory.length > 0 ? uploadHistory : internalUploadHistory;
+    // Merge base with any extra entries in internalUploadHistory
+    const byKey = new Map<string, PersistentUploadHistoryEntry>();
+    for (const item of [...base, ...internalUploadHistory]) {
+      const key = `${item.projectId || 'global'}:${item.fileName}:${item.classification}`;
+      if (!byKey.has(key)) {
+        byKey.set(key, item);
+      }
+    }
+    return Array.from(byKey.values()).sort(
+      (a, b) => new Date(b.ingestedAt).getTime() - new Date(a.ingestedAt).getTime()
+    );
+  }, [uploadHistory, internalUploadHistory]);
+
+  const filteredUploadHistory = useMemo(() => {
+    const q = uploadHistoryFilter.trim().toLowerCase();
+    if (!q) return effectiveUploadHistory;
+    return effectiveUploadHistory.filter(
+      (item) =>
+        item.fileName.toLowerCase().includes(q) ||
+        item.projectTitle.toLowerCase().includes(q) ||
+        item.format.toLowerCase().includes(q)
+    );
+  }, [effectiveUploadHistory, uploadHistoryFilter]);
+
+  const totalTokensSavedInHistory = useMemo(
+    () =>
+      effectiveUploadHistory.reduce(
+        (sum, item) => sum + (item.estimatedTokensSaved || 0),
+        0
+      ),
+    [effectiveUploadHistory]
+  );
+
+  const queuedPreprocessSummary = useMemo(() => {
+    let hybridCount = 0;
+    let rejectedCount = 0;
+    let totalPrunedBlocks = 0;
+    let totalSavedTokens = 0;
+    for (const qf of queuedFiles) {
+      if (!qf.preprocessReport) continue;
+      if (qf.preprocessReport.classification === 'mixed_hybrid_pruned') {
+        hybridCount++;
+      } else if (qf.preprocessReport.classification === 'rejected_non_automotive') {
+        rejectedCount++;
+      }
+      totalPrunedBlocks += qf.preprocessReport.prunedOffTopicSegmentsCount || 0;
+      totalSavedTokens += qf.preprocessReport.estimatedTokensSaved || 0;
+    }
+    return {
+      hybridCount,
+      rejectedCount,
+      totalPrunedBlocks,
+      totalSavedTokens,
+    };
+  }, [queuedFiles]);
+
+  const handleClearUploadHistoryInternal = () => {
+    savePersistentUploadHistory([]);
+    setInternalUploadHistory([]);
+    if (onClearUploadHistory) {
+      onClearUploadHistory();
+    }
+  };
 
   const canRun = !processing && (queuedFiles.length > 0 || ingestedFilesCount > 0);
   const queuedBytesCount = queuedFiles.reduce((sum, f) => sum + (f.sizeBytes || 0), 0);
@@ -272,23 +486,522 @@ export const WorkspaceSidebar: React.FC<WorkspaceSidebarProps> = ({
           </div>
         </section>
 
-        {/* 3. Multi-file Dropzone */}
-        <section className="border-t border-[#EAE5DA] pt-4">
-          <div className="flex items-center justify-between">
+        {/* 3. Multi-file Dropzone + Upload History Tab + Source Files Search & Diff View */}
+        <section className="border-t border-[#EAE5DA] pt-4 space-y-2.5">
+          <div className="flex items-center justify-between gap-2">
             <div className="text-xs font-bold text-[#1A1816]">
               ۲. فایل‌های ورودی ({activeWorkflowMode === 'master_update' ? 'مرجع + تکمیلی' : 'چندفایلی'})
             </div>
-            {ingestedFilesCount > 0 && queuedFiles.length === 0 && (
-              <span className="text-[11px] font-semibold text-[#14532D]">
-                {toPersianDigits(ingestedFilesCount)} فایل ثبت‌شده
+            {ingestedFilesCount > 0 && (
+              <span className="text-[11px] font-semibold text-[#14532D] tabular-nums">
+                {sourceFileFilter.trim()
+                  ? `${toPersianDigits(filteredSourceFiles.length)} از ${toPersianDigits(sourceFiles.length)} فایل`
+                  : `${toPersianDigits(ingestedFilesCount)} فایل ثبت‌شده`}
               </span>
             )}
           </div>
+
+          {/* Segmented Tab Switcher: Active Queue & Files vs. Upload History across all sessions */}
+          <div
+            role="tablist"
+            aria-label="تب‌های مدیریت فایل‌های ورودی و تاریخچه آپلود"
+            data-testid="sidebar-files-tab-switcher"
+            className="grid grid-cols-2 gap-1 rounded-lg border border-[#D8D2C5] bg-[#EFECE4] p-1"
+          >
+            <button
+              type="button"
+              role="tab"
+              aria-selected={filesSectionTab === 'active_queue'}
+              data-testid="sidebar-tab-active-files"
+              onClick={() => setFilesSectionTab('active_queue')}
+              className={`flex min-h-[34px] items-center justify-center gap-1.5 rounded-md px-2 py-1 text-[11px] font-bold transition-colors cursor-pointer ${
+                filesSectionTab === 'active_queue'
+                  ? 'bg-white text-[#1E3A5F] shadow-xs'
+                  : 'text-[#57534E] hover:text-[#1A1816]'
+              }`}
+            >
+              <FileText className="h-3.5 w-3.5 shrink-0" />
+              <span className="truncate">صف و فایل‌ها ({toPersianDigits(queuedFiles.length + sourceFiles.length)})</span>
+            </button>
+
+            <button
+              type="button"
+              role="tab"
+              aria-selected={filesSectionTab === 'upload_history'}
+              data-testid="sidebar-upload-history-tab"
+              title="Upload History — تاریخچه آپلود فایل‌ها در تمام نشست‌ها"
+              onClick={() => setFilesSectionTab('upload_history')}
+              className={`flex min-h-[34px] items-center justify-center gap-1.5 rounded-md px-2 py-1 text-[11px] font-bold transition-colors cursor-pointer ${
+                filesSectionTab === 'upload_history'
+                  ? 'bg-white text-[#1E3A5F] shadow-xs'
+                  : 'text-[#57534E] hover:text-[#1A1816]'
+              }`}
+            >
+              <History className="h-3.5 w-3.5 shrink-0" />
+              <span className="truncate">
+                تاریخچه آپلود ({toPersianDigits(effectiveUploadHistory.length)})
+              </span>
+            </button>
+          </div>
+
+          {filesSectionTab === 'upload_history' ? (
+            /* Upload History Panel Across All Sessions */
+            <div
+              data-testid="sidebar-upload-history-panel"
+              className="space-y-2.5 rounded-xl border border-[#D6D0C4] bg-white p-3"
+            >
+              <div className="flex items-center justify-between gap-2">
+                <div className="min-w-0">
+                  <div className="flex items-center gap-1.5 text-xs font-bold text-[#1E3A5F]">
+                    <History className="h-3.5 w-3.5 shrink-0" />
+                    <span>تاریخچه فایل‌های ثبت‌شده (Upload History)</span>
+                  </div>
+                  <p className="mt-0.5 text-[10.5px] text-[#57534E] leading-4">
+                    لاگ ماندگار تمام فایل‌های ورودی در همه نشست‌ها همراه با گزارش پیش‌پردازش فرمت و هرس بخش‌های غیرخودرویی.
+                  </p>
+                </div>
+                {effectiveUploadHistory.length > 0 && (
+                  <button
+                    type="button"
+                    data-testid="sidebar-upload-history-clear-btn"
+                    onClick={handleClearUploadHistoryInternal}
+                    className="shrink-0 rounded-md border border-[#E5E0D6] bg-[#FAF9F5] px-2 py-1 text-[10px] font-bold text-[#9A3412] hover:bg-[#FDF2F0] cursor-pointer"
+                  >
+                    پاک کردن تاریخچه
+                  </button>
+                )}
+              </div>
+
+              {totalTokensSavedInHistory > 0 && (
+                <div
+                  data-testid="sidebar-upload-history-token-savings"
+                  className="flex items-center justify-between gap-2 rounded-lg border border-[#BBF7D0] bg-[#F0FDF4] px-2.5 py-1.5 text-[10.5px] font-semibold text-[#14532D]"
+                >
+                  <span className="flex items-center gap-1">
+                    <Scissors className="h-3.5 w-3.5 shrink-0" />
+                    <span>صرفه‌جویی پیش‌پردازش و هرس بخش‌های غیرمرتبط:</span>
+                  </span>
+                  <span className="font-mono font-bold">
+                    {toPersianDigits(totalTokensSavedInHistory)} توکن
+                  </span>
+                </div>
+              )}
+
+              {effectiveUploadHistory.length > 0 && (
+                <div className="relative">
+                  <Search
+                    className="pointer-events-none absolute right-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-[#78716C]"
+                    aria-hidden="true"
+                  />
+                  <input
+                    type="text"
+                    data-testid="sidebar-upload-history-search"
+                    value={uploadHistoryFilter}
+                    onChange={(e) => setUploadHistoryFilter(e.target.value)}
+                    placeholder="جستجو در تاریخچه آپلود (نام فایل، پروژه، فرمت)..."
+                    className="w-full rounded-lg border border-[#D6D0C4] bg-[#FAF9F6] py-1.5 pr-8 pl-7 text-[11px] text-[#1A1816] placeholder:text-[#8C857B] focus:border-[#1E3A5F] focus:outline-none"
+                  />
+                  {uploadHistoryFilter.trim().length > 0 && (
+                    <button
+                      type="button"
+                      onClick={() => setUploadHistoryFilter('')}
+                      aria-label="پاک کردن جستجوی تاریخچه"
+                      className="absolute left-1.5 top-1/2 -translate-y-1/2 flex h-5 w-5 items-center justify-center rounded text-[#78716C] hover:bg-[#EFECE4] cursor-pointer"
+                    >
+                      <X className="h-3 w-3" />
+                    </button>
+                  )}
+                </div>
+              )}
+
+              {filteredUploadHistory.length === 0 ? (
+                <div
+                  data-testid="sidebar-upload-history-empty"
+                  className="rounded-lg border border-dashed border-[#D6D0C4] bg-[#FAF9F6] px-3 py-5 text-center text-[11px] text-[#57534E]"
+                >
+                  {effectiveUploadHistory.length === 0
+                    ? 'هنوز فایلی در تاریخچه آپلودها ثبت نشده است. به‌محض استخراج فایل در مرحله ۱، گزارش کامل آن در اینجا ذخیره می‌شود.'
+                    : `موردی با عبارت «${uploadHistoryFilter.trim()}» در تاریخچه یافت نشد.`}
+                </div>
+              ) : (
+                <ul
+                  data-testid="sidebar-upload-history-list"
+                  className="max-h-72 overflow-y-auto space-y-2 pl-0.5"
+                >
+                  {filteredUploadHistory.map((entry) => {
+                    const roleLabel =
+                      entry.fileRole === 'master'
+                        ? 'مرجع (Master)'
+                        : entry.fileRole === 'supplement'
+                          ? 'تکمیلی (Supplement)'
+                          : 'استاندارد (Standard)';
+                    const formattedDate = (() => {
+                      try {
+                        const d = new Date(entry.ingestedAt);
+                        return d.toLocaleTimeString('fa-IR', {
+                          hour: '2-digit',
+                          minute: '2-digit',
+                        });
+                      } catch {
+                        return '';
+                      }
+                    })();
+
+                    return (
+                      <li
+                        key={entry.id}
+                        data-testid="sidebar-upload-history-item"
+                        data-history-classification={entry.classification}
+                        className="rounded-lg border border-[#E5E0D6] bg-[#FCFBF8] p-2.5 text-xs space-y-1.5 hover:border-[#C9C1B2]"
+                      >
+                        <div className="flex items-start justify-between gap-2">
+                          <div className="min-w-0 flex-1">
+                            <div
+                              className="truncate font-bold text-[#1A1816]"
+                              dir="auto"
+                              title={entry.fileName}
+                            >
+                              {entry.fileName}
+                            </div>
+                            <div className="mt-0.5 flex flex-wrap items-center gap-1.5 text-[10px] text-[#78716C] tabular-nums">
+                              <span className="rounded bg-[#E9F0F8] px-1.5 py-0.5 font-mono font-bold text-[#1E3A5F]">
+                                {String(entry.format).toUpperCase()}
+                              </span>
+                              <span className="rounded bg-[#EAE5DA] px-1.5 py-0.5 font-semibold text-[#44403C]">
+                                {roleLabel}
+                              </span>
+                              {formattedDate && (
+                                <span className="inline-flex items-center gap-0.5">
+                                  <Clock className="h-2.5 w-2.5" />
+                                  {formattedDate}
+                                </span>
+                              )}
+                            </div>
+                          </div>
+
+                          <span
+                            className={`shrink-0 rounded-md px-2 py-0.5 text-[10px] font-bold ${
+                              entry.classification === 'rejected_non_automotive'
+                                ? 'bg-[#FEF2F2] text-[#991B1B] border border-[#FCA5A5]'
+                                : entry.classification === 'mixed_hybrid_pruned'
+                                  ? 'bg-[#FFFBEB] text-[#92400E] border border-[#FCD34D]'
+                                  : 'bg-[#F0FDF4] text-[#14532D] border border-[#BBF7D0]'
+                            }`}
+                          >
+                            {entry.classification === 'rejected_non_automotive'
+                              ? 'رد شده (غیرخودرویی)'
+                              : entry.classification === 'mixed_hybrid_pruned'
+                                ? 'هرس ترکیبی (Hybrid)'
+                                : 'تأیید کامل خودرویی'}
+                          </span>
+                        </div>
+
+                        <div className="flex flex-wrap items-center justify-between gap-1 text-[10.5px] text-[#57534E] tabular-nums">
+                          <span className="truncate max-w-[180px]" title={entry.projectTitle}>
+                            پروژه: <strong className="text-[#1A1816]">{entry.projectTitle}</strong>
+                          </span>
+                          <span>
+                            {toPersianDigits(entry.unitCount)} واحد · {toPersianDigits(entry.wordCount)} کلمه
+                            {entry.sizeBytes > 0 ? ` · ${formatCompactFileSize(entry.sizeBytes)}` : ''}
+                          </span>
+                        </div>
+
+                        {(entry.classification === 'mixed_hybrid_pruned' ||
+                          entry.estimatedTokensSaved > 0 ||
+                          entry.summaryFa) && (
+                          <div className="rounded border border-[#EAE5DA] bg-white px-2 py-1 text-[10px] leading-4 text-[#44403C]">
+                            {entry.summaryFa}
+                            {entry.estimatedTokensSaved > 0 && (
+                              <span className="mr-1 font-bold text-[#14532D]">
+                                (صرفه‌جویی {toPersianDigits(entry.estimatedTokensSaved)} توکن ·{' '}
+                                {toPersianDigits(entry.tokenSavingsPercent)}٪)
+                              </span>
+                            )}
+                          </div>
+                        )}
+
+                        {entry.projectId &&
+                          entry.projectId !== activeProjectId &&
+                          projects.some((p) => p.id === entry.projectId) && (
+                            <div className="pt-0.5 flex justify-end">
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  onSelectProject(entry.projectId!);
+                                  setFilesSectionTab('active_queue');
+                                }}
+                                className="text-[10.5px] font-bold text-[#1E3A5F] hover:underline cursor-pointer"
+                              >
+                                باز کردن این پروژه ←
+                              </button>
+                            </div>
+                          )}
+                      </li>
+                    );
+                  })}
+                </ul>
+              )}
+            </div>
+          ) : (
+            <>
+              {/* Live Pre-Ingest Format-Specific Preprocessing & Hybrid Pruning Summary Banner */}
+              {(queuedPreprocessSummary.hybridCount > 0 ||
+                queuedPreprocessSummary.rejectedCount > 0 ||
+                queuedPreprocessSummary.totalSavedTokens > 0) && (
+                <div
+                  data-testid="sidebar-preprocess-summary-card"
+                  className={`rounded-lg border p-2.5 text-[11px] leading-5 space-y-1 ${
+                    queuedPreprocessSummary.rejectedCount > 0
+                      ? 'border-[#FCA5A5] bg-[#FEF2F2] text-[#991B1B]'
+                      : 'border-[#FCD34D] bg-[#FFFBEB] text-[#92400E]'
+                  }`}
+                >
+                  <div className="flex items-center justify-between gap-2 font-bold">
+                    <span className="flex items-center gap-1.5">
+                      <ShieldCheck className="h-3.5 w-3.5 shrink-0" />
+                      <span>گزارش پیش‌پردازش هوشمند فایل‌های ورودی (۰ توکن)</span>
+                    </span>
+                    {queuedPreprocessSummary.totalSavedTokens > 0 && (
+                      <span className="rounded bg-white/80 px-1.5 py-0.5 font-mono text-[10px] text-[#14532D]">
+                        صرفه‌جویی {toPersianDigits(queuedPreprocessSummary.totalSavedTokens)} توکن
+                      </span>
+                    )}
+                  </div>
+                  {queuedPreprocessSummary.hybridCount > 0 && (
+                    <p>
+                      • <strong>{toPersianDigits(queuedPreprocessSummary.hybridCount)} فایل ترکیبی (Hybrid):</strong>{' '}
+                      {toPersianDigits(queuedPreprocessSummary.totalPrunedBlocks)} بخش غیرخودرویی به‌صورت جراحی حذف شد و ۱۰۰٪ بخش‌های خودرویی، جداول، کدهای هگز و DTC حفظ گردید.
+                    </p>
+                  )}
+                  {queuedPreprocessSummary.rejectedCount > 0 && (
+                    <p>
+                      • <strong>{toPersianDigits(queuedPreprocessSummary.rejectedCount)} فایل غیرمرتبط با خودرو:</strong>{' '}
+                      فاقد هرگونه کلیدواژه فنی خودرو/ECU است و در لایه ۰ بدون مصرف توکن رد می‌شود.
+                    </p>
+                  )}
+                </div>
+              )}
+
+              {/* Source Files Name Filter Search Bar */}
+              {(sourceFiles.length > 0 || queuedFiles.length > 0) && (
+            <div className="relative" data-testid="sidebar-source-file-search-wrapper">
+              <label htmlFor="sidebar-source-file-filter-input" className="sr-only">
+                جستجو و فیلتر فایل‌های منبع پروژه بر اساس نام
+              </label>
+              <Search
+                className="pointer-events-none absolute right-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-[#78716C]"
+                aria-hidden="true"
+              />
+              <input
+                id="sidebar-source-file-filter-input"
+                data-testid="sidebar-source-file-search"
+                type="text"
+                value={sourceFileFilter}
+                onChange={(e) => setSourceFileFilter(e.target.value)}
+                placeholder="جستجوی نام فایل منبع در این پروژه..."
+                className="w-full rounded-lg border border-[#D6D0C4] bg-white py-1.5 pr-8 pl-8 text-xs text-[#1A1816] placeholder:text-[#8C857B] focus:border-[#1E3A5F] focus:outline-none"
+              />
+              {sourceFileFilter.trim().length > 0 && (
+                <button
+                  type="button"
+                  onClick={() => setSourceFileFilter('')}
+                  aria-label="پاک کردن فیلتر نام فایل"
+                  className="absolute left-1.5 top-1/2 -translate-y-1/2 flex h-6 w-6 items-center justify-center rounded-md text-[#78716C] hover:bg-[#EFECE4] hover:text-[#1A1816] cursor-pointer"
+                >
+                  <X className="h-3.5 w-3.5" />
+                </button>
+              )}
+            </div>
+          )}
+
+          {/* Filtered Project Source Files List */}
+          {sourceFiles.length > 0 && (
+            filteredSourceFiles.length === 0 ? (
+              <div
+                data-testid="sidebar-source-files-empty"
+                className="flex items-center justify-between gap-2 rounded-lg border border-[#E5E0D6] bg-white px-3 py-2 text-[11px] text-[#57534E]"
+              >
+                <span className="truncate">
+                  فایلی با نام «{sourceFileFilter.trim()}» یافت نشد.
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setSourceFileFilter('')}
+                  className="shrink-0 font-bold text-[#1E3A5F] hover:underline cursor-pointer"
+                >
+                  پاک کردن
+                </button>
+              </div>
+            ) : (
+              <ul
+                data-testid="sidebar-source-files-list"
+                className="max-h-40 overflow-y-auto space-y-1.5 pl-0.5"
+              >
+                {filteredSourceFiles.map(({ item: sf, nameSegments }) => (
+                  <li
+                    key={sf.id}
+                    data-testid="sidebar-source-file-item"
+                    className="flex items-center justify-between gap-2 rounded-lg border border-[#E5E0D6] bg-white px-2.5 py-2 text-xs transition-colors hover:border-[#CFC8B9]"
+                  >
+                    <div className="min-w-0 flex-1">
+                      <div
+                        className="truncate font-bold text-[#1A1816]"
+                        dir="auto"
+                        title={sf.fileName}
+                      >
+                        {nameSegments.map((seg, idx) =>
+                          seg.matched ? (
+                            <mark
+                              key={idx}
+                              className="rounded-xs bg-[#FEF3C7] px-0.5 text-[#1A1816]"
+                            >
+                              {seg.text}
+                            </mark>
+                          ) : (
+                            <React.Fragment key={idx}>{seg.text}</React.Fragment>
+                          )
+                        )}
+                      </div>
+                      <div className="mt-0.5 flex flex-wrap items-center gap-x-1.5 text-[10.5px] text-[#78716C] tabular-nums">
+                        <span className="font-mono font-semibold text-[#1E3A5F]">
+                          {sf.format.toUpperCase()}
+                        </span>
+                        <span aria-hidden="true">·</span>
+                        <span>{toPersianDigits(sf.wordCount)} کلمه</span>
+                        <span aria-hidden="true">·</span>
+                        <span>{toPersianDigits(sf.unitCount)} واحد</span>
+                        {sf.sizeBytes > 0 && (
+                          <>
+                            <span aria-hidden="true">·</span>
+                            <span>{formatCompactFileSize(sf.sizeBytes)}</span>
+                          </>
+                        )}
+                      </div>
+                    </div>
+
+                    <button
+                      type="button"
+                      onClick={() => setRequestedDiffFileId(sf.id)}
+                      aria-label={`مقایسه فایل ${sf.fileName}`}
+                      title="مشاهده مقایسه نسخه منبع و نسخه ثبت‌شده (Diff View)"
+                      className="inline-flex min-h-[30px] shrink-0 items-center gap-1 rounded-md border border-[#DDE6F0] bg-[#F5F8FC] px-2 py-1 text-[10.5px] font-bold text-[#1E3A5F] hover:border-[#1E3A5F] hover:bg-[#E9F0F8] cursor-pointer whitespace-nowrap"
+                    >
+                      <FileDiff className="h-3 w-3 shrink-0" />
+                      <span>مقایسه</span>
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )
+          )}
+
           {activeWorkflowMode === 'master_update' && (
             <p className="mt-1 text-[11px] text-[#57534E] leading-5">
-              روی برچسب هر فایل بزنید تا «سند مرجع (Master)» و فایل‌های تکمیلی مشخص شوند.
+              روی برچسب هر فایل بزنید یا از پنل عملیات گروهی زیر، «نقش فایل (File Role)» را برای چند فایل انتخاب‌شده یک‌جا تعیین کنید.
             </p>
           )}
+          <AutomotiveConsentBanner
+            accepted={automotiveConsentAccepted}
+            onChangeAccepted={handleToggleAutomotiveConsent}
+            compact
+          />
+
+          {/* Bulk-Action Panel for Assigning File Role + Queue Progress Summary */}
+          {queuedFiles.length > 0 && (
+            <div
+              data-testid="sidebar-bulk-role-panel"
+              className="rounded-lg border border-[#D6D0C4] bg-[#FAF9F5] p-2.5 space-y-2"
+            >
+              <div className="flex items-center justify-between gap-2">
+                <label className="inline-flex items-center gap-1.5 text-[11px] font-bold text-[#1A1816] cursor-pointer">
+                  <input
+                    type="checkbox"
+                    data-testid="sidebar-bulk-select-all"
+                    checked={
+                      queuedFiles.length > 0 &&
+                      selectedQueueIds.length === queuedFiles.length
+                    }
+                    onChange={handleSelectAllQueuedFiles}
+                    className="h-3.5 w-3.5 accent-[#1E3A5F] cursor-pointer"
+                  />
+                  <span>
+                    عملیات گروهی نقش فایل (File Role) ·{' '}
+                    <span className="text-[#1E3A5F]">
+                      {toPersianDigits(selectedQueueIds.length)} از{' '}
+                      {toPersianDigits(queuedFiles.length)} انتخاب‌شده
+                    </span>
+                  </span>
+                </label>
+
+                {selectedQueueIds.length > 0 && (
+                  <button
+                    type="button"
+                    data-testid="sidebar-bulk-clear-selection"
+                    onClick={() => setSelectedQueueIds([])}
+                    className="text-[10.5px] font-semibold text-[#78716C] hover:text-[#1A1816] cursor-pointer"
+                  >
+                    لغو انتخاب
+                  </button>
+                )}
+              </div>
+
+              <div className="flex flex-wrap items-center gap-1.5">
+                <select
+                  data-testid="sidebar-bulk-role-select"
+                  aria-label="انتخاب نقش فایل برای اعمال گروهی"
+                  value={bulkTargetRole}
+                  onChange={(e) => setBulkTargetRole(e.target.value as FileRole)}
+                  className="flex-1 min-w-[130px] rounded-md border border-[#D6D0C4] bg-white px-2 py-1.5 text-[11px] font-semibold text-[#1A1816] focus:border-[#1E3A5F] focus:outline-none"
+                >
+                  <option value="supplement">فایل تکمیلی (Supplement)</option>
+                  <option value="standard">استاندارد (Standard)</option>
+                  <option value="master">سند مرجع (Master)</option>
+                </select>
+
+                <button
+                  type="button"
+                  data-testid="sidebar-bulk-apply-role-btn"
+                  disabled={selectedQueueIds.length === 0}
+                  onClick={() => handleApplyBulkFileRole(bulkTargetRole)}
+                  className="inline-flex min-h-[30px] items-center justify-center rounded-md bg-[#1E3A5F] px-2.5 py-1 text-[11px] font-bold text-white hover:bg-[#162C49] disabled:opacity-45 cursor-pointer whitespace-nowrap"
+                >
+                  اعمال نقش به انتخاب‌شده‌ها ({toPersianDigits(selectedQueueIds.length)})
+                </button>
+              </div>
+
+              {/* Quick 1-click preset role buttons for selected files */}
+              <div className="flex flex-wrap items-center gap-1 pt-0.5">
+                <button
+                  type="button"
+                  data-testid="sidebar-bulk-quick-supplement"
+                  disabled={selectedQueueIds.length === 0}
+                  onClick={() => handleApplyBulkFileRole('supplement')}
+                  className="rounded border border-[#D6D0C4] bg-white px-2 py-0.5 text-[10px] font-bold text-[#44403C] hover:bg-[#EFECE4] disabled:opacity-45 cursor-pointer"
+                >
+                  تبدیل به تکمیلی
+                </button>
+                <button
+                  type="button"
+                  data-testid="sidebar-bulk-quick-standard"
+                  disabled={selectedQueueIds.length === 0}
+                  onClick={() => handleApplyBulkFileRole('standard')}
+                  className="rounded border border-[#D6D0C4] bg-white px-2 py-0.5 text-[10px] font-bold text-[#44403C] hover:bg-[#EFECE4] disabled:opacity-45 cursor-pointer"
+                >
+                  تبدیل به استاندارد
+                </button>
+                <button
+                  type="button"
+                  data-testid="sidebar-bulk-quick-master"
+                  disabled={selectedQueueIds.length === 0}
+                  onClick={() => handleApplyBulkFileRole('master')}
+                  className="rounded border border-[#1E3A5F] bg-[#EEF3F8] px-2 py-0.5 text-[10px] font-bold text-[#1E3A5F] hover:bg-[#DFE9F4] disabled:opacity-45 cursor-pointer"
+                >
+                  تعیین به‌عنوان مرجع (Master)
+                </button>
+              </div>
+            </div>
+          )}
+
           <FileDropzone
             queuedFiles={queuedFiles}
             onAddFiles={onAddFiles}
@@ -297,8 +1010,17 @@ export const WorkspaceSidebar: React.FC<WorkspaceSidebarProps> = ({
             onClearFiles={onClearFiles}
             showRoleSelector={activeWorkflowMode === 'master_update'}
             onSetFileRole={onSetFileRole}
-            disabled={processing}
+            selectedFileIds={selectedQueueIds}
+            onToggleSelectFile={handleToggleSelectQueuedFile}
+            disabled={processing || !automotiveConsentAccepted}
+            sourceFiles={sourceFiles}
+            contentUnits={contentUnits}
+            fileNameFilter={sourceFileFilter}
+            requestedDiffFileId={requestedDiffFileId}
+            onClearDiffRequest={() => setRequestedDiffFileId(null)}
           />
+            </>
+          )}
         </section>
 
         {/* 4. Primary Stage-1 CTA (Single Responsibility: Ingest & Extract Only) */}
@@ -540,6 +1262,29 @@ export const WorkspaceSidebar: React.FC<WorkspaceSidebarProps> = ({
                     ))}
                   </div>
                 </div>
+
+                {/* Built-in Universal System Prompt Constitution (always active on every uploaded file) */}
+                <details className="rounded-lg border border-[#E2DDD2] bg-[#FAF9F6] px-2.5 py-2">
+                  <summary className="flex cursor-pointer list-none items-center justify-between text-[11px] font-bold text-[#1E3A5F]">
+                    <span>قوانین سیستمی پایه (همیشه فعال برای همه فایل‌ها)</span>
+                    <span className="rounded bg-[#E6EDF5] px-1.5 py-0.5 text-[10px] font-semibold text-[#1E3A5F]">
+                      {toPersianDigits(UNIVERSAL_SYSTEM_PROMPT_RULES.length)} قانون
+                    </span>
+                  </summary>
+                  <ul className="mt-2 space-y-1.5 border-t border-[#EAE5DA] pt-2 text-[10.5px] leading-5 text-[#44403C]">
+                    {UNIVERSAL_SYSTEM_PROMPT_RULES.map((rule) => (
+                      <li key={rule.id} className="flex items-start gap-1.5">
+                        <span className="mt-0.5 shrink-0 font-bold text-[#1E3A5F]">
+                          {toPersianDigits(rule.order)}.
+                        </span>
+                        <span>
+                          <strong className="text-[#1A1816]">{rule.titleFa}:</strong>{' '}
+                          {rule.summaryFa}
+                        </span>
+                      </li>
+                    ))}
+                  </ul>
+                </details>
               </div>
 
               {/* Modular Visual & Word Toggles */}

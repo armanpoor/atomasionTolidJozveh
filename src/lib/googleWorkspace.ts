@@ -747,7 +747,7 @@ export async function uploadFinalDocumentToDrive(params: {
     mimeType,
     sizeBytes,
     webViewLink:
-      uploaded.webViewLink || `https://drive.google.com/file/d/${uploaded.id}/view`,
+      uploaded.webViewLink || `https://drive.google.com/file/d/${encodeURIComponent(uploaded.id)}/view`,
     updated: Boolean(existingFileId),
   };
 }
@@ -951,7 +951,7 @@ export async function createBookSpreadsheet(params: {
     spreadsheetId: created.spreadsheetId,
     spreadsheetUrl:
       created.spreadsheetUrl ||
-      `https://docs.google.com/spreadsheets/d/${created.spreadsheetId}/edit`,
+      `https://docs.google.com/spreadsheets/d/${encodeURIComponent(created.spreadsheetId)}/edit`,
     title: created.properties?.title || title,
   };
 }
@@ -1250,7 +1250,7 @@ export async function createBookGoogleDoc(params: {
 
   return {
     documentId: created.documentId,
-    documentUrl: `https://docs.google.com/document/d/${created.documentId}/edit`,
+    documentUrl: `https://docs.google.com/document/d/${encodeURIComponent(created.documentId)}/edit`,
     title: created.title || title,
   };
 }
@@ -1433,3 +1433,514 @@ export async function createBookPresentation(params: {
     slideCount: slidesPlan.length,
   };
 }
+
+// ============================================================================
+// COLLABORATIVE AUTOMOTIVE KNOWLEDGE PLATFORM — DRIVE / SHEETS / DOCS HELPERS
+// ============================================================================
+
+export interface CategorizedDriveUploadResult {
+  id: string;
+  name: string;
+  webViewLink: string;
+  folderId: string;
+  folderPath: string;
+}
+
+/**
+ * Uploads any automotive team asset (.ols, .kp, .pdf, .docx, audio, etc.) into a structured
+ * Google Drive folder hierarchy: RootFolder -> CategoryFolder -> SubFolder.
+ */
+export async function uploadAutomotiveAssetToCategorizedDriveFolder(params: {
+  accessToken: string;
+  rootFolderId?: string | null;
+  rootFolderName?: string;
+  categoryFolder: string;
+  subFolder: string;
+  fileName: string;
+  mimeType: string;
+  contentBytes: Uint8Array;
+  description?: string;
+}): Promise<CategorizedDriveUploadResult> {
+  const {
+    accessToken,
+    rootFolderId,
+    rootFolderName = 'دیتابیس مرجع تخصصی خودرو',
+    categoryFolder,
+    subFolder,
+    fileName,
+    mimeType,
+    contentBytes,
+    description,
+  } = params;
+
+  const rootId = rootFolderId?.trim()
+    ? rootFolderId.trim()
+    : (
+        await findOrCreateDriveFolder({
+          accessToken,
+          folderName: rootFolderName,
+        })
+      ).id;
+
+  const catFolder = await findOrCreateDriveFolder({
+    accessToken,
+    folderName: categoryFolder || 'اسناد-مرجع',
+    parentId: rootId,
+  });
+
+  const leafFolder = await findOrCreateDriveFolder({
+    accessToken,
+    folderName: subFolder || 'عمومی',
+    parentId: catFolder.id,
+  });
+
+  const safeFileName = fileName.replace(/[\u0000-\u001F\u007F/\\]+/g, '_').trim() || 'automotive-file';
+  const safeMime = mimeType?.trim() || 'application/octet-stream';
+
+  const metadata: Record<string, unknown> = {
+    name: safeFileName,
+    parents: [leafFolder.id],
+    ...(description ? { description: description.slice(0, 500) } : {}),
+  };
+
+  const payload = buildMultipartRelatedUploadPayload({
+    metadata,
+    contentBytes,
+    mimeType: safeMime,
+  });
+
+  const res = await fetch(
+    'https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id,name,webViewLink',
+    {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        'Content-Type': payload.contentType,
+      },
+      body: new Blob([payload.bytes.slice()], { type: payload.contentType }),
+    }
+  );
+
+  if (!res.ok) {
+    const msg = await parseGoogleErrorMessage(res);
+    throw new Error(`خطا در آپلود فایل «${safeFileName}» در Google Drive: ${msg}`);
+  }
+
+  const uploaded = (await res.json()) as {
+    id: string;
+    name: string;
+    webViewLink?: string;
+  };
+
+  return {
+    id: uploaded.id,
+    name: uploaded.name || safeFileName,
+    webViewLink:
+      uploaded.webViewLink || `https://drive.google.com/file/d/${uploaded.id}/view`,
+    folderId: leafFolder.id,
+    folderPath: `${rootFolderName}/${catFolder.name}/${leafFolder.name}`,
+  };
+}
+
+export interface LiveDriveBrowserEntry {
+  id: string;
+  name: string;
+  mimeType: string;
+  isFolder: boolean;
+  modifiedTime?: string;
+  sizeBytes: number;
+  webViewLink: string;
+  extension: string;
+}
+
+/**
+ * Lists live Google Drive files & folders for the internal Google Drive browser.
+ */
+export async function listDriveFolderContents(params: {
+  accessToken: string;
+  folderId?: string | null;
+  searchQuery?: string;
+  extensionFilter?: string;
+  pageSize?: number;
+}): Promise<LiveDriveBrowserEntry[]> {
+  const {
+    accessToken,
+    folderId,
+    searchQuery = '',
+    extensionFilter = 'all',
+    pageSize = 60,
+  } = params;
+
+  const clauses: string[] = ['trashed = false'];
+  if (folderId?.trim()) {
+    clauses.push(`'${escapeDriveQueryString(folderId.trim())}' in parents`);
+  }
+  if (searchQuery.trim()) {
+    clauses.push(`name contains '${escapeDriveQueryString(searchQuery.trim())}'`);
+  }
+  if (extensionFilter && extensionFilter !== 'all') {
+    const cleanExt = extensionFilter.replace(/^\./, '').toLowerCase();
+    if (cleanExt === 'ols' || cleanExt === 'kp' || cleanExt === 'pdf' || cleanExt === 'docx') {
+      clauses.push(`name contains '.${escapeDriveQueryString(cleanExt)}'`);
+    }
+  }
+
+  const url = new URL('https://www.googleapis.com/drive/v3/files');
+  url.searchParams.set('q', clauses.join(' and '));
+  url.searchParams.set('pageSize', String(Math.min(100, Math.max(1, pageSize))));
+  url.searchParams.set('orderBy', 'folder,modifiedTime desc');
+  url.searchParams.set(
+    'fields',
+    'files(id,name,mimeType,modifiedTime,size,webViewLink)'
+  );
+
+  const res = await fetch(url.toString(), {
+    headers: { Authorization: `Bearer ${accessToken}` },
+  });
+  if (!res.ok) {
+    const msg = await parseGoogleErrorMessage(res);
+    throw new Error(`خطا در خواندن محتویات Google Drive: ${msg}`);
+  }
+
+  const data = (await res.json()) as {
+    files?: Array<{
+      id: string;
+      name: string;
+      mimeType: string;
+      modifiedTime?: string;
+      size?: string;
+      webViewLink?: string;
+    }>;
+  };
+
+  return (data.files || []).map((f) => {
+    const isFolder = f.mimeType === DRIVE_FOLDER_MIME;
+    const ext = !isFolder && f.name.includes('.') ? (f.name.split('.').pop() || '').toLowerCase() : '';
+    return {
+      id: f.id,
+      name: f.name,
+      mimeType: f.mimeType,
+      isFolder,
+      modifiedTime: f.modifiedTime,
+      sizeBytes: f.size ? Number(f.size) || 0 : 0,
+      webViewLink:
+        f.webViewLink ||
+        (isFolder
+          ? `https://drive.google.com/drive/folders/${encodeURIComponent(f.id)}`
+          : `https://drive.google.com/file/d/${encodeURIComponent(f.id)}/view`),
+      extension: ext,
+    };
+  });
+}
+
+/**
+ * Ensures the 13-column RTL Google Sheets Contribution Log exists inside the Drive root folder.
+ */
+export async function ensureContributionLogSpreadsheet(params: {
+  accessToken: string;
+  existingSpreadsheetId?: string | null;
+  parentFolderId?: string | null;
+  title?: string;
+  tabName?: string;
+  headers: readonly string[];
+}): Promise<{ spreadsheetId: string; spreadsheetUrl: string; tabName: string; created: boolean }> {
+  const {
+    accessToken,
+    existingSpreadsheetId,
+    parentFolderId,
+    title = 'گزارش مشارکت‌های دیتابیس مرجع خودرو',
+    tabName = 'گزارش مشارکت‌ها',
+    headers,
+  } = params;
+
+  if (existingSpreadsheetId?.trim()) {
+    const checkRes = await fetch(
+      `https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(existingSpreadsheetId.trim())}?fields=spreadsheetId,spreadsheetUrl,sheets(properties(title))`,
+      { headers: { Authorization: `Bearer ${accessToken}` } }
+    );
+    if (checkRes.ok) {
+      const existing = (await checkRes.json()) as {
+        spreadsheetId: string;
+        spreadsheetUrl?: string;
+        sheets?: Array<{ properties?: { title?: string } }>;
+      };
+      const resolvedTab = existing.sheets?.[0]?.properties?.title || tabName;
+      return {
+        spreadsheetId: existing.spreadsheetId,
+        spreadsheetUrl:
+          existing.spreadsheetUrl ||
+          `https://docs.google.com/spreadsheets/d/${encodeURIComponent(existing.spreadsheetId)}/edit`,
+        tabName: resolvedTab,
+        created: false,
+      };
+    }
+  }
+
+  const createRes = await fetch('https://sheets.googleapis.com/v4/spreadsheets', {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      properties: {
+        title,
+        locale: 'fa_IR',
+      },
+      sheets: [
+        {
+          properties: {
+            title: tabName,
+            rightToLeft: true,
+            gridProperties: {
+              frozenRowCount: 1,
+            },
+          },
+        },
+      ],
+    }),
+  });
+
+  if (!createRes.ok) {
+    const msg = await parseGoogleErrorMessage(createRes);
+    throw new Error(`خطا در ایجاد شیت گزارش مشارکت‌ها در Google Sheets: ${msg}`);
+  }
+
+  const created = (await createRes.json()) as {
+    spreadsheetId: string;
+    spreadsheetUrl?: string;
+  };
+
+  // Write the 13 Persian header columns to Row 1
+  const headerRange = encodeURIComponent(`'${tabName}'!A1:M1`);
+  await fetch(
+    `https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(
+      created.spreadsheetId
+    )}/values/${headerRange}?valueInputOption=RAW`,
+    {
+      method: 'PUT',
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        range: `'${tabName}'!A1:M1`,
+        majorDimension: 'ROWS',
+        values: [[...headers]],
+      }),
+    }
+  );
+
+  // Optionally place the spreadsheet inside the configured Drive root folder
+  if (parentFolderId?.trim()) {
+    await fetch(
+      `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(
+        created.spreadsheetId
+      )}?addParents=${encodeURIComponent(parentFolderId.trim())}&fields=id`,
+      {
+        method: 'PATCH',
+        headers: { Authorization: `Bearer ${accessToken}` },
+      }
+    ).catch(() => undefined);
+  }
+
+  return {
+    spreadsheetId: created.spreadsheetId,
+    spreadsheetUrl:
+      created.spreadsheetUrl ||
+      `https://docs.google.com/spreadsheets/d/${encodeURIComponent(created.spreadsheetId)}/edit`,
+    tabName,
+    created: true,
+  };
+}
+
+/**
+ * Appends one or more 13-column contribution rows to Google Sheets (values:append).
+ */
+export async function appendContributionRowsToSheet(params: {
+  accessToken: string;
+  spreadsheetId: string;
+  tabName?: string;
+  rows: string[][];
+}): Promise<{ updatedRows: number }> {
+  const { accessToken, spreadsheetId, tabName = 'گزارش مشارکت‌ها', rows } = params;
+  if (rows.length === 0) return { updatedRows: 0 };
+
+  const range = encodeURIComponent(`'${tabName}'!A:M`);
+  const res = await fetch(
+    `https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(
+      spreadsheetId
+    )}/values/${range}:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS`,
+    {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        majorDimension: 'ROWS',
+        values: rows,
+      }),
+    }
+  );
+
+  if (!res.ok) {
+    const msg = await parseGoogleErrorMessage(res);
+    throw new Error(`خطا در افزودن ردیف به Google Sheets: ${msg}`);
+  }
+
+  const data = (await res.json()) as {
+    updates?: { updatedRows?: number };
+  };
+  return { updatedRows: data.updates?.updatedRows ?? rows.length };
+}
+
+/**
+ * Creates or updates a Google Doc synchronized with a Reference Automotive Volume (RTL).
+ */
+export async function syncReferenceVolumeToGoogleDoc(params: {
+  accessToken: string;
+  volumeTitle: string;
+  markdownContent: string;
+  existingDocId?: string | null;
+  parentFolderId?: string | null;
+}): Promise<{ documentId: string; documentUrl: string; updated: boolean }> {
+  const { accessToken, volumeTitle, markdownContent, existingDocId, parentFolderId } = params;
+  const cleanText = `${volumeTitle}\n\n${markdownContent.trim()}\n`;
+
+  let documentId = existingDocId?.trim() || '';
+  let updated = false;
+
+  if (documentId) {
+    // Read current doc endIndex so we can cleanly replace its body with latest synced reference content
+    const getRes = await fetch(
+      `https://docs.googleapis.com/v1/documents/${encodeURIComponent(documentId)}?fields=documentId,body(content(endIndex))`,
+      { headers: { Authorization: `Bearer ${accessToken}` } }
+    );
+    if (getRes.ok) {
+      const docJson = (await getRes.json()) as {
+        body?: { content?: Array<{ endIndex?: number }> };
+      };
+      const contentArr = docJson.body?.content || [];
+      const lastEnd = contentArr[contentArr.length - 1]?.endIndex || 1;
+      const requests: Array<Record<string, unknown>> = [];
+      if (lastEnd > 2) {
+        requests.push({
+          deleteContentRange: {
+            range: { startIndex: 1, endIndex: lastEnd - 1 },
+          },
+        });
+      }
+      requests.push(
+        { insertText: { location: { index: 1 }, text: cleanText } },
+        {
+          updateParagraphStyle: {
+            range: { startIndex: 1, endIndex: Math.max(2, cleanText.length) },
+            paragraphStyle: { direction: 'RIGHT_TO_LEFT' },
+            fields: 'direction',
+          },
+        }
+      );
+
+      const batchRes = await fetch(
+        `https://docs.googleapis.com/v1/documents/${encodeURIComponent(documentId)}:batchUpdate`,
+        {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${accessToken}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({ requests }),
+        }
+      );
+      if (batchRes.ok) {
+        updated = true;
+      } else {
+        documentId = '';
+      }
+    } else {
+      documentId = '';
+    }
+  }
+
+  if (!documentId) {
+    const createRes = await fetch('https://docs.googleapis.com/v1/documents', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ title: volumeTitle }),
+    });
+    if (!createRes.ok) {
+      const msg = await parseGoogleErrorMessage(createRes);
+      throw new Error(`خطا در ساخت سند Google Docs برای «${volumeTitle}»: ${msg}`);
+    }
+    const created = (await createRes.json()) as { documentId: string };
+    documentId = created.documentId;
+
+    await fetch(
+      `https://docs.googleapis.com/v1/documents/${encodeURIComponent(documentId)}:batchUpdate`,
+      {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          requests: [
+            { insertText: { location: { index: 1 }, text: cleanText } },
+            {
+              updateParagraphStyle: {
+                range: { startIndex: 1, endIndex: Math.max(2, cleanText.length) },
+                paragraphStyle: { direction: 'RIGHT_TO_LEFT' },
+                fields: 'direction',
+              },
+            },
+          ],
+        }),
+      }
+    );
+
+    if (parentFolderId?.trim()) {
+      await fetch(
+        `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(
+          documentId
+        )}?addParents=${encodeURIComponent(parentFolderId.trim())}&fields=id`,
+        {
+          method: 'PATCH',
+          headers: { Authorization: `Bearer ${accessToken}` },
+        }
+      ).catch(() => undefined);
+    }
+  }
+
+  return {
+    documentId,
+    documentUrl: `https://docs.google.com/document/d/${encodeURIComponent(documentId)}/edit`,
+    updated,
+  };
+}
+
+/**
+ * Pulls latest edited plain text / markdown from a linked Google Doc so team edits can be merged
+ * into the reference book with revision history.
+ */
+export async function pullGoogleDocContentAsMarkdown(params: {
+  accessToken: string;
+  documentId: string;
+}): Promise<string> {
+  const { accessToken, documentId } = params;
+  const res = await fetch(
+    `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(
+      documentId
+    )}/export?mimeType=${encodeURIComponent('text/plain')}`,
+    { headers: { Authorization: `Bearer ${accessToken}` } }
+  );
+  if (!res.ok) {
+    const msg = await parseGoogleErrorMessage(res);
+    throw new Error(`خطا در دریافت آخرین ویرایش از Google Docs: ${msg}`);
+  }
+  return (await res.text()).trim();
+}
+

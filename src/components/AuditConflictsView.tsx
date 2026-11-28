@@ -11,6 +11,7 @@ import {
   Loader2,
   RefreshCw,
   ShieldCheck,
+  Sparkles,
 } from 'lucide-react';
 import {
   AuditReportDto,
@@ -18,6 +19,7 @@ import {
   DedupClusterDto,
 } from '../lib/bookTypes';
 import type { TechnicalIntegrityAuditReport } from '../lib/ecuTechnicalIntegrity';
+import type { EntityMicroRoutingReport } from '../lib/entityMicroRouter';
 import type { NumericDiscrepancyReport } from '../lib/numericDiscrepancyAnalyzer';
 import { toPersianDigits } from '../lib/formatParsers';
 import { computeHarnessComparisonProof, formatUsdClean } from '../lib/tokenOptimizer';
@@ -34,7 +36,9 @@ interface AuditConflictsViewProps {
   hasDedupResults?: boolean;
   hasOutline?: boolean;
   runningDedup?: boolean;
+  ingestingWorkspaceQueue?: boolean;
   onRunDedup?: () => Promise<void>;
+  onIngestWorkspaceQueue?: () => Promise<void>;
   onProceedToOutline?: () => void;
   onRescanConflicts?: () => Promise<void>;
   onCheckConflictWithGoogle: (conflictId: string) => Promise<void>;
@@ -64,13 +68,16 @@ export const AuditConflictsView: React.FC<AuditConflictsViewProps> = ({
   hasDedupResults = true,
   hasOutline = false,
   runningDedup = false,
+  ingestingWorkspaceQueue = false,
   onRunDedup,
+  onIngestWorkspaceQueue,
   onProceedToOutline,
   onRescanConflicts,
   onCheckConflictWithGoogle,
   onResolveConflict,
 }) => {
   const [notesById, setNotesById] = useState<Record<string, string>>({});
+  const [selectedFamilyFilter, setSelectedFamilyFilter] = useState<string>('all');
 
   const perFileCoverage =
     (auditReport?.detailsJson?.perFileCoverage as
@@ -90,6 +97,10 @@ export const AuditConflictsView: React.FC<AuditConflictsViewProps> = ({
 
   const numericDiscrepancyReport = auditReport?.detailsJson?.numericDiscrepancyReport as
     | NumericDiscrepancyReport
+    | undefined;
+
+  const entityMicroRoutingReport = auditReport?.detailsJson?.entityMicroRoutingReport as
+    | EntityMicroRoutingReport
     | undefined;
 
   return (
@@ -113,6 +124,26 @@ export const AuditConflictsView: React.FC<AuditConflictsViewProps> = ({
           </div>
 
           <div className="flex flex-wrap items-center gap-2">
+            {onIngestWorkspaceQueue && (
+              <button
+                type="button"
+                disabled={ingestingWorkspaceQueue || runningDedup}
+                onClick={() => void onIngestWorkspaceQueue()}
+                className="inline-flex min-h-[40px] items-center gap-1.5 rounded-lg border border-[#14532D] bg-[#EEF6F0] px-3.5 py-2 text-xs font-bold text-[#14532D] hover:bg-[#DFEFE4] cursor-pointer disabled:opacity-60"
+              >
+                {ingestingWorkspaceQueue ? (
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                ) : (
+                  <Sparkles className="h-4 w-4" />
+                )}
+                <span>
+                  {ingestingWorkspaceQueue
+                    ? 'در حال خوشه‌بندی ۷ فایل و ۱۰ تصویر...'
+                    : 'تجمیع هوشمند ۷ فایل صف + ۱۰ تصویر J34 (۰٪ مصرف سهمیه)'}
+                </span>
+              </button>
+            )}
+
             {hasIngestedFiles && onRunDedup && (
               <button
                 type="button"
@@ -383,6 +414,171 @@ export const AuditConflictsView: React.FC<AuditConflictsViewProps> = ({
           );
         })()}
       </div>
+
+      {/* Stage 2 Universal Entity-Centric Micro-Routing & Iranian-Market ECU Master Cluster Workbench */}
+      {entityMicroRoutingReport && entityMicroRoutingReport.enabled && (
+        <section
+          data-testid="entity-micro-routing-workbench"
+          className="rounded-xl border border-[#C7DDD0] bg-white p-4 sm:p-5 space-y-5 shadow-[0_1px_2px_rgba(26,24,22,0.03)]"
+        >
+          <div className="flex flex-wrap items-start justify-between gap-3 border-b border-[#EFECE4] pb-3.5">
+            <div className="space-y-1">
+              <div className="inline-flex items-center gap-1.5 rounded-md border border-[#C7DDD0] bg-[#EEF6F0] px-2.5 py-0.5 text-[11px] font-bold text-[#14532D]">
+                <Layers className="h-3.5 w-3.5" />
+                <span>گردش‌کار جدید مرحله ۲ · خوشه‌بندی موضوعی ایسیوهای بازار ایران (ایرانی، چینی، کره‌ای)</span>
+              </div>
+              <h3 className="text-sm sm:text-base font-extrabold text-[#1A1816]">
+                مسیریابی تک‌خطی مطالب پراکنده با حفظ ارجاع در مبدأ و تجمیع بر اساس موتور و نسل
+              </h3>
+              <p className="text-xs text-[#57534E] leading-6">
+                تمامی جملات و نکات پراکنده مربوط به ایسیوهای زیمنس، بوش، دلفی، والیو J34، ساژم، کیسنس/SSAT، ایزی‌یو، غرب استیل/MAW، ACS و کفیکو که در میانه فصول عمومی (داینو، ترمودینامیک، سنسورها و...) قرار داشتند، به زیرفصلِ موتور/نسلِ همان ایسیو منتقل شده و در فصل مبدأ ارجاع متقابل ثبت گردید.
+              </p>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-2.5 text-xs tabular-nums">
+              <div className="rounded-lg border border-[#C7DDD0] bg-[#F2F7F4] px-3 py-2 text-center">
+                <div className="text-[10.5px] font-semibold text-[#14532D]">نکات تک‌خطی شکارشده</div>
+                <div className="text-base font-extrabold text-[#14532D]">
+                  {toPersianDigits(entityMicroRoutingReport.totalRoutedExtracts)} مورد
+                </div>
+              </div>
+              <div className="rounded-lg border border-[#C6D5E6] bg-[#EEF3F8] px-3 py-2 text-center">
+                <div className="text-[10.5px] font-semibold text-[#1E3A5F]">ارجاع‌های ثبت‌شده در مبدأ</div>
+                <div className="text-base font-extrabold text-[#1E3A5F]">
+                  {toPersianDigits(entityMicroRoutingReport.crossReferencesInsertedCount)} ارجاع
+                </div>
+              </div>
+              <div className="rounded-lg border border-[#E2DDD3] bg-[#FAF9F6] px-3 py-2 text-center">
+                <div className="text-[10.5px] font-semibold text-[#57534E]">خوشه‌های مرجع فعال</div>
+                <div className="text-base font-extrabold text-[#1A1816]">
+                  {toPersianDigits(entityMicroRoutingReport.clustersSummary.length)} بخش جامع
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {/* Master ECU & Technical Clusters Grid */}
+          <div className="space-y-2.5">
+            <div className="text-xs font-extrabold text-[#1E3A5F]">
+              ساختار بخش‌های جامع ایسیوها و زیرفصل‌های استاندارد (بر اساس خانواده موتور و نسل):
+            </div>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+              {entityMicroRoutingReport.clustersSummary.map((cl) => (
+                <div
+                  key={cl.familyId}
+                  className="rounded-xl border border-[#E2DDD3] bg-[#FCFBF8] p-3.5 space-y-2"
+                >
+                  <div className="flex flex-wrap items-start justify-between gap-2">
+                    <div className="font-extrabold text-xs text-[#1A1816]">{cl.masterTitleFa}</div>
+                    <div className="flex items-center gap-1.5 shrink-0">
+                      <span className="rounded border border-[#C6D5E6] bg-[#EEF3F8] px-2 py-0.5 text-[10.5px] font-bold text-[#1E3A5F] tabular-nums">
+                        {toPersianDigits(cl.totalUnitsCount)} واحد
+                      </span>
+                      {cl.routedExtractsCount > 0 && (
+                        <span className="rounded border border-[#C7DDD0] bg-[#EEF6F0] px-2 py-0.5 text-[10.5px] font-bold text-[#14532D] tabular-nums">
+                          +{toPersianDigits(cl.routedExtractsCount)} تزریق تک‌خطی
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                  <p className="text-[11px] text-[#57534E]">{cl.marketCoverageFa}</p>
+                  {cl.subChapterTitles.length > 0 && (
+                    <div className="space-y-1 pt-1 border-t border-[#EFECE4]">
+                      <div className="text-[10.5px] font-bold text-[#78716C]">
+                        زیرفصل‌های تجمیع‌شده ({toPersianDigits(cl.subChapterTitles.length)} زیرفصل):
+                      </div>
+                      <ul className="space-y-1 text-[11px] text-[#292524] pr-3 list-disc">
+                        {cl.subChapterTitles.map((sub, idx) => (
+                          <li key={idx} className="leading-5">
+                            {sub}
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+          </div>
+
+          {/* Filterable Single-Line & Sub-Block Routed Extracts Ledger */}
+          {entityMicroRoutingReport.extractRecords.length > 0 && (
+            <div className="space-y-3 pt-2 border-t border-[#EFECE4]">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="text-xs font-extrabold text-[#1A1816]">
+                  ردیاب جملات و نکات تک‌خطی منتقل‌شده به خوشه مرجع (با حفظ ارجاع در فصل مبدأ):
+                </div>
+                <div className="flex flex-wrap items-center gap-1.5">
+                  <button
+                    type="button"
+                    onClick={() => setSelectedFamilyFilter('all')}
+                    className={`rounded-md px-2.5 py-1 text-[11px] font-bold cursor-pointer ${
+                      selectedFamilyFilter === 'all'
+                        ? 'bg-[#1E3A5F] text-white'
+                        : 'border border-[#E2DDD3] bg-[#FAF9F6] text-[#57534E] hover:bg-[#EFECE4]'
+                    }`}
+                  >
+                    همه ({toPersianDigits(entityMicroRoutingReport.extractRecords.length)})
+                  </button>
+                  {Array.from(
+                    new Set(entityMicroRoutingReport.extractRecords.map((r) => r.familyId))
+                  ).map((famId) => {
+                    const count = entityMicroRoutingReport.extractRecords.filter(
+                      (r) => r.familyId === famId
+                    ).length;
+                    const label =
+                      entityMicroRoutingReport.extractRecords.find((r) => r.familyId === famId)
+                        ?.familyShortNameFa || famId;
+                    return (
+                      <button
+                        key={famId}
+                        type="button"
+                        onClick={() => setSelectedFamilyFilter(famId)}
+                        className={`rounded-md px-2.5 py-1 text-[11px] font-bold cursor-pointer ${
+                          selectedFamilyFilter === famId
+                            ? 'bg-[#14532D] text-white'
+                            : 'border border-[#E2DDD3] bg-[#FAF9F6] text-[#57534E] hover:bg-[#EFECE4]'
+                        }`}
+                      >
+                        {label} ({toPersianDigits(count)})
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
+              <div className="max-h-[420px] overflow-y-auto space-y-2.5 pr-1">
+                {entityMicroRoutingReport.extractRecords
+                  .filter(
+                    (r) => selectedFamilyFilter === 'all' || r.familyId === selectedFamilyFilter
+                  )
+                  .slice(0, 40)
+                  .map((rec) => (
+                    <div
+                      key={rec.id}
+                      className="rounded-lg border border-[#E2DDD3] bg-[#FAF9F6] p-3 text-xs space-y-1.5"
+                    >
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <span className="font-bold text-[#1E3A5F]">
+                          از: {rec.sourceFileName} · {rec.originChapterTitleFa}
+                        </span>
+                        <span className="rounded border border-[#C7DDD0] bg-[#EEF6F0] px-2 py-0.5 text-[10.5px] font-bold text-[#14532D]">
+                          مقصد: {rec.familyShortNameFa} ⟵ {rec.targetSubChapterTitleFa}
+                        </span>
+                      </div>
+                      <p className="text-[#292524] leading-6 bg-white rounded border border-[#EFECE4] p-2">
+                        <strong>متن فنی منتقل‌شده:</strong> {rec.extractedTextSnippet}
+                      </p>
+                      <p className="text-[11px] text-[#14532D] font-medium">
+                        {rec.crossReferenceTextFa}
+                      </p>
+                    </div>
+                  ))}
+              </div>
+            </div>
+          )}
+        </section>
+      )}
 
       {/* Deterministic Numeric Discrepancy & Statistical Comparison Module (Tables & Charts) */}
       <NumericDiscrepancyAnalyzer report={numericDiscrepancyReport} />

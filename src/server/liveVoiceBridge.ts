@@ -4,6 +4,7 @@ import { type FunctionDeclaration, Modality, Type } from '@google/genai';
 import crypto from 'node:crypto';
 import { adminAuth } from '../lib/firebase-admin.ts';
 import { getProjectBundle } from '../db/repository.ts';
+import { getPlatformSettings, recordTokenLedgerDelta } from '../db/collaborationRepository.ts';
 import { createGeminiClient } from './projectRoutes.ts';
 import { isGuestBearerToken, verifyGuestToken } from './guestSession.ts';
 
@@ -52,8 +53,13 @@ const MAX_WS_PAYLOAD_BYTES = 256 * 1024;
 const MAX_AUDIO_BASE64_CHARS = 200_000;
 const MAX_TEXT_CHARS = 8_000;
 const AUTH_TIMEOUT_MS = 10_000;
+const WS_RATE_WINDOW_MS = 10_000;
+const WS_MAX_MESSAGES_PER_WINDOW = 120;
 
-function isAllowedWsOrigin(originHeader: string | undefined, hostHeader: string | undefined): boolean {
+export function isAllowedWsOrigin(
+  originHeader: string | undefined,
+  headersOrHost?: string | Record<string, string | string[] | undefined>
+): boolean {
   if (!originHeader) return true;
   try {
     const originUrl = new URL(originHeader);
@@ -65,10 +71,24 @@ function isAllowedWsOrigin(originHeader: string | undefined, hostHeader: string 
     ) {
       return true;
     }
-    if (hostHeader && originHost === hostHeader.toLowerCase()) {
-      return true;
+
+    const allowedHosts = new Set<string>();
+    if (typeof headersOrHost === 'string') {
+      if (headersOrHost.trim()) allowedHosts.add(headersOrHost.trim().toLowerCase());
+    } else if (headersOrHost && typeof headersOrHost === 'object') {
+      const addHeaderHosts = (val: string | string[] | undefined) => {
+        if (!val) return;
+        const raw = Array.isArray(val) ? val.join(',') : val;
+        for (const part of raw.split(',')) {
+          const clean = part.trim().toLowerCase();
+          if (clean) allowedHosts.add(clean);
+        }
+      };
+      addHeaderHosts(headersOrHost.host);
+      addHeaderHosts(headersOrHost['x-forwarded-host']);
     }
-    if (originUrl.hostname.endsWith('.run.app') || originUrl.hostname.endsWith('.googleusercontent.com')) {
+
+    if (allowedHosts.has(originHost)) {
       return true;
     }
     return false;
@@ -79,18 +99,39 @@ function isAllowedWsOrigin(originHeader: string | undefined, hostHeader: string 
 
 export function attachLiveVoiceWebSocket(server: HttpServer) {
   const wss = new WebSocketServer({
-    server,
-    path: '/ws/live',
+    noServer: true,
     maxPayload: MAX_WS_PAYLOAD_BYTES,
   });
   wss.on('error', (err) => {
     console.error('Live voice WebSocket server error:', err);
   });
 
+  server.on('upgrade', (req, socket, head) => {
+    let pathname = '';
+    try {
+      pathname = new URL(req.url || '/', 'http://localhost').pathname;
+    } catch {
+      return;
+    }
+    if (pathname !== '/ws/live') {
+      return;
+    }
+    wss.handleUpgrade(req, socket, head, (ws) => {
+      wss.emit('connection', ws, req);
+    });
+  });
+
+  server.once('close', () => {
+    try {
+      wss.close();
+    } catch {
+      // ignore close errors during shutdown
+    }
+  });
+
   wss.on('connection', (ws: WebSocket, req) => {
     const originHeader = typeof req.headers.origin === 'string' ? req.headers.origin : undefined;
-    const hostHeader = typeof req.headers.host === 'string' ? req.headers.host : undefined;
-    if (!isAllowedWsOrigin(originHeader, hostHeader)) {
+    if (!isAllowedWsOrigin(originHeader, req.headers)) {
       ws.close(1008, 'Origin not allowed');
       return;
     }
@@ -99,6 +140,7 @@ export function attachLiveVoiceWebSocket(server: HttpServer) {
       null;
     let authenticated = false;
     let startingSession = false;
+    const recentMessageTimestamps: number[] = [];
 
     const closeLiveSession = () => {
       if (liveSession) {
@@ -128,6 +170,19 @@ export function attachLiveVoiceWebSocket(server: HttpServer) {
     authTimer.unref?.();
 
     ws.on('message', async (raw) => {
+      const nowMs = Date.now();
+      while (
+        recentMessageTimestamps.length > 0 &&
+        nowMs - recentMessageTimestamps[0] > WS_RATE_WINDOW_MS
+      ) {
+        recentMessageTimestamps.shift();
+      }
+      if (recentMessageTimestamps.length >= WS_MAX_MESSAGES_PER_WINDOW) {
+        sendJson({ type: 'error', message: 'تعداد پیام‌های صوتی بیش از حد مجاز است. لحظه‌ای صبر کنید.' });
+        return;
+      }
+      recentMessageTimestamps.push(nowMs);
+
       try {
         const msg = JSON.parse(raw.toString()) as {
           type?: string;
@@ -177,6 +232,19 @@ export function attachLiveVoiceWebSocket(server: HttpServer) {
           }
 
           clearTimeout(authTimer);
+
+          const platformSettings = await getPlatformSettings();
+          if (!platformSettings.enableUserPersonalOutput) {
+            await recordTokenLedgerDelta({ zeroTokenBlockedPersonalCalls: 1 }).catch(() => undefined);
+            startingSession = false;
+            sendJson({
+              type: 'error',
+              message:
+                'مسیر پردازش و دستیار شخصی هم‌اکنون توسط مالک غیرفعال است (صفر مصرف توکن برای خروجی شخصی).',
+            });
+            ws.close(1008, 'Personal output disabled');
+            return;
+          }
 
           const ai = createGeminiClient();
           if (!ai) {
@@ -321,25 +389,36 @@ export function attachLiveVoiceWebSocket(server: HttpServer) {
             sendJson({ type: 'error', message: 'بسته صوتی ارسال‌شده بیش از حد مجاز است.' });
             return;
           }
-          liveSession.sendRealtimeInput({
-            audio: {
-              data: msg.data,
-              mimeType: 'audio/pcm;rate=16000',
-            },
-          });
+          try {
+            liveSession.sendRealtimeInput({
+              audio: {
+                data: msg.data,
+                mimeType: 'audio/pcm;rate=16000',
+              },
+            });
+          } catch (sendErr) {
+            console.warn('[LiveVoiceBridge] sendRealtimeInput failed:', sendErr);
+            sendJson({ type: 'error', message: 'ارسال بسته صوتی به جلسه زنده با خطا مواجه شد.' });
+          }
         } else if (msg.type === 'text' && typeof msg.text === 'string' && msg.text.trim()) {
-          liveSession.sendClientContent({
-            turns: [{ role: 'user', parts: [{ text: msg.text.slice(0, MAX_TEXT_CHARS) }] }],
-            turnComplete: true,
-          });
+          try {
+            liveSession.sendClientContent({
+              turns: [{ role: 'user', parts: [{ text: msg.text.slice(0, MAX_TEXT_CHARS) }] }],
+              turnComplete: true,
+            });
+          } catch (sendErr) {
+            console.warn('[LiveVoiceBridge] sendClientContent failed:', sendErr);
+            sendJson({ type: 'error', message: 'ارسال پیام متنی به جلسه زنده با خطا مواجه شد.' });
+          }
         } else if (msg.type === 'stop') {
           closeLiveSession();
         }
       } catch (err) {
         startingSession = false;
+        console.warn('[LiveVoiceBridge] Message processing error:', err);
         sendJson({
           type: 'error',
-          message: err instanceof Error ? err.message : 'خطا در پردازش پیام صوتی.',
+          message: 'خطا در پردازش پیام صوتی. لطفاً اتصال را دوباره بررسی کنید.',
         });
       }
     });

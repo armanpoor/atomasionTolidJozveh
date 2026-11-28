@@ -1,4 +1,4 @@
-import {
+import type {
   CalloutBlock,
   ChapterNode,
   CheatSheetEntry,
@@ -14,14 +14,14 @@ import {
   TableBlock,
   TableIndexEntry,
   VisualSuggestion,
-} from './bookTypes';
+} from './bookTypes.ts';
 import {
   cleanDirectionalMarks,
   extractFootnoteTermKey,
   formatReadableEquation,
   toAsciiDigits,
   toPersianDigits,
-} from './formatParsers';
+} from './formatParsers.ts';
 
 function countWords(text: string): number {
   const cleaned = text.replace(/\[\[\d+\]\]\(#footnote-\d+\)/g, ' ').trim();
@@ -96,6 +96,14 @@ function repairTypography(text: string, normalizeZwnj: boolean): { text: string;
   }
   if (/[0-9)]imes[0-9(]/.test(out)) {
     replaceCount(/([0-9)])imes([0-9(])/g, '$1 × $2');
+  }
+
+  // Strip residual HTML directional wrapper tags (<span dir="rtl">, </span>) and stray CJK/Cyrillic glitches
+  if (/<\/?(?:span|div)\b/i.test(out)) {
+    replaceCount(/<\/?(?:span|div)(?:\s+(?:dir|lang|class|style)\s*=\s*["'][^"']*["'])*\s*>/gi, '');
+  }
+  if (/[\u4E00-\u9FFF\u3400-\u4DBF\u0400-\u04FF]/.test(out)) {
+    replaceCount(/[\u4E00-\u9FFF\u3400-\u4DBF\u0400-\u04FF]+/g, '');
   }
 
   // Clean excessive internal spaces (preserve normal single spaces)

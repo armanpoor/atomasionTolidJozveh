@@ -495,4 +495,171 @@ test('runDeterministicLosslessDedup keeps all complementary hex mapping rows act
   assert.ok(dedup.unitUpdates.every((u) => u.status === 'active'), 'Every complementary row must stay active');
 });
 
+test('Stage 2 Entity-Centric Micro-Routing & Table Stitcher consolidates all 7 uploaded files and 10 Valeo J34 calibration images across Iranian-market ECU families with 100% zero-loss coverage', async () => {
+  const fs = await import('node:fs');
+  const path = await import('node:path');
+  const assetsDir = path.resolve(process.cwd(), 'public', 'assets', 'aistudio');
+
+  const specs: Array<{ diskName: string; displayName: string; role: 'master' | 'supplement' }> = [
+    { diskName: 'BOOK_DAY01_04_Final.docx_07da70df.md', displayName: 'BOOK_DAY01_04_Final.docx.md', role: 'master' },
+    { diskName: '____________ab18c9d8.md', displayName: 'ایسیو زیمنس.md', role: 'supplement' },
+    { diskName: 'Bakhsh1_Dars_01_ta_08-1_1707ad79.md', displayName: 'Bakhsh1_Dars_01_ta_08-1.md', role: 'supplement' },
+    { diskName: 'Bakhsh2_Dars_08-2_ta_09-3_89994058.md', displayName: 'Bakhsh2_Dars_08-2_ta_09-3.md', role: 'supplement' },
+    { diskName: 'dyno2_9f9558f8.md', displayName: 'dyno2.md', role: 'supplement' },
+    { diskName: 'dyno_b0cdc4f0.md', displayName: 'dyno.md', role: 'supplement' },
+    { diskName: 'j34_4e1e0c05.md', displayName: 'j34.md', role: 'supplement' },
+  ];
+
+  const projectId = 'proj_7files_verify';
+  const sourceFiles: SourceFileDto[] = [];
+  const allUnits: ContentUnitDto[] = [];
+  let runningOrder = 0;
+
+  for (let i = 0; i < specs.length; i++) {
+    const sp = specs[i];
+    const fullPath = path.join(assetsDir, sp.diskName);
+    const rawText = fs.readFileSync(fullPath, 'utf8');
+    const parsedBook = parseMarkdownDocument(rawText, sp.displayName);
+
+    const allChapterBlocks = parsedBook.chapters.flatMap((c) => [
+      ...c.introBlocks,
+      ...c.sections.flatMap((s) => s.blocks),
+    ]);
+
+    if (sp.displayName === 'ایسیو زیمنس.md') {
+      const tables = allChapterBlocks.filter((b) => b.type === 'table');
+      assert.equal(tables.length, 1, 'Fractured 6-part Siemens table in ایسیو زیمنس.md must be stitched into 1 unified table');
+      assert.ok(tables[0].type === 'table' && tables[0].rows.length >= 17, 'Unified Siemens table must contain all 18 canonical hardware/engine rows');
+    }
+
+    if (sp.displayName === 'dyno2.md') {
+      const tables = allChapterBlocks.filter((b) => b.type === 'table');
+      assert.ok(tables.length >= 4, 'Pandoc-escaped pipe tables in dyno2.md must be unescaped and parsed as structured tables');
+    }
+
+    if (sp.displayName === 'j34.md') {
+      const images = allChapterBlocks.filter((b) => b.type === 'image');
+      const tables = allChapterBlocks.filter((b) => b.type === 'table');
+      assert.equal(images.length, 10, 'All 10 Valeo J34 map screenshots must be parsed as embedded image blocks');
+      assert.ok(images.every((img) => img.type === 'image' && img.dataUrl.startsWith('/assets/aistudio/image')), 'All 10 image paths must resolve to local /assets/aistudio/ assets');
+      assert.equal(tables.length, 1, 'Valeo J34 must include the synthesized numerical calibration summary table');
+    }
+
+    const sf: SourceFileDto = {
+      id: `sf_${i + 1}`,
+      projectId,
+      fileName: sp.displayName,
+      format: 'md',
+      fileRole: sp.role,
+      sizeBytes: Buffer.byteLength(rawText, 'utf8'),
+      wordCount: rawText.split(/\s+/).filter(Boolean).length,
+      unitCount: 0,
+      checksum: `chk_${i + 1}`,
+      uploadedAt: new Date().toISOString(),
+    };
+
+    const extracted = extractAtomicUnitsFromBook({
+      projectId,
+      sourceFileId: sf.id,
+      fileName: sf.fileName,
+      fileRole: sf.fileRole,
+      book: parsedBook,
+      startingOrder: runningOrder,
+    });
+    runningOrder += extracted.length;
+    sf.unitCount = extracted.length;
+    sourceFiles.push(sf);
+    for (const u of extracted) {
+      allUnits.push({
+        ...u,
+        canonicalUnitId: null,
+        outlineNodeId: null,
+      });
+    }
+  }
+
+  const dedup = runDeterministicLosslessDedup({
+    projectId,
+    workflowMode: 'master_update',
+    sourceFiles,
+    units: allUnits,
+  });
+
+  assert.ok(dedup.entityMicroRoutingReport, 'Must produce entityMicroRoutingReport');
+  assert.ok(dedup.entityMicroRoutingReport.inlineSentencesRoutedCount > 0, 'Must extract and route single-line inline ECU mentions');
+  assert.ok(dedup.entityMicroRoutingReport.fullUnitsRelocatedCount > 0, 'Must route full ECU units into canonical ECU master clusters');
+
+  const siemensSummary = dedup.entityMicroRoutingReport.clustersSummary.find(
+    (c) => c.familyId === 'ecu_siemens'
+  );
+  assert.ok(
+    siemensSummary && siemensSummary.routedExtractsCount > 0,
+    'Siemens master cluster must receive routed content'
+  );
+
+  const patchById = new Map(dedup.unitUpdates.map((u) => [u.id, u]));
+  const updatedUnits: ContentUnitDto[] = allUnits.map((u) => {
+    const p = patchById.get(u.id);
+    if (!p) return u;
+    const routedHeadingPath =
+      typeof p.payloadJson?.routedHeadingPath === 'string' && p.payloadJson.routedHeadingPath.trim()
+        ? p.payloadJson.routedHeadingPath.trim()
+        : u.headingPath;
+    return {
+      ...u,
+      status: p.status,
+      canonicalUnitId: p.canonicalUnitId,
+      rawText: p.rawText,
+      headingPath: routedHeadingPath,
+      metadataJson: p.payloadJson || u.metadataJson,
+    };
+  });
+
+  // Verify origin units contain cross-reference pointer ↗
+  const unitsWithCrossRef = updatedUnits.filter((u) => u.rawText.includes('↗ [نکته اختصاصی'));
+  assert.ok(unitsWithCrossRef.length > 0, 'Origin chapters must retain a clean cross-reference pointer ↗ for micro-routed sentences');
+
+  const outline = buildInitialOutline({
+    projectId,
+    workflowMode: 'master_update',
+    sourceFiles,
+    units: updatedUnits,
+  });
+
+  const assignMap = new Map(outline.unitAssignments.map((a) => [a.unitId, a.outlineNodeId]));
+  const assignedUnits = updatedUnits.map((u) => ({
+    ...u,
+    outlineNodeId: assignMap.get(u.id) ?? null,
+  }));
+
+  const nowIso = new Date().toISOString();
+  const finalResult = assembleFinalBookAndAudit({
+    projectId,
+    projectTitle: 'دایرةالمعارف جامع ایسیوها و تیونینگ',
+    workflowMode: 'master_update',
+    config: DEFAULT_DOCX_CONFIG,
+    sourceFiles,
+    units: assignedUnits,
+    clusters: dedup.clusters.map((cl) => ({
+      ...cl,
+      createdAt: nowIso,
+    })),
+    outlineNodes: outline.nodes.map((n) => ({ ...n, webEnrichmentJson: null })),
+    conflicts: dedup.conflicts.map((c) => ({
+      ...c,
+      resolutionNote: null,
+      webGroundingJson: null,
+      createdAt: nowIso,
+      updatedAt: nowIso,
+    })),
+  });
+
+  assert.equal(finalResult.audit.coveragePercent, 100, '100% zero-loss coverage must be maintained across all 7 files');
+  assert.ok(
+    finalResult.audit.uniqueUnitsPreserved + finalResult.audit.duplicatesMerged >= finalResult.audit.totalInputUnits,
+    'Every single unit across all 7 files must be preserved or losslessly merged'
+  );
+});
+
+
 

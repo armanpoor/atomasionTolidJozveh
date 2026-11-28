@@ -61,6 +61,8 @@ interface StageIngestViewProps {
   onRunStage2Dedup: () => Promise<void>;
   onGoToStage2: () => void;
   onLoadDemoFiles: () => void;
+  onIngestWorkspaceQueue?: () => Promise<void>;
+  ingestingWorkspaceQueue?: boolean;
   onOpenMobileSidebar: () => void;
   onOpenGoogleDriveImport?: () => void;
 }
@@ -92,6 +94,8 @@ export const StageIngestView: React.FC<StageIngestViewProps> = ({
   onRunStage2Dedup,
   onGoToStage2,
   onLoadDemoFiles,
+  onIngestWorkspaceQueue,
+  ingestingWorkspaceQueue = false,
   onOpenMobileSidebar,
   onOpenGoogleDriveImport,
 }) => {
@@ -194,6 +198,27 @@ export const StageIngestView: React.FC<StageIngestViewProps> = ({
           </div>
 
           <div className="flex flex-wrap items-center justify-center gap-3 pt-1">
+            {onIngestWorkspaceQueue && (
+              <button
+                type="button"
+                disabled={ingestingWorkspaceQueue || processing}
+                onClick={() => void onIngestWorkspaceQueue()}
+                data-testid="stage1-ingest-workspace-queue-btn"
+                className="inline-flex min-h-[44px] items-center gap-2 rounded-xl bg-[#14532D] px-6 py-2.5 text-xs sm:text-sm font-bold text-white hover:bg-[#0F3F22] disabled:opacity-60 cursor-pointer shadow-xs"
+              >
+                {ingestingWorkspaceQueue ? (
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                ) : (
+                  <ShieldCheck className="h-4 w-4" />
+                )}
+                <span>
+                  {ingestingWorkspaceQueue
+                    ? 'در حال استخراج و خوشه‌بندی ۷ فایل پروژه + ۱۰ نقشه J34...'
+                    : 'واکشی و خوشه‌بندی ۷ فایل آپلودشده + ۱۰ تصویر J34 (۰٪ سهمیه شخصی)'}
+                </span>
+              </button>
+            )}
+
             {queuedFilesCount > 0 ? (
               <button
                 type="button"
@@ -296,6 +321,26 @@ export const StageIngestView: React.FC<StageIngestViewProps> = ({
         </div>
 
         <div className="flex flex-wrap items-center gap-2">
+          {onIngestWorkspaceQueue && (
+            <button
+              type="button"
+              disabled={ingestingWorkspaceQueue || processing}
+              onClick={() => void onIngestWorkspaceQueue()}
+              data-testid="stage1-header-ingest-workspace-queue-btn"
+              className="inline-flex min-h-[40px] items-center gap-1.5 rounded-lg bg-[#14532D] px-3.5 py-2 text-xs font-bold text-white hover:bg-[#0F3F22] disabled:opacity-50 cursor-pointer"
+            >
+              {ingestingWorkspaceQueue ? (
+                <Loader2 className="h-4 w-4 animate-spin" />
+              ) : (
+                <ShieldCheck className="h-4 w-4" />
+              )}
+              <span>
+                {ingestingWorkspaceQueue
+                  ? 'در حال استخراج ۷ فایل آپلودشده...'
+                  : 'واکشی و خوشه‌بندی ۷ فایل آپلودشده + ۱۰ تصویر J34'}
+              </span>
+            </button>
+          )}
           {onOpenGoogleDriveImport && (
             <button
               type="button"

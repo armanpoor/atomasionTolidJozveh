@@ -16,6 +16,7 @@ import {
   RotateCcw,
   Sparkles,
   Trash2,
+  Zap,
 } from 'lucide-react';
 import {
   ContentUnitDto,
@@ -35,8 +36,10 @@ import {
 } from '../lib/outlineAutoSave';
 import { DeepReviewProgressBanner, DeepReviewProgressState } from './DeepReviewPanel';
 import { Stage3LiveTextPreviewPanel } from './Stage3LiveTextPreviewPanel';
+import { Stage3QuickDraftPanel } from './Stage3QuickDraftPanel';
 import { HarnessControlPanel } from './HarnessControlPanel';
 import type { UseHarnessRunnerResult } from '../hooks/useHarnessRunner';
+import type { QuickDraftStrategy } from '../lib/quickDraftBuilder';
 
 type AutoSaveStatus =
   | 'idle'
@@ -55,6 +58,7 @@ interface OutlineEditorViewProps {
   highlightedNodeId?: string | null;
   saving: boolean;
   finalizing: boolean;
+  applyingQuickDraft?: boolean;
   groundingNodeId: string | null;
   enrichingAllGoogle: boolean;
   runningDeepReview: boolean;
@@ -68,6 +72,10 @@ interface OutlineEditorViewProps {
     nextNodes: OutlineNodeDto[],
     reassignments?: OutlineReassignment[]
   ) => Promise<void>;
+  onGenerateQuickDraft?: (options: {
+    strategy: QuickDraftStrategy;
+    openStage4Preview: boolean;
+  }) => Promise<void>;
   onEnrichNodeWithGoogle: (nodeId: string) => Promise<void>;
   onEnrichAllWithGoogle: () => Promise<void>;
   onRunDeepReview: () => Promise<void>;
@@ -87,12 +95,14 @@ export const OutlineEditorView: React.FC<OutlineEditorViewProps> = ({
   highlightedNodeId = null,
   saving,
   finalizing,
+  applyingQuickDraft = false,
   groundingNodeId,
   enrichingAllGoogle: _enrichingAllGoogle,
   runningDeepReview,
   deepReviewProgress,
   onSaveOutline,
   onApproveAndFinalize,
+  onGenerateQuickDraft,
   onEnrichNodeWithGoogle,
   onEnrichAllWithGoogle: _onEnrichAllWithGoogle,
   onRunDeepReview: _onRunDeepReview,
@@ -108,6 +118,7 @@ export const OutlineEditorView: React.FC<OutlineEditorViewProps> = ({
   const [pendingReassignments, setPendingReassignments] = useState<OutlineReassignment[]>([]);
   const [dirty, setDirty] = useState(false);
   const [showLivePreview, setShowLivePreview] = useState(true);
+  const [showQuickDraft, setShowQuickDraft] = useState(false);
   const [focusedNodeId, setFocusedNodeId] = useState<string | null>(highlightedNodeId);
 
   useEffect(() => {
@@ -150,6 +161,7 @@ export const OutlineEditorView: React.FC<OutlineEditorViewProps> = ({
       if (projectSwitched) {
         setAutoSaveStatus('idle');
         setLastSavedAt(null);
+        setShowQuickDraft(false);
       }
 
       const stored = loadOutlineDraft(projectId);
@@ -433,6 +445,21 @@ export const OutlineEditorView: React.FC<OutlineEditorViewProps> = ({
         <div className="flex flex-wrap items-center gap-2">
           <button
             type="button"
+            onClick={() => setShowQuickDraft((v) => !v)}
+            aria-pressed={showQuickDraft}
+            title="تولید آنی ساختار اولیه فصل‌ها بر اساس فایل‌های استخراج‌شده و عناوین درختی بدون انتظار برای بازبینی کامل"
+            className={`inline-flex min-h-[40px] items-center gap-1.5 rounded-lg border px-3.5 py-2 text-xs font-extrabold transition-colors cursor-pointer whitespace-nowrap ${
+              showQuickDraft
+                ? 'border-[#14532D] bg-[#14532D] text-white'
+                : 'border-[#9CC3AD] bg-[#EFF7F2] text-[#14532D] hover:bg-[#E2F0E8]'
+            }`}
+          >
+            <Zap className="h-4 w-4" />
+            <span>ایجاد پیش‌نویس سریع</span>
+          </button>
+
+          <button
+            type="button"
             onClick={() => setShowLivePreview((v) => !v)}
             aria-pressed={showLivePreview}
             className={`inline-flex min-h-[40px] items-center gap-1.5 rounded-lg border px-3.5 py-2 text-xs font-bold transition-colors cursor-pointer whitespace-nowrap ${
@@ -516,6 +543,34 @@ export const OutlineEditorView: React.FC<OutlineEditorViewProps> = ({
 
       {runningDeepReview && deepReviewProgress && (
         <DeepReviewProgressBanner progress={deepReviewProgress} variant="card" />
+      )}
+
+      {/* Stage 3 Instant Quick Draft Structural Explorer */}
+      {showQuickDraft && (
+        <Stage3QuickDraftPanel
+          projectId={projectId}
+          projectTitle={projectTitle}
+          sourceFiles={sourceFiles}
+          contentUnits={contentUnits}
+          applying={applyingQuickDraft}
+          onApplyToStage3={async (strategy) => {
+            if (!onGenerateQuickDraft) return;
+            await onGenerateQuickDraft({ strategy, openStage4Preview: false });
+            clearOutlineDraft(projectId);
+            setDirty(false);
+            setPendingReassignments([]);
+            setShowQuickDraft(false);
+          }}
+          onApplyAndPreviewStage4={async (strategy) => {
+            if (!onGenerateQuickDraft) return;
+            await onGenerateQuickDraft({ strategy, openStage4Preview: true });
+            clearOutlineDraft(projectId);
+            setDirty(false);
+            setPendingReassignments([]);
+            setShowQuickDraft(false);
+          }}
+          onClose={() => setShowQuickDraft(false)}
+        />
       )}
 
       {/* Dual-Mode Validation Domain Bar (Gate 1 Configuration) */}

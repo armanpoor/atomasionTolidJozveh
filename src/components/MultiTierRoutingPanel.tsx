@@ -19,12 +19,14 @@ import {
   AiProviderType,
   AiTaskType,
   applyMultiTierRecipe,
+  getCircuitBreakerSnapshot,
   getEffectiveTierRouting,
   MODEL_TIER_METADATA,
   ModelTierId,
   MULTI_TIER_RECIPES,
   MultiTierRoutingConfig,
   OPENAI_COMPATIBLE_GATEWAY_TEMPLATES,
+  selectCrossFamilyJudge,
   TierModelSlotConfig,
   TokenOptimizationMode,
 } from '../lib/aiProviderConfig';
@@ -631,6 +633,44 @@ export const MultiTierRoutingPanel: React.FC<MultiTierRoutingPanelProps> = ({
           </div>
         </div>
       </div>
+
+      {/* Generation-2 Capability Router Telemetry Strip */}
+      {(() => {
+        const judgeSelection = selectCrossFamilyJudge(draft, 'gemini-4-hydrogen');
+        const openCircuits = getCircuitBreakerSnapshot().filter(
+          (c) => c.trippedOpenUntilMs !== null
+        ).length;
+        return (
+          <div className="rounded-xl border border-[#DCE5F0] bg-[#F8FAFC] p-3 space-y-2 text-[10.5px] text-[#334155]">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <span className="font-extrabold text-[#1E3A5F]">
+                موتور مسیریاب نسل ۲ (Selective Cascade + Cross-Family Judge + Circuit Breaker)
+              </span>
+              <span className="rounded border border-[#C7DDD0] bg-[#EEF6F0] px-2 py-0.5 font-bold text-[#14532D] tabular-nums">
+                مدار شکن: {openCircuits === 0 ? 'تمام اسلات‌ها سالم' : `${toPersianDigits(openCircuits)} اسلات در استراحت ۶۰ ثانیه‌ای`}
+              </span>
+            </div>
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 tabular-nums">
+              <div className="rounded border border-[#E2E8F0] bg-white px-2.5 py-1.5">
+                <div className="text-[#64748B]">داور لایه ۲ (Anti-Sycophancy):</div>
+                <div className="font-bold text-[#1A1816]">
+                  {judgeSelection.isCrossFamily
+                    ? `غیرهم‌خانواده (${judgeSelection.judgeModelId})`
+                    : `سپر سخت‌گیرانه (${judgeSelection.judgeModelId})`}
+                </div>
+              </div>
+              <div className="rounded border border-[#E2E8F0] bg-white px-2.5 py-1.5">
+                <div className="text-[#64748B]">ارتقای Selective Cascade:</div>
+                <div className="font-bold text-[#1E3A5F]">Economy → Balanced → Flagship</div>
+              </div>
+              <div className="rounded border border-[#E2E8F0] bg-white px-2.5 py-1.5">
+                <div className="text-[#64748B]">گارد Long Prompt Cliff (فارسی+هگز):</div>
+                <div className="font-bold text-[#14532D]">سقف ایمن ۱۶۰٬۰۰۰ توکن</div>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
 
       {/* Zero-Token Layer Info Footer */}
       <div className="flex items-start gap-2 rounded-lg border border-[#D8E2EE] bg-[#F8FAFC] px-3 py-2 text-[10.5px] text-[#475569] leading-5">

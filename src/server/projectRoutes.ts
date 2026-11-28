@@ -1,7 +1,17 @@
 import { Router } from 'express';
 import crypto from 'node:crypto';
+import fs from 'node:fs/promises';
+import path from 'node:path';
 import { GoogleGenAI, ThinkingLevel, Type, type FunctionDeclaration } from '@google/genai';
 import { requireAuth, type AuthRequest } from '../middleware/auth.ts';
+import { guardPersonalProjectAiRoutes } from '../middleware/personalOutputGuard.ts';
+import {
+  AUTOMOTIVE_REJECTION_MESSAGE_FA,
+  evaluateAutomotiveGatekeeperLayer0,
+} from '../lib/masterEncyclopedia/automotiveGatekeeper.ts';
+import { alignPostAsrAutomotiveTerms } from '../lib/masterEncyclopedia/multimodalExtractors.ts';
+import { isMasterEncyclopediaEnabled } from '../lib/masterEncyclopedia/featureFlag.ts';
+import { enqueueAutomotiveDocumentForEncyclopediaIsolated } from './masterEncyclopediaRoutes.ts';
 import {
   clearProjectPipelineArtifacts,
   createProjectRecord,
@@ -48,7 +58,11 @@ import {
   type WebGroundingSource,
   type WorkflowMode,
 } from '../lib/bookTypes.ts';
-import { detectFileFormat, parseAnySourceFile, toPersianDigits } from '../lib/formatParsers.ts';
+import { detectFileFormat, exportBookToMarkdown, parseAnySourceFile, toPersianDigits } from '../lib/formatParsers.ts';
+import {
+  type FilePreprocessReport,
+  preprocessIncomingSourceFile,
+} from '../lib/filePreprocessEngine.ts';
 import {
   assembleFinalBookAndAudit,
   buildInitialOutline,
@@ -61,6 +75,10 @@ import {
   runDeterministicLosslessDedup,
   tokenizeContent,
 } from '../lib/zeroLossPipeline.ts';
+import {
+  buildQuickDraftStructure,
+  type QuickDraftStrategy,
+} from '../lib/quickDraftBuilder.ts';
 import {
   buildEditorialSystemDirective,
   extractWinolsMapGuides,
@@ -992,6 +1010,12 @@ async function reassembleAndPersistProject(projectId: string, ownerUid: string) 
     outlineNodes: formatted.outlineNodes as unknown as Parameters<typeof assembleFinalBookAndAudit>[0]['outlineNodes'],
   });
 
+  const existingMicroRouting = (
+    (bundle.auditReport?.sourceTraceJson || {}) as Record<string, unknown>
+  ).entityMicroRoutingReport as { totalRoutedExtracts?: number } | undefined;
+  const computedMicroRouting = (assembled.audit.detailsJson || {})
+    .entityMicroRoutingReport as { totalRoutedExtracts?: number } | undefined;
+
   await saveAuditReportRecord({
     id: assembled.audit.id,
     projectId: assembled.audit.projectId,
@@ -1003,6 +1027,11 @@ async function reassembleAndPersistProject(projectId: string, ownerUid: string) 
     coveragePercent: assembled.audit.coveragePercent,
     sourceTraceJson: {
       ...(assembled.audit.detailsJson || {}),
+      ...(existingMicroRouting &&
+      (existingMicroRouting.totalRoutedExtracts || 0) >=
+        (computedMicroRouting?.totalRoutedExtracts || 0)
+        ? { entityMicroRoutingReport: existingMicroRouting }
+        : {}),
       conflictsResolved: assembled.audit.conflictsResolved,
     },
   });
@@ -1019,6 +1048,7 @@ async function reassembleAndPersistProject(projectId: string, ownerUid: string) 
 export function createProjectRouter(): Router {
   const router = Router();
   router.use(requireAuth);
+  router.use(guardPersonalProjectAiRoutes);
 
   // 0. REAL-TIME LIVE AI QUOTA & PROVIDER AVAILABILITY PROBE
   router.post('/ai-quota-probe', async (req, res) => {
@@ -1475,8 +1505,8 @@ export function createProjectRouter(): Router {
             }).book;
 
       const winolsGuideReport = extractWinolsMapGuides({
-        sourceFiles: (formatted.sourceFiles || []) as any,
-        units: (formatted.contentUnits || []) as any,
+        sourceFiles: (formatted.sourceFiles || []) as unknown as Parameters<typeof extractWinolsMapGuides>[0]['sourceFiles'],
+        units: (formatted.contentUnits || []) as unknown as Parameters<typeof extractWinolsMapGuides>[0]['units'],
       });
       const harnessState = extractHarnessStateFromCheckpoint(
         (bundle.project.checkpointJson || {}) as Record<string, unknown>
@@ -1614,6 +1644,93 @@ export function createProjectRouter(): Router {
         return;
       }
 
+      // Pre-parse incoming files, apply format-specific preprocessing + hybrid mixed-scope pruning, and Layer 0 Automotive Gatekeeper
+      const preparedFiles: Array<{
+        raw: (typeof incoming)[number];
+        format: SourceFileFormat;
+        role: FileRole;
+        buffer?: Buffer;
+        parsed: ParsedBook;
+        combinedExtractedText: string;
+        preprocessReport: FilePreprocessReport;
+      }> = [];
+
+      for (const f of incoming) {
+        const format = f.format ?? detectFileFormat(f.name);
+        const role: FileRole = f.role ?? 'standard';
+        const buffer = f.base64 ? Buffer.from(f.base64, 'base64') : undefined;
+
+        let initialText = typeof f.text === 'string' ? f.text : '';
+        let parsed = await parseAnySourceFile({
+          name: f.name,
+          format,
+          text: f.text,
+          buffer: buffer ? new Uint8Array(buffer) : undefined,
+        });
+
+        if (!initialText.trim()) {
+          initialText = exportBookToMarkdown(parsed);
+        }
+
+        const preprocessReport = preprocessIncomingSourceFile({
+          fileName: f.name,
+          format,
+          rawText: initialText,
+        });
+
+        // If hybrid pruning removed non-automotive sections from a text/markdown/html/docx/pdf source, re-parse the cleaned automotive markdown
+        if (
+          preprocessReport.classification === 'mixed_hybrid_pruned' &&
+          preprocessReport.cleanedText.trim().length > 0
+        ) {
+          parsed = await parseAnySourceFile({
+            name: f.name,
+            format: 'md',
+            text: preprocessReport.cleanedText,
+          });
+        }
+
+        const sampleText =
+          preprocessReport.cleanedText.trim().length > 0
+            ? preprocessReport.cleanedText
+            : initialText;
+
+        if (isMasterEncyclopediaEnabled()) {
+          if (preprocessReport.classification === 'rejected_non_automotive') {
+            res.status(400).json({
+              error: preprocessReport.summaryFa || AUTOMOTIVE_REJECTION_MESSAGE_FA,
+              rejectedFileName: f.name,
+              preprocessReport,
+            });
+            return;
+          }
+
+          const gate = evaluateAutomotiveGatekeeperLayer0({
+            fileName: f.name,
+            extractedText: sampleText,
+            format,
+          });
+          if (gate.decision === 'rejected') {
+            res.status(400).json({
+              error: gate.reasonFa || AUTOMOTIVE_REJECTION_MESSAGE_FA,
+              rejectedFileName: f.name,
+              preprocessReport,
+            });
+            return;
+          }
+        }
+
+        preparedFiles.push({
+          raw: f,
+          format,
+          role,
+          buffer,
+          parsed,
+          combinedExtractedText: sampleText,
+          preprocessReport,
+        });
+      }
+
       if (body.replaceExisting) {
         await clearProjectPipelineArtifacts(projectId, true);
       }
@@ -1624,18 +1741,20 @@ export function createProjectRouter(): Router {
       });
 
       let runningUnitOrder = body.replaceExisting ? 0 : existing.contentUnits.length;
-      const ingestedSummaries: Array<{ fileName: string; unitCount: number; wordCount: number }> = [];
+      const ingestedSummaries: Array<{
+        fileName: string;
+        unitCount: number;
+        wordCount: number;
+        classification: FilePreprocessReport['classification'];
+        prunedOffTopicSegmentsCount: number;
+        keptAutomotiveSegmentsCount: number;
+        estimatedTokensSaved: number;
+        tokenSavingsPercent: number;
+        preprocessSummaryFa: string;
+      }> = [];
 
-      for (const f of incoming) {
-        const format = f.format ?? detectFileFormat(f.name);
-        const role: FileRole = f.role ?? 'standard';
-        const buffer = f.base64 ? Buffer.from(f.base64, 'base64') : undefined;
-        const parsed = await parseAnySourceFile({
-          name: f.name,
-          format,
-          text: f.text,
-          buffer: buffer ? new Uint8Array(buffer) : undefined,
-        });
+      for (const prep of preparedFiles) {
+        const { raw: f, format, role, buffer, parsed, preprocessReport } = prep;
 
         const fileId = `sf_${deterministicHash(`${projectId}:${f.name}:${f.sizeBytes ?? 0}:${Date.now()}:${Math.random()}`)}`;
         const atomicUnits = extractAtomicUnitsFromBook({
@@ -1664,7 +1783,18 @@ export function createProjectRouter(): Router {
             sizeBytes: f.sizeBytes ?? (buffer?.byteLength ?? (f.text?.length ?? 0)),
             wordCount,
             fileHash: checksum,
-            metadataJson: { unitCount: atomicUnits.length },
+            metadataJson: {
+              unitCount: atomicUnits.length,
+              preprocessClassification: preprocessReport.classification,
+              prunedOffTopicSegmentsCount: preprocessReport.prunedOffTopicSegmentsCount,
+              keptAutomotiveSegmentsCount: preprocessReport.keptAutomotiveSegmentsCount,
+              estimatedTokensSaved: preprocessReport.estimatedTokensSaved,
+              tokenSavingsPercent: preprocessReport.tokenSavingsPercent,
+              formatNoiseCleanedCount: preprocessReport.formatNoiseCleanedCount,
+              zeroTechnicalLossVerified: preprocessReport.zeroTechnicalLossVerified,
+              preprocessSummaryFa: preprocessReport.summaryFa,
+              prunedOffTopicPreviews: preprocessReport.prunedOffTopicPreviews,
+            },
           },
           units: atomicUnits.map((u) => ({
             id: u.id,
@@ -1688,6 +1818,23 @@ export function createProjectRouter(): Router {
           fileName: f.name,
           unitCount: atomicUnits.length,
           wordCount,
+          classification: preprocessReport.classification,
+          prunedOffTopicSegmentsCount: preprocessReport.prunedOffTopicSegmentsCount,
+          keptAutomotiveSegmentsCount: preprocessReport.keptAutomotiveSegmentsCount,
+          estimatedTokensSaved: preprocessReport.estimatedTokensSaved,
+          tokenSavingsPercent: preprocessReport.tokenSavingsPercent,
+          preprocessSummaryFa: preprocessReport.summaryFa,
+        });
+
+        // Fire-and-forget isolated background enqueue into Master Automotive Encyclopedia
+        const fullUnitsText = atomicUnits.map((u) => u.rawText).join('\n\n');
+        void enqueueAutomotiveDocumentForEncyclopediaIsolated({
+          fileName: f.name,
+          format,
+          rawText: fullUnitsText || prep.combinedExtractedText,
+          userUid: user.uid,
+          userEmail: user.email,
+          isGuest: Boolean(user.isGuest),
         });
       }
 
@@ -1991,6 +2138,49 @@ export function createProjectRouter(): Router {
         unitAssignments: proposed.unitAssignments,
       });
 
+      // Immediately assemble and persist Stage 2 Audit Report (including Entity-Centric Micro-Routing Report)
+      const afterOutline = await getProjectBundle(projectId, user.uid);
+      if (afterOutline) {
+        const formattedAfterOutline = formatBundleForClient(afterOutline);
+        const rawSettings = (afterOutline.project.settingsJson || {}) as Partial<DocxExportConfig>;
+        const stage2Config: DocxExportConfig = {
+          ...DEFAULT_DOCX_CONFIG,
+          ...rawSettings,
+          optimization: {
+            ...DEFAULT_DOCX_CONFIG.optimization,
+            ...(rawSettings.optimization || {}),
+          },
+        };
+        const stage2Assembled = assembleFinalBookAndAudit({
+          projectId,
+          projectTitle: afterOutline.project.title,
+          workflowMode,
+          config: stage2Config,
+          sourceFiles: formattedAfterOutline.sourceFiles as unknown as Parameters<typeof assembleFinalBookAndAudit>[0]['sourceFiles'],
+          units: formattedAfterOutline.contentUnits as unknown as Parameters<typeof assembleFinalBookAndAudit>[0]['units'],
+          clusters: formattedAfterOutline.dedupClusters as unknown as Parameters<typeof assembleFinalBookAndAudit>[0]['clusters'],
+          conflicts: formattedAfterOutline.conflicts as unknown as Parameters<typeof assembleFinalBookAndAudit>[0]['conflicts'],
+          outlineNodes: formattedAfterOutline.outlineNodes as unknown as Parameters<typeof assembleFinalBookAndAudit>[0]['outlineNodes'],
+        });
+        await saveAuditReportRecord({
+          id: stage2Assembled.audit.id,
+          projectId: stage2Assembled.audit.projectId,
+          totalSourceFiles: stage2Assembled.audit.totalSourceFiles,
+          totalInputUnits: stage2Assembled.audit.totalInputUnits,
+          uniqueUnitsCount: stage2Assembled.audit.uniqueUnitsPreserved,
+          mergedDuplicatesCount: stage2Assembled.audit.duplicatesMerged,
+          conflictsCount: stage2Assembled.audit.conflictsDetected,
+          coveragePercent: stage2Assembled.audit.coveragePercent,
+          sourceTraceJson: {
+            ...(stage2Assembled.audit.detailsJson || {}),
+            ...(dedup.entityMicroRoutingReport
+              ? { entityMicroRoutingReport: dedup.entityMicroRoutingReport }
+              : {}),
+            conflictsResolved: stage2Assembled.audit.conflictsResolved,
+          },
+        });
+      }
+
       await updateProjectRecord(projectId, user.uid, {
         pipelineStage: 3,
         status: 'awaiting_outline',
@@ -2000,6 +2190,7 @@ export function createProjectRouter(): Router {
           clustersCount: dedup.clusters.length,
           conflictsCount: finalConflicts.length,
           outlineCount: proposed.nodes.length,
+          routedExtractsCount: dedup.entityMicroRoutingReport?.totalRoutedExtracts ?? 0,
           aiUsage: dedupAiUsage,
           lastUpdatedAt: new Date().toISOString(),
         },
@@ -2009,10 +2200,10 @@ export function createProjectRouter(): Router {
         projectId,
         ownerUid: user.uid,
         actorType: 'system',
-        actorName: 'موتور ادغام بدون افت',
+        actorName: 'موتور خوشه‌بندی و ادغام بدون افت',
         actionType: 'dedup_completed',
-        title: 'اجرای مرحله ۲: ادغام بدون افت و کشف تناقض',
-        summary: `${toPersianDigits(dedup.clusters.length)} خوشه تکراری ادغام و ${toPersianDigits(finalConflicts.length)} تناقض واقعی شناسایی شد.`,
+        title: 'اجرای مرحله ۲: خوشه‌بندی موضوعی ایسیوها، ادغام تک‌خطی و کشف تناقض',
+        summary: `${toPersianDigits(dedup.clusters.length)} خوشه ادغام، ${toPersianDigits(dedup.entityMicroRoutingReport?.totalRoutedExtracts ?? 0)} انتقال تک‌خطی با ارجاع متقابل و ${toPersianDigits(finalConflicts.length)} تناقض واقعی شناسایی شد.`,
       });
 
       const finalBundle = await getProjectBundle(projectId, user.uid);
@@ -2020,6 +2211,273 @@ export function createProjectRouter(): Router {
     } catch (err) {
       res.status(500).json({
         error: err instanceof Error ? err.message : 'خطا در مرحله حذف تکراری‌ها و تحلیل تناقض.',
+      });
+    }
+  });
+
+  // 7B. ONE-CLICK WORKSPACE QUEUE INGESTION + STAGE 2 ENTITY-CENTRIC CLUSTERING (7 MD FILES + 10 VALEO J34 IMAGES)
+  router.post('/:id/ingest-workspace-queue', async (req, res) => {
+    try {
+      const user = (req as AuthRequest).user!;
+      const projectId = req.params.id;
+      const existing = await getProjectBundle(projectId, user.uid);
+      if (!existing) {
+        res.status(404).json({ error: 'پروژه یافت نشد.' });
+        return;
+      }
+
+      const WORKSPACE_QUEUE_FILES: ReadonlyArray<{
+        diskFileName: string;
+        displayFileName: string;
+        role: FileRole;
+      }> = [
+        {
+          diskFileName: 'BOOK_DAY01_04_Final.docx_07da70df.md',
+          displayFileName: 'BOOK_DAY01_04_Final.docx.md',
+          role: 'master',
+        },
+        {
+          diskFileName: '____________ab18c9d8.md',
+          displayFileName: 'ایسیو زیمنس.md',
+          role: 'supplement',
+        },
+        {
+          diskFileName: 'Bakhsh1_Dars_01_ta_08-1_1707ad79.md',
+          displayFileName: 'Bakhsh1_Dars_01_ta_08-1.md',
+          role: 'supplement',
+        },
+        {
+          diskFileName: 'Bakhsh2_Dars_08-2_ta_09-3_89994058.md',
+          displayFileName: 'Bakhsh2_Dars_08-2_ta_09-3.md',
+          role: 'supplement',
+        },
+        {
+          diskFileName: 'dyno2_9f9558f8.md',
+          displayFileName: 'dyno2.md',
+          role: 'supplement',
+        },
+        {
+          diskFileName: 'dyno_b0cdc4f0.md',
+          displayFileName: 'dyno.md',
+          role: 'supplement',
+        },
+        {
+          diskFileName: 'j34_4e1e0c05.md',
+          displayFileName: 'j34.md',
+          role: 'supplement',
+        },
+      ];
+
+      const assetsDir = path.resolve(process.cwd(), 'public/assets/aistudio');
+      await clearProjectPipelineArtifacts(projectId, true);
+
+      await updateProjectRecord(projectId, user.uid, {
+        title: 'دایرةالمعارف جامع ایسیوهای بازار ایران (زیمنس، بوش، والیو J34، ساژم، دلفی) و تحلیل داینو',
+        workflowMode: 'multi_merge',
+        pipelineStage: 1,
+        status: 'ingesting',
+      });
+
+      let runningUnitOrder = 0;
+      const ingestedSummaries: Array<{ fileName: string; unitCount: number; wordCount: number }> = [];
+
+      for (const qf of WORKSPACE_QUEUE_FILES) {
+        const fullPath = path.join(assetsDir, qf.diskFileName);
+        let rawText = '';
+        try {
+          rawText = await fs.readFile(fullPath, 'utf-8');
+        } catch {
+          continue;
+        }
+        if (!rawText.trim()) continue;
+
+        const parsed = await parseAnySourceFile({
+          name: qf.displayFileName,
+          format: 'md',
+          text: rawText,
+        });
+
+        const fileId = `sf_${deterministicHash(`${projectId}:${qf.displayFileName}:${rawText.length}`)}`;
+        const atomicUnits = extractAtomicUnitsFromBook({
+          projectId,
+          sourceFileId: fileId,
+          fileName: qf.displayFileName,
+          fileRole: qf.role,
+          book: parsed,
+          startingOrder: runningUnitOrder,
+        });
+        runningUnitOrder += atomicUnits.length;
+
+        const wordCount = atomicUnits.reduce(
+          (sum, u) => sum + u.rawText.split(/\s+/).filter(Boolean).length,
+          0
+        );
+        const checksum = deterministicHash(atomicUnits.map((u) => u.normalizedHash).join('|'));
+
+        await insertSourceFileWithUnits({
+          file: {
+            id: fileId,
+            projectId,
+            fileName: qf.displayFileName,
+            format: 'md',
+            role: qf.role,
+            sizeBytes: Buffer.byteLength(rawText, 'utf-8'),
+            wordCount,
+            fileHash: checksum,
+            metadataJson: { unitCount: atomicUnits.length },
+          },
+          units: atomicUnits.map((u) => ({
+            id: u.id,
+            projectId: u.projectId,
+            sourceFileId: u.sourceFileId,
+            unitType: u.unitType,
+            unitOrder: u.unitOrder,
+            rawText: u.rawText,
+            contentHash: u.normalizedHash,
+            status: u.status,
+            canonicalUnitId: null,
+            outlineNodeId: null,
+            payloadJson: {
+              ...(u.metadataJson || {}),
+              headingPath: u.headingPath,
+            },
+          })),
+        });
+
+        ingestedSummaries.push({
+          fileName: qf.displayFileName,
+          unitCount: atomicUnits.length,
+          wordCount,
+        });
+      }
+
+      // Immediately execute Stage 2 Deterministic Entity-Centric Micro-Routing, Table Stitching & Dedup (0 personal quota tokens!)
+      const afterIngest = await getProjectBundle(projectId, user.uid);
+      if (!afterIngest) {
+        res.status(404).json({ error: 'پروژه پس از استخراج یافت نشد.' });
+        return;
+      }
+      const formattedIngest = formatBundleForClient(afterIngest);
+
+      const dedup = runDeterministicLosslessDedup({
+        projectId,
+        workflowMode: 'multi_merge',
+        sourceFiles: formattedIngest.sourceFiles as unknown as Parameters<typeof runDeterministicLosslessDedup>[0]['sourceFiles'],
+        units: formattedIngest.contentUnits as unknown as Parameters<typeof runDeterministicLosslessDedup>[0]['units'],
+      });
+
+      await saveDedupResults({
+        projectId,
+        unitUpdates: dedup.unitUpdates,
+        clusters: dedup.clusters.map((c) => ({
+          id: c.id,
+          projectId: c.projectId,
+          canonicalUnitId: c.canonicalUnitId,
+          mergedUnitId: c.mergedUnitIds[0] || c.canonicalUnitId,
+          matchType: c.matchType,
+          similarityScore: c.similarityScore,
+          mergeRationale: c.losslessSummary,
+          preservedDetailsJson: {
+            mergedUnitIds: c.mergedUnitIds,
+          },
+        })),
+        conflictRows: dedup.conflicts,
+      });
+
+      const afterDedup = await getProjectBundle(projectId, user.uid);
+      if (afterDedup) {
+        const formattedAfterDedup = formatBundleForClient(afterDedup);
+        const proposed = buildInitialOutline({
+          projectId,
+          workflowMode: 'multi_merge',
+          sourceFiles: formattedAfterDedup.sourceFiles as unknown as Parameters<typeof buildInitialOutline>[0]['sourceFiles'],
+          units: formattedAfterDedup.contentUnits as unknown as Parameters<typeof buildInitialOutline>[0]['units'],
+        });
+
+        await saveOutlineNodesForProject({
+          projectId,
+          nodes: proposed.nodes,
+          unitAssignments: proposed.unitAssignments,
+        });
+
+        const afterOutline = await getProjectBundle(projectId, user.uid);
+        if (afterOutline) {
+          const formattedAfterOutline = formatBundleForClient(afterOutline);
+          const rawSettings = (afterOutline.project.settingsJson || {}) as Partial<DocxExportConfig>;
+          const stage2Config: DocxExportConfig = {
+            ...DEFAULT_DOCX_CONFIG,
+            ...rawSettings,
+            optimization: {
+              ...DEFAULT_DOCX_CONFIG.optimization,
+              ...(rawSettings.optimization || {}),
+            },
+          };
+          const assembled = assembleFinalBookAndAudit({
+            projectId,
+            projectTitle: afterOutline.project.title,
+            workflowMode: 'multi_merge',
+            config: stage2Config,
+            sourceFiles: formattedAfterOutline.sourceFiles as unknown as Parameters<typeof assembleFinalBookAndAudit>[0]['sourceFiles'],
+            units: formattedAfterOutline.contentUnits as unknown as Parameters<typeof assembleFinalBookAndAudit>[0]['units'],
+            clusters: formattedAfterOutline.dedupClusters as unknown as Parameters<typeof assembleFinalBookAndAudit>[0]['clusters'],
+            conflicts: formattedAfterOutline.conflicts as unknown as Parameters<typeof assembleFinalBookAndAudit>[0]['conflicts'],
+            outlineNodes: formattedAfterOutline.outlineNodes as unknown as Parameters<typeof assembleFinalBookAndAudit>[0]['outlineNodes'],
+          });
+
+          await saveAuditReportRecord({
+            id: assembled.audit.id,
+            projectId: assembled.audit.projectId,
+            totalSourceFiles: assembled.audit.totalSourceFiles,
+            totalInputUnits: assembled.audit.totalInputUnits,
+            uniqueUnitsCount: assembled.audit.uniqueUnitsPreserved,
+            mergedDuplicatesCount: assembled.audit.duplicatesMerged,
+            conflictsCount: assembled.audit.conflictsDetected,
+            coveragePercent: assembled.audit.coveragePercent,
+            sourceTraceJson: {
+              ...(assembled.audit.detailsJson || {}),
+              ...(dedup.entityMicroRoutingReport
+                ? { entityMicroRoutingReport: dedup.entityMicroRoutingReport }
+                : {}),
+              conflictsResolved: assembled.audit.conflictsResolved,
+            },
+          });
+
+          await updateProjectRecord(projectId, user.uid, {
+            bookSnapshotJson: assembled.book as unknown as Record<string, unknown>,
+            pipelineStage: 3,
+            status: 'awaiting_outline',
+            checkpointJson: {
+              ...((afterOutline.project.checkpointJson || {}) as Record<string, unknown>),
+              stage: 3,
+              processedFileCount: ingestedSummaries.length,
+              clustersCount: dedup.clusters.length,
+              conflictsCount: dedup.conflicts.length,
+              outlineCount: proposed.nodes.length,
+              routedExtractsCount: dedup.entityMicroRoutingReport?.totalRoutedExtracts ?? 0,
+              lastUpdatedAt: new Date().toISOString(),
+            },
+          });
+        }
+      }
+
+      await recordProjectRevision({
+        projectId,
+        ownerUid: user.uid,
+        actorType: 'system',
+        actorName: 'موتور خوشه‌بندی موضوعی مرحله ۲',
+        actionType: 'dedup_completed',
+        title: `تجمیع و خوشه‌بندی هوشمند ${toPersianDigits(ingestedSummaries.length)} فایل صف پروژه و ۱۰ تصویر والیو J34`,
+        summary: `${toPersianDigits(dedup.entityMicroRoutingReport?.totalRoutedExtracts ?? 0)} نکته پراکنده ایسیوها با ثبت ارجاع در مبدأ به خوشه مرجع همان ایسیو منتقل شد و جداول ۶ تکه زیمنس و داینو ترمیم گردیدند.`,
+      });
+
+      const finalBundle = await getProjectBundle(projectId, user.uid);
+      res.json({
+        ingested: ingestedSummaries,
+        bundle: finalBundle ? formatBundleForClient(finalBundle) : null,
+      });
+    } catch (err) {
+      res.status(500).json({
+        error: err instanceof Error ? err.message : 'خطا در تجمیع فایل‌های صف پروژه.',
       });
     }
   });
@@ -2142,6 +2600,161 @@ export function createProjectRouter(): Router {
     }
   });
 
+  // 8.5 STAGE 3: INSTANT QUICK DRAFT (DETERMINISTIC CHAPTER TREE FROM EXTRACTED FILES & HEADINGS — ZERO AI/ENRICHMENT WAIT)
+  router.post('/:id/quick-draft', async (req, res) => {
+    try {
+      const user = (req as AuthRequest).user!;
+      const projectId = req.params.id;
+      const bundle = await getProjectBundle(projectId, user.uid);
+      if (!bundle) {
+        res.status(404).json({ error: 'پروژه یافت نشد.' });
+        return;
+      }
+
+      const body = (req.body || {}) as {
+        strategy?: QuickDraftStrategy;
+        openStage4Preview?: boolean;
+      };
+
+      const strategy: QuickDraftStrategy =
+        body.strategy === 'by_source_file' ? 'by_source_file' : 'heading_tree';
+      const openStage4Preview = Boolean(body.openStage4Preview);
+
+      const formatted = formatBundleForClient(bundle);
+      if (formatted.sourceFiles.length === 0 && formatted.contentUnits.length === 0) {
+        res.status(400).json({
+          error: 'ابتدا باید حداقل یک فایل در مرحله ۱ استخراج شده باشد تا پیش‌نویس سریع ساخته شود.',
+        });
+        return;
+      }
+
+      const quickDraft = buildQuickDraftStructure({
+        projectId,
+        projectTitle: bundle.project.title,
+        sourceFiles: formatted.sourceFiles as unknown as Parameters<typeof buildQuickDraftStructure>[0]['sourceFiles'],
+        contentUnits: formatted.contentUnits as unknown as Parameters<typeof buildQuickDraftStructure>[0]['contentUnits'],
+        strategy,
+      });
+
+      await saveOutlineNodesForProject({
+        projectId,
+        nodes: quickDraft.outlineNodes.map((n) => ({
+          id: n.id,
+          projectId,
+          parentId: n.parentId ?? null,
+          level: n.level ?? 1,
+          nodeOrder: n.nodeOrder,
+          title: n.title,
+          summary: n.summary ?? null,
+          isApproved: openStage4Preview,
+          webEnrichmentJson: null,
+        })),
+        unitAssignments: quickDraft.unitAssignments,
+      });
+
+      // Reset any prior uncompleted harness blueprint approval since outline structure changed
+      const existingCheckpoint = (bundle.project.checkpointJson || {}) as Record<string, unknown>;
+      const existingHarness = extractHarnessStateFromCheckpoint(existingCheckpoint);
+      if (existingHarness) {
+        existingHarness.blueprint.approved = false;
+      }
+
+      if (openStage4Preview) {
+        // Fast local deterministic assembly into Stage 4 preview — explicitly skipping slow Google Search / Deep Review!
+        const refreshed = await getProjectBundle(projectId, user.uid);
+        if (!refreshed) {
+          res.status(404).json({ error: 'پروژه یافت نشد.' });
+          return;
+        }
+        const refreshedFormatted = formatBundleForClient(refreshed);
+        const rawSettings = (refreshed.project.settingsJson || {}) as Partial<DocxExportConfig>;
+        const config: DocxExportConfig = {
+          ...DEFAULT_DOCX_CONFIG,
+          ...rawSettings,
+          optimization: {
+            ...DEFAULT_DOCX_CONFIG.optimization,
+            ...(rawSettings.optimization || {}),
+          },
+        };
+
+        const assembled = assembleFinalBookAndAudit({
+          projectId,
+          projectTitle: refreshed.project.title,
+          workflowMode: (refreshed.project.workflowMode as WorkflowMode) || 'multi_merge',
+          config,
+          sourceFiles: refreshedFormatted.sourceFiles as unknown as Parameters<typeof assembleFinalBookAndAudit>[0]['sourceFiles'],
+          units: refreshedFormatted.contentUnits as unknown as Parameters<typeof assembleFinalBookAndAudit>[0]['units'],
+          clusters: refreshedFormatted.dedupClusters as unknown as Parameters<typeof assembleFinalBookAndAudit>[0]['clusters'],
+          conflicts: refreshedFormatted.conflicts as unknown as Parameters<typeof assembleFinalBookAndAudit>[0]['conflicts'],
+          outlineNodes: refreshedFormatted.outlineNodes as unknown as Parameters<typeof assembleFinalBookAndAudit>[0]['outlineNodes'],
+        });
+
+        const existingMicroRouting = (
+          (refreshed.auditReport?.sourceTraceJson || {}) as Record<string, unknown>
+        ).entityMicroRoutingReport as { totalRoutedExtracts?: number } | undefined;
+        const computedMicroRouting = (assembled.audit.detailsJson || {})
+          .entityMicroRoutingReport as { totalRoutedExtracts?: number } | undefined;
+
+        await saveAuditReportRecord({
+          id: assembled.audit.id,
+          projectId: assembled.audit.projectId,
+          totalSourceFiles: assembled.audit.totalSourceFiles,
+          totalInputUnits: assembled.audit.totalInputUnits,
+          uniqueUnitsCount: assembled.audit.uniqueUnitsPreserved,
+          mergedDuplicatesCount: assembled.audit.duplicatesMerged,
+          conflictsCount: assembled.audit.conflictsDetected,
+          coveragePercent: assembled.audit.coveragePercent,
+          sourceTraceJson: {
+            ...(assembled.audit.detailsJson || {}),
+            ...(existingMicroRouting &&
+            (existingMicroRouting.totalRoutedExtracts || 0) >=
+              (computedMicroRouting?.totalRoutedExtracts || 0)
+              ? { entityMicroRoutingReport: existingMicroRouting }
+              : {}),
+            conflictsResolved: assembled.audit.conflictsResolved,
+            quickDraftMode: true,
+          },
+        });
+
+        await updateProjectRecord(projectId, user.uid, {
+          bookSnapshotJson: assembled.book as unknown as Record<string, unknown>,
+          pipelineStage: 4,
+          status: 'structuring',
+          checkpointJson: existingHarness
+            ? { ...existingCheckpoint, harnessState: existingHarness, quickDraftStrategy: strategy }
+            : { ...existingCheckpoint, quickDraftStrategy: strategy },
+        });
+      } else {
+        await updateProjectRecord(projectId, user.uid, {
+          pipelineStage: Math.max(bundle.project.pipelineStage || 3, 3),
+          status: 'outlining',
+          checkpointJson: existingHarness
+            ? { ...existingCheckpoint, harnessState: existingHarness, quickDraftStrategy: strategy }
+            : { ...existingCheckpoint, quickDraftStrategy: strategy },
+        });
+      }
+
+      await recordProjectRevision({
+        projectId,
+        ownerUid: user.uid,
+        actorType: 'user',
+        actorName: user.name || (user.isGuest ? 'کاربر مهمان' : 'کاربر استودیو'),
+        actionType: 'outline_updated',
+        title: openStage4Preview
+          ? 'ایجاد پیش‌نویس سریع و ساخت پیش‌نمایش اولیه (بدون غنی‌سازی)'
+          : 'ایجاد پیش‌نویس سریع ساختار فصل‌ها از عناوین درختی',
+        summary: `ساختار اولیه با ${toPersianDigits(quickDraft.summary.totalChapters)} فصل و ${toPersianDigits(quickDraft.summary.totalSubsections)} زیربخش درختی از ${toPersianDigits(quickDraft.summary.totalSourceFiles)} فایل استخراج‌شده تولید شد.`,
+      });
+
+      const finalBundle = await getProjectBundle(projectId, user.uid);
+      res.json(finalBundle ? formatBundleForClient(finalBundle) : null);
+    } catch (err) {
+      res.status(500).json({
+        error: err instanceof Error ? err.message : 'خطا در ایجاد پیش‌نویس سریع ساختار فصل‌ها.',
+      });
+    }
+  });
+
   // 9. STAGE 4 & 5: FINALIZE DOCUMENT, VISUAL ENRICHMENT & 100% COVERAGE AUDIT
   router.post('/:id/finalize', async (req, res) => {
     try {
@@ -2194,7 +2807,8 @@ export function createProjectRouter(): Router {
           try {
             const chapterExcerpt = buildChapterExcerpt(bundle.contentUnits, node.id, 1800);
             const prompt = [
-              `با استفاده از جستجوی زنده وب، متن فصل «${node.title}» از سند «${bundle.project.title}» را با اطلاعات مستند، استانداردهای به‌روز، نکات کلیدی جامانده و مثال‌های کاربردی به زبان فارسی روان تکمیل کن (۱ تا ۲ پاراگراف منسجم و علمی بدون تکرار متن موجود).`,
+              `با استفاده از جستجوی زنده وب، متن فصل «${node.title}» از سند «${bundle.project.title}» را با اطلاعات مستند، استانداردهای به‌روز، نکات کلیدی جامانده و مثال‌های کاربردی تکمیل کن (۱ تا ۲ پاراگراف منسجم بدون تکرار متن موجود).`,
+              'لحن نگارش: رسمی اما شیرین، روان، ساده‌خوان و بدون کلمات قلمبه‌سلمبه؛ اصطلاحات جدید را از پایه و ساده توضیح بده و املای لاتین اصطلاحات فنی را دقیق حفظ کن.',
               chapterExcerpt ? `خلاصه محتوای فعلی این فصل:\n${chapterExcerpt}` : '',
             ]
               .filter(Boolean)
@@ -2527,7 +3141,8 @@ export function createProjectRouter(): Router {
 
         const chapterExcerpt = buildChapterExcerpt(bundle.contentUnits, node.id, 2200);
         const prompt = [
-          `با استفاده از جستجوی زنده وب، درباره فصل «${node.title}» در سند «${bundle.project.title}» یک باکس اطلاعات تکمیلی به‌روز، مستند و کاربردی به زبان فارسی (۱ تا ۲ پاراگراف دقیق) بنویس تا نکات علمی یا عملی جاافتاده از متن فعلی را کامل کند.`,
+          `با استفاده از جستجوی زنده وب، درباره فصل «${node.title}» در سند «${bundle.project.title}» یک باکس اطلاعات تکمیلی به‌روز، مستند و کاربردی (۱ تا ۲ پاراگراف دقیق) بنویس تا نکات علمی یا عملی جاافتاده از متن فعلی را کامل کند.`,
+          'لحن نگارش: رسمی اما شیرین، ساده‌خوان و بدون کلمات قلمبه‌سلمبه؛ مفاهیم جدید را برای خواننده بدون پیش‌زمینه شفاف کن و اصطلاحات لاتین را دقیق نگه دار.',
           chapterExcerpt ? `متن فعلی فصل:\n${chapterExcerpt}` : '',
           body.customQuery ? `تأکید کاربر: ${body.customQuery}` : '',
         ]
@@ -2580,8 +3195,8 @@ export function createProjectRouter(): Router {
           const prompt = [
             `شما پژوهشگر فنی و ویراستار علمی هستید. با استفاده از جستجوی زنده وب، متن فصل «${node.title}» از سند «${bundle.project.title}» را تکمیل و غنی کن.`,
             'قواعد مهم:',
-            '۱) مطالب تکراری موجود در متن فعلی را بازنویسی نکن؛ فقط جزئیات تکمیلی، استانداردهای جدید، اعداد مرجع، نکات ایمنی/عملی و مثال‌های مستند جاافتاده را در ۱ تا ۲ پاراگراف فارسی دقیق و خوانا بنویس.',
-            '۲) فقط به منابع معتبر وب استناد کن.',
+            '۱) مطالب تکراری موجود در متن فعلی را بازنویسی نکن؛ فقط جزئیات تکمیلی، استانداردهای جدید، اعداد مرجع، نکات ایمنی/عملی و مثال‌های مستند جاافتاده را در ۱ تا ۲ پاراگراف فارسی رسمی اما شیرین، ساده‌خوان و بدون کلمات قلمبه‌سلمبه بنویس.',
+            '۲) مفاهیم جدید را بدون فرض پیش‌دانش شفاف توضیح بده، اصطلاحات لاتین را دقیق حفظ کن و فقط به منابع معتبر وب استناد کن.',
             chapterExcerpt ? `محتوای فعلی فصل:\n${chapterExcerpt}` : '',
             body.customQuery ? `دستور تکمیلی کاربر: ${body.customQuery}` : '',
           ]
@@ -2719,7 +3334,21 @@ export function createProjectRouter(): Router {
         fileName,
       });
 
+      // Layer 0 Post-ASR Automotive Glossary Alignment
+      const alignedAudio = alignPostAsrAutomotiveTerms(sttResult.transcript);
+      sttResult.transcript = alignedAudio.alignedText;
+
       await recordProjectAiUsage(projectId, user.uid, sttResult.usageDelta);
+
+      // Isolated background enqueue for automotive audio transcripts
+      void enqueueAutomotiveDocumentForEncyclopediaIsolated({
+        fileName,
+        format: 'md',
+        rawText: sttResult.transcript,
+        userUid: user.uid,
+        userEmail: user.email,
+        isGuest: Boolean(user.isGuest),
+      });
 
       let sourceFileAdded: { fileName: string; unitCount: number; wordCount: number } | null = null;
       let refreshedBundle: ReturnType<typeof formatBundleForClient> | null = null;
@@ -4226,7 +4855,7 @@ export function createProjectRouter(): Router {
         ownerUid: user.uid,
         budgetCapUsd: typeof body.budgetCapUsd === 'number' ? body.budgetCapUsd : undefined,
         glossaryEntries: Array.isArray(body.glossaryEntries)
-          ? (body.glossaryEntries as any)
+          ? (body.glossaryEntries as unknown as Parameters<typeof approveHarnessBlueprintForProject>[0]['glossaryEntries'])
           : undefined,
         validationDomain:
           body.validationDomain === 'general_persian_technical' ||
@@ -4339,7 +4968,9 @@ export function createProjectRouter(): Router {
         projectId,
         ownerUid: user.uid,
         sectionId,
-        editedBlocks: Array.isArray(body.editedBlocks) ? (body.editedBlocks as any) : undefined,
+        editedBlocks: Array.isArray(body.editedBlocks)
+          ? (body.editedBlocks as unknown as Parameters<typeof resolveHarnessQuarantineItem>[0]['editedBlocks'])
+          : undefined,
         resolutionNote: typeof body.resolutionNote === 'string' ? body.resolutionNote : undefined,
         actorName: user.name || (user.isGuest ? 'کاربر مهمان' : 'کاربر استودیو'),
       });

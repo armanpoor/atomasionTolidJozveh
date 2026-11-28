@@ -17,13 +17,61 @@ function escapeXml(str: string): string {
  * Strips potentially dangerous elements and attributes from SVG markup prior to
  * rendering in the DOM (blocks script, foreignObject, iframe, event handlers, and javascript: URIs).
  */
+function decodeBasicEntitiesForSecurityCheck(raw: string): string {
+  return raw
+    .replace(/&#x([0-9a-f]+);?/gi, (_m, hex) => {
+      const cp = parseInt(hex, 16);
+      return Number.isFinite(cp) && cp >= 0 && cp <= 0x10ffff ? String.fromCodePoint(cp) : '';
+    })
+    .replace(/&#(\d+);?/g, (_m, dec) => {
+      const cp = parseInt(dec, 10);
+      return Number.isFinite(cp) && cp >= 0 && cp <= 0x10ffff ? String.fromCodePoint(cp) : '';
+    })
+    .replace(/&tab;|&newline;/gi, ' ')
+    .replace(/[\u0000-\u0020]+/g, '');
+}
+
 export function sanitizeSvgMarkup(svg: string): string {
   if (!svg || typeof svg !== 'string') return '';
+  const blockedTags =
+    'script|foreignObject|iframe|object|embed|audio|video|link|meta|style|animate|animateTransform|animateMotion|set|use|base|form|input|button|textarea';
+  const pairedTagRx = new RegExp(
+    `<\\s*(?:${blockedTags})\\b[^>]*>[\\s\\S]*?<\\/\\s*(?:${blockedTags})\\s*>`,
+    'gi'
+  );
+  const selfClosingTagRx = new RegExp(`<\\s*(?:${blockedTags})\\b[^>]*\\/?>`, 'gi');
+
   return svg
-    .replace(/<\s*(?:script|foreignObject|iframe|object|embed|audio|video|link|meta)\b[^>]*>[\s\S]*?<\/\s*(?:script|foreignObject|iframe|object|embed|audio|video|link|meta)\s*>/gi, '')
-    .replace(/<\s*(?:script|foreignObject|iframe|object|embed|link|meta)\b[^>]*\/?>/gi, '')
-    .replace(/\s+on[a-z]+\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)/gi, '')
-    .replace(/\s+(?:xlink:)?href\s*=\s*(?:"\s*(?:javascript:|vbscript:|data:text\/html)[^"]*"|'\s*(?:javascript:|vbscript:|data:text\/html)[^']*')/gi, '');
+    .replace(pairedTagRx, '')
+    .replace(selfClosingTagRx, '')
+    // Strip <image> elements pointing to external URLs or SVG/HTML data URIs
+    .replace(/<\s*image\b[^>]*>/gi, (tag) => {
+      const decoded = decodeBasicEntitiesForSecurityCheck(tag).toLowerCase();
+      if (/(?:javascript:|vbscript:|data:image\/svg|data:text\/html|https?:\/\/|\/\/)/.test(decoded)) {
+        return '';
+      }
+      return tag;
+    })
+    // Strip event handler attributes regardless of whitespace or slash separators (e.g. <rect/onload=...>)
+    .replace(/[\s/]+on[a-z0-9_]+\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)/gi, '')
+    // Strip dangerous href / xlink:href / src / action attributes (including entity-obfuscated URIs)
+    .replace(
+      /[\s/]+(?:xlink:)?(?:href|src|action|formaction)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/gi,
+      (full, dq: string | undefined, sq: string | undefined, bare: string | undefined) => {
+        const val = dq ?? sq ?? bare ?? '';
+        const decoded = decodeBasicEntitiesForSecurityCheck(val).toLowerCase();
+        if (
+          /^(?:javascript:|vbscript:|data:text\/html|data:image\/svg|https?:\/\/|\/\/)/.test(
+            decoded
+          )
+        ) {
+          return '';
+        }
+        return full;
+      }
+    )
+    // Strip dangerous url(...) values in inline style attributes
+    .replace(/url\s*\(\s*["']?\s*(?:javascript:|vbscript:|data:text\/html|data:image\/svg)[^)]*\)/gi, 'none');
 }
 
 function truncateText(text: string, maxLen: number): string {

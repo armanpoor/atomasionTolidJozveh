@@ -18,7 +18,7 @@ import {
   type Firestore,
 } from 'firebase/firestore';
 import firebaseConfig from '../../firebase-applet-config.json';
-import { GOOGLE_WORKSPACE_SCOPES } from './googleWorkspace';
+import { GOOGLE_WORKSPACE_SCOPES } from './googleWorkspace.ts';
 
 const app = initializeApp(firebaseConfig);
 export const auth = getAuth(app);
