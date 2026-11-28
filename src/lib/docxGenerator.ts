@@ -592,9 +592,124 @@ function renderContentBlock(block: ContentBlock, config: DocxExportConfig): Arra
       );
 
     case 'figure': {
-      if (block.aiPlaceholderSpec && (block.imageStrategy === 'AI_PLACEHOLDER' || block.resolutionStatus === 'ai_placeholder' || block.resolutionStatus === 'fallback_placeholder')) {
+      // 1. Real Binary ImageRun Embedding for resolved_web PNG/JPEG figures
+      if (
+        block.imageStrategy === 'WEB_SEARCH' &&
+        block.resolutionStatus === 'resolved_web' &&
+        block.imageUrl &&
+        /^data:image\/(png|jpeg|jpg);base64,/i.test(block.imageUrl)
+      ) {
+        const mimeMatch = block.imageUrl.match(/^data:(image\/(?:png|jpeg|jpg));base64,(.*)$/i);
+        if (mimeMatch) {
+          const isJpeg = /jpeg|jpg/i.test(mimeMatch[1]);
+          const base64Part = mimeMatch[2];
+          let bytes: Uint8Array | null = null;
+          try {
+            if (typeof Buffer !== 'undefined') {
+              bytes = new Uint8Array(Buffer.from(base64Part, 'base64'));
+            } else {
+              const bin = atob(base64Part);
+              const arr = new Uint8Array(bin.length);
+              for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
+              bytes = arr;
+            }
+          } catch {
+            bytes = null;
+          }
+
+          if (bytes && bytes.byteLength > 0) {
+            const maxDisplayWidth = config.paperSize === 'B5' ? 420 : 480;
+            const maxDisplayHeight = config.paperSize === 'B5' ? 480 : 560;
+            let displayWidth = maxDisplayWidth;
+            let displayHeight = 290;
+            if (block.widthPx && block.heightPx) {
+              const aspect = block.heightPx / Math.max(1, block.widthPx);
+              displayHeight = Math.round(displayWidth * aspect);
+              if (displayHeight > maxDisplayHeight) {
+                displayHeight = maxDisplayHeight;
+                displayWidth = Math.max(120, Math.round(displayHeight / Math.max(0.05, aspect)));
+              } else if (displayHeight < 90) {
+                displayHeight = 90;
+              }
+            }
+
+            const elements: Array<Paragraph | Table> = [
+              new Paragraph({
+                bidirectional: true,
+                alignment: AlignmentType.CENTER,
+                keepNext: true,
+                spacing: { before: 150, after: 70 },
+                children: [
+                  new ImageRun({
+                    type: isJpeg ? 'jpg' : 'png',
+                    data: bytes,
+                    transformation: {
+                      width: displayWidth,
+                      height: displayHeight,
+                    },
+                  }),
+                ],
+              }),
+              new Paragraph({
+                bidirectional: true,
+                alignment: AlignmentType.CENTER,
+                keepNext: Boolean(block.sourceTitle || block.sourceUri),
+                spacing: { before: 30, after: block.sourceTitle || block.sourceUri ? 40 : 120 },
+                children: buildInlineRuns(
+                  block.caption || 'تصویر فنی مرجع (WEB_SEARCH)',
+                  config.fontFamily,
+                  Math.max(18, bodySize - 2),
+                  COLORS.primary,
+                  true
+                ),
+              }),
+            ];
+
+            if (block.sourceTitle || block.sourceUri) {
+              elements.push(
+                new Paragraph({
+                  bidirectional: true,
+                  alignment: AlignmentType.CENTER,
+                  spacing: { before: 0, after: 120 },
+                  children: buildInlineRuns(
+                    `منبع مرجع وب: ${block.sourceTitle || ''}${block.sourceUri ? ` (${block.sourceUri})` : ''}`.trim(),
+                    config.fontFamily,
+                    Math.max(16, bodySize - 4),
+                    COLORS.muted,
+                    false
+                  ),
+                })
+              );
+            }
+
+            return elements;
+          }
+        }
+      }
+
+      // 2. Compact 3-Line Structured Box for AI_PLACEHOLDER & Auto-Fallback Placeholder
+      if (
+        block.aiPlaceholderSpec &&
+        (block.imageStrategy === 'AI_PLACEHOLDER' ||
+          block.resolutionStatus === 'ai_placeholder' ||
+          block.resolutionStatus === 'fallback_placeholder')
+      ) {
         const spec = block.aiPlaceholderSpec;
+        const headerParagraph = new Paragraph({
+          bidirectional: true,
+          alignment: AlignmentType.START,
+          keepNext: true,
+          spacing: { before: 120, after: 50, line: 300 },
+          children: buildInlineRuns(
+            'محل درج تصویر اختصاصی (نیازمند تولید با AI)',
+            config.fontFamily,
+            Math.max(18, bodySize - 1),
+            '92400E',
+            true
+          ),
+        });
         return [
+          headerParagraph,
           renderCalloutBox(
             {
               type: 'callout',
@@ -613,6 +728,7 @@ function renderContentBlock(block: ContentBlock, config: DocxExportConfig): Arra
         ];
       }
 
+      // 3. Pending or non-raster WEB_SEARCH Figure reference box
       if (block.imageStrategy === 'WEB_SEARCH') {
         const paragraphs: string[] = [
           block.description || `تصویر مرجع فنی برای: ${block.caption}`,
@@ -621,7 +737,9 @@ function renderContentBlock(block: ContentBlock, config: DocxExportConfig): Arra
           paragraphs.push(`• کوئری جستجوی وب: ${block.searchQuery}`);
         }
         if (block.sourceTitle || block.sourceUri) {
-          paragraphs.push(`• منبع مرجع: ${block.sourceTitle || ''} ${block.sourceUri ? `(${block.sourceUri})` : ''}`.trim());
+          paragraphs.push(
+            `• منبع مرجع: ${block.sourceTitle || ''} ${block.sourceUri ? `(${block.sourceUri})` : ''}`.trim()
+          );
         }
         return [
           renderCalloutBox(
@@ -808,6 +926,68 @@ function renderContentBlock(block: ContentBlock, config: DocxExportConfig): Arra
                   (it, idx) =>
                     `${toPersianDigits(idx + 1)}. **${it.label}**${it.detail ? `: ${it.detail}` : ''}`
                 ),
+              ],
+            },
+            config
+          ),
+          new Paragraph({ bidirectional: true, spacing: { before: 0, after: 100 }, children: [] })
+        );
+      }
+      return elements;
+    }
+
+    case 'adaptive_visual': {
+      const elements: Array<Paragraph | Table> = [];
+      if (block.pngBytes && block.pngBytes.byteLength > 0) {
+        const displayWidth = config.paperSize === 'B5' ? 460 : 540;
+        const displayHeight = Math.round((displayWidth * block.heightPx) / Math.max(1, block.widthPx));
+        elements.push(
+          new Paragraph({
+            bidirectional: true,
+            alignment: AlignmentType.CENTER,
+            keepNext: true,
+            spacing: { before: 160, after: 80 },
+            children: [
+              new ImageRun({
+                type: 'png',
+                data: block.pngBytes,
+                transformation: {
+                  width: displayWidth,
+                  height: displayHeight,
+                },
+              }),
+            ],
+          }),
+          new Paragraph({
+            bidirectional: true,
+            alignment: AlignmentType.CENTER,
+            spacing: { before: 40, after: 60 },
+            children: buildInlineRuns(block.caption, config.fontFamily, Math.max(18, bodySize - 2), COLORS.primary, true),
+          })
+        );
+        if (block.pedagogicalTakeaway) {
+          elements.push(
+            new Paragraph({
+              bidirectional: true,
+              alignment: AlignmentType.CENTER,
+              spacing: { before: 20, after: 140 },
+              children: buildInlineRuns(block.pedagogicalTakeaway, config.fontFamily, Math.max(16, bodySize - 3), COLORS.muted, false),
+            })
+          );
+        }
+      } else {
+        elements.push(
+          renderCalloutBox(
+            {
+              type: 'callout',
+              id: block.id,
+              variant: 'engineering',
+              title: block.caption || block.title,
+              paragraphs: [
+                block.pedagogicalTakeaway,
+                ...(block.extractedMetrics && block.extractedMetrics.length > 0
+                  ? [`داده‌های استخراج‌شده: ${block.extractedMetrics.join(' · ')}`]
+                  : []),
               ],
             },
             config

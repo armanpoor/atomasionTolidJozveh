@@ -35,6 +35,7 @@ import {
   getEffectiveTierRouting,
   getEffectiveWebSearchRoute,
   GOOGLE_MODEL_OPTIONS,
+  isPhase1StabilityLocked,
   normalizeKeyAuthMode,
   OPENAI_COMPATIBLE_GATEWAY_TEMPLATES,
   resolveCapabilityRoutingPlan,
@@ -144,6 +145,7 @@ export const AiProviderModal: React.FC<AiProviderModalProps> = ({
   const activeMeta = AI_PROVIDER_METADATA[draft.provider];
   const activeCreds = getActiveProviderCredentials(draft);
   const authMode = normalizeKeyAuthMode(draft.googleKeyMode);
+  const isPhase1Locked = isPhase1StabilityLocked(draft.deploymentPhase);
   const searchRoute = getEffectiveWebSearchRoute(draft);
   const searchMeta = WEB_SEARCH_PROVIDER_METADATA[searchRoute.provider];
   const audioRoute = getEffectiveAudioRoute(draft);
@@ -518,6 +520,75 @@ export const AiProviderModal: React.FC<AiProviderModalProps> = ({
             <span className="truncate">۴. تبدیل ویس</span>
           </button>
         </nav>
+
+        {/* Two-Phase Deployment Architecture Banner (Phase 1 Hard-Lock vs Phase 2 Open Multi-Provider) */}
+        <div
+          data-testid="modal-deployment-phase-banner"
+          className={`border-b px-5 py-3 sm:px-6 flex flex-wrap items-center justify-between gap-3 text-xs ${
+            isPhase1Locked
+              ? 'border-[#BBF7D0] bg-[#F0FDF4] text-[#14532D]'
+              : 'border-[#BFDBFE] bg-[#EFF6FF] text-[#1E3A8A]'
+          }`}
+        >
+          <div className="min-w-0 flex-1 space-y-0.5">
+            <div className="font-extrabold flex items-center gap-1.5">
+              <ShieldCheck className="h-4 w-4 shrink-0" />
+              <span>
+                {isPhase1Locked
+                  ? 'فاز ۱ (توسعه و پایداری — پیش‌فرض): قفل کامل روی سهمیه داخلی Gemini 4 Neon'
+                  : 'فاز ۲ (پشتیبانی چندارائه‌دهنده‌ای آزاد): انتخاب نامحدود هر مدل، پرووایدر و API'}
+              </span>
+            </div>
+            <p className="text-[11px] leading-5 opacity-90">
+              {isPhase1Locked
+                ? 'در فاز ۱ هیچ استفاده‌ای از سهمیه Google AI Studio متصل‌شده با کلید API یا کلیدهای خارجی صورت نمی‌گیرد. پس از پایدار شدن سیستم و افزودن کاربران می‌توانید با یک کلیک به فاز ۲ بروید.'
+                : 'معماری Provider-Agnostic باز است: کاربران می‌توانند هر ارائه‌دهنده، درگاه ایرانی/بین‌المللی، Base URL، شناسه مدل و کلید اختصاصی خود را متصل کنند.'}
+            </p>
+          </div>
+          <div className="flex items-center gap-1.5 shrink-0">
+            <button
+              type="button"
+              data-testid="modal-phase1-btn"
+              onClick={() => {
+                setDraft((prev) =>
+                  syncLegacyConfigFields({
+                    ...prev,
+                    deploymentPhase: 'phase1_stability_lock',
+                    provider: 'google_aistudio',
+                    googleKeyMode: 'auto_creator_first',
+                  })
+                );
+                setDraftModel('gemini-4-neon');
+                setFormError(null);
+              }}
+              className={`rounded-lg border px-2.5 py-1.5 text-[11px] font-bold cursor-pointer ${
+                isPhase1Locked
+                  ? 'border-[#14532D] bg-[#14532D] text-white'
+                  : 'border-[#CBD5E1] bg-white text-[#334155] hover:bg-[#F8FAFC]'
+              }`}
+            >
+              فاز ۱ · قفل سهمیه داخلی
+            </button>
+            <button
+              type="button"
+              data-testid="modal-phase2-btn"
+              onClick={() => {
+                setDraft((prev) => ({
+                  ...prev,
+                  deploymentPhase: 'phase2_open_multi_provider',
+                }));
+                setFormError(null);
+              }}
+              className={`rounded-lg border px-2.5 py-1.5 text-[11px] font-bold cursor-pointer ${
+                !isPhase1Locked
+                  ? 'border-[#1D4ED8] bg-[#1D4ED8] text-white'
+                  : 'border-[#CBD5E1] bg-white text-[#334155] hover:bg-[#F8FAFC]'
+              }`}
+            >
+              فاز ۲ · حالت آزاد کاربران
+            </button>
+          </div>
+        </div>
 
         {/* Body */}
         <div className="flex-1 overflow-y-auto px-5 py-5 sm:px-6 space-y-5 text-xs">

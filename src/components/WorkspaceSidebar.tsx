@@ -39,11 +39,13 @@ import {
 import {
   AI_PROVIDER_LIST,
   AI_PROVIDER_METADATA,
+  AiDeploymentPhase,
   AiProviderConfig,
   AiProviderType,
   AiQuotaProbeResponse,
   getProviderDisplaySummary,
   GOOGLE_MODEL_OPTIONS,
+  isPhase1StabilityLocked,
 } from '../lib/aiProviderConfig';
 import {
   AI_REWRITE_LEVEL_OPTIONS,
@@ -125,6 +127,7 @@ interface WorkspaceSidebarProps {
   onChangeWorkflowMode: (mode: WorkflowMode) => void;
   onAddFiles: (files: File[]) => void;
   onRemoveFile: (id: string) => void;
+  onBulkRemoveFiles?: (ids: string[]) => void;
   onMoveFile: (id: string, dir: 'up' | 'down') => void;
   onClearFiles: () => void;
   onSetFileRole: (id: string, role: FileRole) => void;
@@ -167,6 +170,7 @@ export const WorkspaceSidebar: React.FC<WorkspaceSidebarProps> = ({
   onChangeWorkflowMode,
   onAddFiles,
   onRemoveFile,
+  onBulkRemoveFiles,
   onMoveFile,
   onClearFiles,
   onSetFileRole,
@@ -234,11 +238,17 @@ export const WorkspaceSidebar: React.FC<WorkspaceSidebarProps> = ({
     );
   };
 
-  const handleSelectAllQueuedFiles = () => {
-    if (selectedQueueIds.length === queuedFiles.length) {
-      setSelectedQueueIds([]);
+  const handleSelectAllQueuedFiles = (visibleIds?: string[]) => {
+    const scopeIds =
+      Array.isArray(visibleIds) && visibleIds.length > 0
+        ? visibleIds
+        : queuedFiles.map((q) => q.id);
+    const allSelected =
+      scopeIds.length > 0 && scopeIds.every((id) => selectedQueueIds.includes(id));
+    if (allSelected) {
+      setSelectedQueueIds((prev) => prev.filter((id) => !scopeIds.includes(id)));
     } else {
-      setSelectedQueueIds(queuedFiles.map((q) => q.id));
+      setSelectedQueueIds((prev) => Array.from(new Set([...prev, ...scopeIds])));
     }
   };
 
@@ -257,6 +267,17 @@ export const WorkspaceSidebar: React.FC<WorkspaceSidebarProps> = ({
         onSetFileRole(id, effectiveRole);
       });
     }
+  };
+
+  const handleBulkDeleteSelectedFiles = () => {
+    if (selectedQueueIds.length === 0) return;
+    const idsToDelete = [...selectedQueueIds];
+    if (onBulkRemoveFiles) {
+      onBulkRemoveFiles(idsToDelete);
+    } else {
+      idsToDelete.forEach((id) => onRemoveFile(id));
+    }
+    setSelectedQueueIds([]);
   };
 
   const filteredSourceFiles = useMemo(
@@ -911,14 +932,16 @@ export const WorkspaceSidebar: React.FC<WorkspaceSidebarProps> = ({
             compact
           />
 
-          {/* Bulk-Action Panel for Assigning File Role + Queue Progress Summary */}
-          {queuedFiles.length > 0 && (
+          {/* Contextual Bulk-Action Toolbar (appears when one or more queued files are checked) */}
+          {queuedFiles.length > 0 && selectedQueueIds.length > 0 && (
             <div
-              data-testid="sidebar-bulk-role-panel"
-              className="rounded-lg border border-[#D6D0C4] bg-[#FAF9F5] p-2.5 space-y-2"
+              role="toolbar"
+              aria-label="نوار عملیات گروهی فایل‌های انتخاب‌شده"
+              data-testid="file-queue-bulk-toolbar"
+              className="rounded-lg border border-[#1E3A5F] bg-[#EEF3F8] p-2.5 space-y-2 shadow-xs"
             >
               <div className="flex items-center justify-between gap-2">
-                <label className="inline-flex items-center gap-1.5 text-[11px] font-bold text-[#1A1816] cursor-pointer">
+                <label className="inline-flex items-center gap-1.5 text-[11px] font-extrabold text-[#1E3A5F] cursor-pointer tabular-nums">
                   <input
                     type="checkbox"
                     data-testid="sidebar-bulk-select-all"
@@ -926,37 +949,33 @@ export const WorkspaceSidebar: React.FC<WorkspaceSidebarProps> = ({
                       queuedFiles.length > 0 &&
                       selectedQueueIds.length === queuedFiles.length
                     }
-                    onChange={handleSelectAllQueuedFiles}
+                    onChange={() => handleSelectAllQueuedFiles()}
                     className="h-3.5 w-3.5 accent-[#1E3A5F] cursor-pointer"
                   />
                   <span>
-                    عملیات گروهی نقش فایل (File Role) ·{' '}
-                    <span className="text-[#1E3A5F]">
-                      {toPersianDigits(selectedQueueIds.length)} از{' '}
-                      {toPersianDigits(queuedFiles.length)} انتخاب‌شده
-                    </span>
+                    {toPersianDigits(selectedQueueIds.length)} از{' '}
+                    {toPersianDigits(queuedFiles.length)} فایل انتخاب‌شده
                   </span>
                 </label>
 
-                {selectedQueueIds.length > 0 && (
-                  <button
-                    type="button"
-                    data-testid="sidebar-bulk-clear-selection"
-                    onClick={() => setSelectedQueueIds([])}
-                    className="text-[10.5px] font-semibold text-[#78716C] hover:text-[#1A1816] cursor-pointer"
-                  >
-                    لغو انتخاب
-                  </button>
-                )}
+                <button
+                  type="button"
+                  data-testid="sidebar-bulk-clear-selection"
+                  onClick={() => setSelectedQueueIds([])}
+                  className="text-[10.5px] font-bold text-[#57534E] hover:text-[#1A1816] cursor-pointer"
+                >
+                  لغو انتخاب
+                </button>
               </div>
 
+              {/* Bulk Role Assignment Row */}
               <div className="flex flex-wrap items-center gap-1.5">
                 <select
                   data-testid="sidebar-bulk-role-select"
                   aria-label="انتخاب نقش فایل برای اعمال گروهی"
                   value={bulkTargetRole}
                   onChange={(e) => setBulkTargetRole(e.target.value as FileRole)}
-                  className="flex-1 min-w-[130px] rounded-md border border-[#D6D0C4] bg-white px-2 py-1.5 text-[11px] font-semibold text-[#1A1816] focus:border-[#1E3A5F] focus:outline-none"
+                  className="flex-1 min-w-[125px] rounded-md border border-[#C6D5E6] bg-white px-2 py-1.5 text-[11px] font-semibold text-[#1A1816] focus:border-[#1E3A5F] focus:outline-none"
                 >
                   <option value="supplement">فایل تکمیلی (Supplement)</option>
                   <option value="standard">استاندارد (Standard)</option>
@@ -966,42 +985,51 @@ export const WorkspaceSidebar: React.FC<WorkspaceSidebarProps> = ({
                 <button
                   type="button"
                   data-testid="sidebar-bulk-apply-role-btn"
-                  disabled={selectedQueueIds.length === 0}
                   onClick={() => handleApplyBulkFileRole(bulkTargetRole)}
-                  className="inline-flex min-h-[30px] items-center justify-center rounded-md bg-[#1E3A5F] px-2.5 py-1 text-[11px] font-bold text-white hover:bg-[#162C49] disabled:opacity-45 cursor-pointer whitespace-nowrap"
+                  className="inline-flex min-h-[30px] items-center justify-center rounded-md bg-[#1E3A5F] px-2.5 py-1 text-[11px] font-bold text-white hover:bg-[#162C49] cursor-pointer whitespace-nowrap"
                 >
-                  اعمال نقش به انتخاب‌شده‌ها ({toPersianDigits(selectedQueueIds.length)})
+                  اعمال نقش ({toPersianDigits(selectedQueueIds.length)})
                 </button>
               </div>
 
-              {/* Quick 1-click preset role buttons for selected files */}
-              <div className="flex flex-wrap items-center gap-1 pt-0.5">
+              {/* Quick 1-click Role Presets + Bulk Delete Action */}
+              <div className="flex flex-wrap items-center justify-between gap-1.5 border-t border-[#D4E0EE] pt-2">
+                <div className="flex flex-wrap items-center gap-1">
+                  <button
+                    type="button"
+                    data-testid="sidebar-bulk-quick-supplement"
+                    onClick={() => handleApplyBulkFileRole('supplement')}
+                    className="rounded border border-[#C6D5E6] bg-white px-2 py-0.5 text-[10px] font-bold text-[#44403C] hover:bg-[#F7F9FC] cursor-pointer"
+                  >
+                    تکمیلی
+                  </button>
+                  <button
+                    type="button"
+                    data-testid="sidebar-bulk-quick-standard"
+                    onClick={() => handleApplyBulkFileRole('standard')}
+                    className="rounded border border-[#C6D5E6] bg-white px-2 py-0.5 text-[10px] font-bold text-[#44403C] hover:bg-[#F7F9FC] cursor-pointer"
+                  >
+                    استاندارد
+                  </button>
+                  <button
+                    type="button"
+                    data-testid="sidebar-bulk-quick-master"
+                    onClick={() => handleApplyBulkFileRole('master')}
+                    className="rounded border border-[#1E3A5F] bg-white px-2 py-0.5 text-[10px] font-bold text-[#1E3A5F] hover:bg-[#DFE9F4] cursor-pointer"
+                  >
+                    مرجع (Master)
+                  </button>
+                </div>
+
                 <button
                   type="button"
-                  data-testid="sidebar-bulk-quick-supplement"
-                  disabled={selectedQueueIds.length === 0}
-                  onClick={() => handleApplyBulkFileRole('supplement')}
-                  className="rounded border border-[#D6D0C4] bg-white px-2 py-0.5 text-[10px] font-bold text-[#44403C] hover:bg-[#EFECE4] disabled:opacity-45 cursor-pointer"
+                  data-testid="sidebar-bulk-delete-btn"
+                  disabled={processing}
+                  onClick={handleBulkDeleteSelectedFiles}
+                  className="inline-flex min-h-[28px] items-center gap-1 rounded-md border border-[#E6CFC2] bg-[#FEF2F2] px-2.5 py-1 text-[10.5px] font-extrabold text-[#9A3412] hover:bg-[#FEE2E2] disabled:opacity-45 cursor-pointer whitespace-nowrap"
                 >
-                  تبدیل به تکمیلی
-                </button>
-                <button
-                  type="button"
-                  data-testid="sidebar-bulk-quick-standard"
-                  disabled={selectedQueueIds.length === 0}
-                  onClick={() => handleApplyBulkFileRole('standard')}
-                  className="rounded border border-[#D6D0C4] bg-white px-2 py-0.5 text-[10px] font-bold text-[#44403C] hover:bg-[#EFECE4] disabled:opacity-45 cursor-pointer"
-                >
-                  تبدیل به استاندارد
-                </button>
-                <button
-                  type="button"
-                  data-testid="sidebar-bulk-quick-master"
-                  disabled={selectedQueueIds.length === 0}
-                  onClick={() => handleApplyBulkFileRole('master')}
-                  className="rounded border border-[#1E3A5F] bg-[#EEF3F8] px-2 py-0.5 text-[10px] font-bold text-[#1E3A5F] hover:bg-[#DFE9F4] disabled:opacity-45 cursor-pointer"
-                >
-                  تعیین به‌عنوان مرجع (Master)
+                  <Trash2 className="h-3 w-3 shrink-0" />
+                  <span>حذف گروهی ({toPersianDigits(selectedQueueIds.length)})</span>
                 </button>
               </div>
             </div>
@@ -1011,12 +1039,14 @@ export const WorkspaceSidebar: React.FC<WorkspaceSidebarProps> = ({
             queuedFiles={queuedFiles}
             onAddFiles={onAddFiles}
             onRemoveFile={onRemoveFile}
+            onBulkRemoveFiles={onBulkRemoveFiles}
             onMoveFile={onMoveFile}
             onClearFiles={onClearFiles}
             showRoleSelector={activeWorkflowMode === 'master_update'}
             onSetFileRole={onSetFileRole}
             selectedFileIds={selectedQueueIds}
             onToggleSelectFile={handleToggleSelectQueuedFile}
+            onToggleSelectAllVisible={handleSelectAllQueuedFiles}
             disabled={processing || !automotiveConsentAccepted}
             sourceFiles={sourceFiles}
             contentUnits={contentUnits}
@@ -1075,27 +1105,118 @@ export const WorkspaceSidebar: React.FC<WorkspaceSidebarProps> = ({
             <div className="space-y-3.5 rounded-xl border border-[#E5E0D6] bg-white p-3.5 text-xs">
               {/* Provider & Custom Base URL / API Key Button */}
               {(() => {
+                const isPhase1Locked = isPhase1StabilityLocked(providerConfig.deploymentPhase);
                 const summary = getProviderDisplaySummary(providerConfig, config.aiModel);
                 const activeProviderMeta = AI_PROVIDER_METADATA[providerConfig.provider];
                 const activeProviderEntry = providerConfig.providers[providerConfig.provider];
-                const currentModelId =
-                  providerConfig.provider === 'google_aistudio'
+                const currentModelId = isPhase1Locked
+                  ? 'gemini-4-neon'
+                  : providerConfig.provider === 'google_aistudio'
                     ? config.aiModel || activeProviderEntry?.modelId || 'gemini-4-neon'
                     : activeProviderEntry?.modelId || activeProviderMeta.defaultModelId;
-                const isBuiltInNeonQuota =
-                  providerConfig.provider === 'google_aistudio' &&
-                  providerConfig.googleKeyMode !== 'personal' &&
-                  !activeProviderEntry?.apiKey?.trim();
+
+                const handleToggleDeploymentPhase = (nextPhase: AiDeploymentPhase) => {
+                  if (!onChangeProviderConfig) return;
+                  if (nextPhase === 'phase1_stability_lock') {
+                    onChangeProviderConfig({
+                      ...providerConfig,
+                      deploymentPhase: 'phase1_stability_lock',
+                      provider: 'google_aistudio',
+                      googleKeyMode: 'auto_creator_first',
+                    });
+                    onChangeConfig({ aiModel: 'gemini-4-neon' });
+                  } else {
+                    onChangeProviderConfig({
+                      ...providerConfig,
+                      deploymentPhase: 'phase2_open_multi_provider',
+                    });
+                  }
+                };
 
                 return (
                   <div className="space-y-2.5">
+                    {/* Two-Phase Deployment Architecture Switcher */}
+                    <div
+                      data-testid="sidebar-deployment-phase-box"
+                      className={`rounded-lg border p-2.5 space-y-2 ${
+                        isPhase1Locked
+                          ? 'border-[#86EFAC] bg-[#F0FDF4]'
+                          : 'border-[#BFDBFE] bg-[#EFF6FF]'
+                      }`}
+                    >
+                      <div className="flex items-center justify-between gap-2">
+                        <span
+                          className={`text-[11px] font-extrabold ${
+                            isPhase1Locked ? 'text-[#14532D]' : 'text-[#1E3A8A]'
+                          }`}
+                        >
+                          {isPhase1Locked
+                            ? 'فاز ۱: قفل پایداری (سهمیه داخلی Gemini 4 Neon)'
+                            : 'فاز ۲: حالت آزاد چندارائه‌دهنده‌ای (کاربران)'}
+                        </span>
+                        <span
+                          data-testid="sidebar-deployment-phase-badge"
+                          className={`rounded px-1.5 py-0.5 text-[9.5px] font-bold ${
+                            isPhase1Locked
+                              ? 'bg-[#14532D] text-white'
+                              : 'bg-[#1D4ED8] text-white'
+                          }`}
+                        >
+                          {isPhase1Locked ? 'قفل فعال' : 'آزاد'}
+                        </span>
+                      </div>
+
+                      {onChangeProviderConfig && (
+                        <div className="grid grid-cols-2 gap-1">
+                          <button
+                            type="button"
+                            data-testid="sidebar-phase1-btn"
+                            onClick={() => handleToggleDeploymentPhase('phase1_stability_lock')}
+                            className={`rounded-md border px-2 py-1 text-[10.5px] font-bold transition-colors cursor-pointer ${
+                              isPhase1Locked
+                                ? 'border-[#14532D] bg-[#14532D] text-white'
+                                : 'border-[#CBD5E1] bg-white text-[#334155] hover:bg-[#F8FAFC]'
+                            }`}
+                          >
+                            فاز ۱ · سهمیه داخلی
+                          </button>
+                          <button
+                            type="button"
+                            data-testid="sidebar-phase2-btn"
+                            onClick={() => handleToggleDeploymentPhase('phase2_open_multi_provider')}
+                            className={`rounded-md border px-2 py-1 text-[10.5px] font-bold transition-colors cursor-pointer ${
+                              !isPhase1Locked
+                                ? 'border-[#1D4ED8] bg-[#1D4ED8] text-white'
+                                : 'border-[#CBD5E1] bg-white text-[#334155] hover:bg-[#F8FAFC]'
+                            }`}
+                          >
+                            فاز ۲ · هر مدل و API
+                          </button>
+                        </div>
+                      )}
+
+                      <p
+                        data-testid="sidebar-builtin-neon-quota-badge"
+                        className={`text-[10px] leading-4 ${
+                          isPhase1Locked ? 'text-[#166534]' : 'text-[#1E40AF]'
+                        }`}
+                      >
+                        {isPhase1Locked
+                          ? 'تا تکمیل آپلود فایل‌ها و پایداری کامل، سیستم منحصراً از سهمیه داخلی Gemini 4 Neon استفاده می‌کند و کلید API گوگل AI Studio مسدود است.'
+                          : 'معماری مستقل از ارائه‌دهنده (Provider-Agnostic) فعال است: انتخاب آزاد هر مدل، پرووایدر، درگاه ایرانی/بین‌المللی و API دلخواه.'}
+                      </p>
+                    </div>
+
                     <div className="flex items-center justify-between gap-2 rounded-lg border border-[#DDE6F0] bg-[#F5F8FC] px-2.5 py-2">
                       <div className="min-w-0">
                         <div className="font-bold text-[#1E3A5F] truncate">
-                          {summary.providerLabel} · {summary.keySourceLabel}
+                          {summary.providerLabel}
                         </div>
                         <div className="text-[10.5px] text-[#57534E] truncate">
-                          مدل فعال: <strong className="font-mono text-[#1E3A5F]" dir="ltr">{currentModelId}</strong>
+                          مدل فعال:{' '}
+                          <strong className="font-mono text-[#1E3A5F]" dir="ltr">
+                            {currentModelId}
+                          </strong>
                         </div>
                       </div>
                       <button
@@ -1109,16 +1230,7 @@ export const WorkspaceSidebar: React.FC<WorkspaceSidebarProps> = ({
                       </button>
                     </div>
 
-                    {isBuiltInNeonQuota && (
-                      <div
-                        data-testid="sidebar-builtin-neon-quota-badge"
-                        className="rounded-lg border border-[#BBF7D0] bg-[#F0FDF4] px-2.5 py-1.5 text-[10.5px] leading-5 text-[#14532D]"
-                      >
-                        <strong>سهمیه داخلی پلتفرم فعال است (Gemini 4 Neon):</strong> تا پایان آپلود و پایداری فایل‌های شما، هیچ کلید API خارجی مصرف نمی‌شود. در هر زمان می‌توانید هر مدل، پرووایدر یا API دلخواه را از منوی زیر انتخاب کنید.
-                      </div>
-                    )}
-
-                    {/* Quick Provider Switcher (Any Provider / Gateway) */}
+                    {/* Quick Provider Switcher & Universal Model Selector (Active in Phase 2, Locked in Phase 1) */}
                     {onChangeProviderConfig && (
                       <div className="space-y-1">
                         <label
@@ -1130,7 +1242,8 @@ export const WorkspaceSidebar: React.FC<WorkspaceSidebarProps> = ({
                         <select
                           id="sidebar-ai-provider-select"
                           data-testid="sidebar-ai-provider-select"
-                          value={providerConfig.provider}
+                          disabled={isPhase1Locked}
+                          value={isPhase1Locked ? 'google_aistudio' : providerConfig.provider}
                           onChange={(e) => {
                             const nextProvider = e.target.value as AiProviderType;
                             const nextMeta = AI_PROVIDER_METADATA[nextProvider];
@@ -1153,7 +1266,7 @@ export const WorkspaceSidebar: React.FC<WorkspaceSidebarProps> = ({
                               onChangeConfig({ aiModel: nextModel as AiModelId });
                             }
                           }}
-                          className="w-full rounded-lg border border-[#D6D0C4] bg-[#FAF9F6] px-2.5 py-2 text-xs text-[#1A1816]"
+                          className="w-full rounded-lg border border-[#D6D0C4] bg-[#FAF9F6] px-2.5 py-2 text-xs text-[#1A1816] disabled:opacity-60 disabled:cursor-not-allowed"
                         >
                           {AI_PROVIDER_LIST.map((p) => (
                             <option key={p.id} value={p.id}>
@@ -1172,14 +1285,17 @@ export const WorkspaceSidebar: React.FC<WorkspaceSidebarProps> = ({
                       >
                         انتخاب مدل آماده یا ورود آزاد هر شناسه مدل (Model ID)
                       </label>
-                      {providerConfig.provider === 'google_aistudio' ? (
+                      {isPhase1Locked || providerConfig.provider === 'google_aistudio' ? (
                         <select
                           id="sidebar-ai-model-preset-select"
                           data-testid="sidebar-ai-model-preset-select"
+                          disabled={isPhase1Locked}
                           value={
-                            GOOGLE_MODEL_OPTIONS.some((m) => m.id === config.aiModel)
-                              ? config.aiModel
-                              : 'gemini-4-neon'
+                            isPhase1Locked
+                              ? 'gemini-4-neon'
+                              : GOOGLE_MODEL_OPTIONS.some((m) => m.id === config.aiModel)
+                                ? config.aiModel
+                                : 'gemini-4-neon'
                           }
                           onChange={(e) => {
                             const nextModel = e.target.value as AiModelId;
@@ -1197,7 +1313,7 @@ export const WorkspaceSidebar: React.FC<WorkspaceSidebarProps> = ({
                               });
                             }
                           }}
-                          className="w-full rounded-lg border border-[#D6D0C4] bg-[#FAF9F6] px-2.5 py-2 text-xs text-[#1A1816]"
+                          className="w-full rounded-lg border border-[#D6D0C4] bg-[#FAF9F6] px-2.5 py-2 text-xs text-[#1A1816] disabled:opacity-60 disabled:cursor-not-allowed"
                         >
                           {GOOGLE_MODEL_OPTIONS.map((m) => (
                             <option key={m.id} value={m.id}>
@@ -1244,6 +1360,7 @@ export const WorkspaceSidebar: React.FC<WorkspaceSidebarProps> = ({
                           type="text"
                           dir="ltr"
                           data-testid="sidebar-custom-model-id-input"
+                          disabled={isPhase1Locked}
                           value={currentModelId}
                           onChange={(e) => {
                             const nextId = e.target.value.trim();
@@ -1265,7 +1382,7 @@ export const WorkspaceSidebar: React.FC<WorkspaceSidebarProps> = ({
                             }
                           }}
                           placeholder="شناسه هر مدل دلخواه (مثلاً gemini-4-neon، claude-opus-5-5، gpt-6.2-sol...)"
-                          className="w-full rounded-lg border border-[#D6D0C4] bg-white px-2.5 py-1.5 font-mono text-[11px] text-[#1A1816] focus:border-[#1E3A5F] focus:outline-none"
+                          className="w-full rounded-lg border border-[#D6D0C4] bg-white px-2.5 py-1.5 font-mono text-[11px] text-[#1A1816] focus:border-[#1E3A5F] focus:outline-none disabled:bg-[#F5F3EE] disabled:text-[#78716C] disabled:cursor-not-allowed"
                         />
                       </div>
                     </div>

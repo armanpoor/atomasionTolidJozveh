@@ -1,11 +1,17 @@
 import type { AiModelId, DeepReviewReportDto } from './bookTypes.ts';
+import {
+  type AiDeploymentPhase,
+  isPhase1StabilityLocked,
+  normalizeAiDeploymentPhase,
+} from './llmAbstractionLayer.ts';
 import type {
   AiTaskType,
   ModelTierId,
   TokenOptimizationMode,
 } from './tokenOptimizer.ts';
 
-export type { AiTaskType, ModelTierId, TokenOptimizationMode };
+export type { AiDeploymentPhase, AiTaskType, ModelTierId, TokenOptimizationMode };
+export { isPhase1StabilityLocked, normalizeAiDeploymentPhase };
 
 export type AiProviderType = 'google_aistudio' | 'openai' | 'anthropic' | 'custom_openai';
 
@@ -96,6 +102,13 @@ export interface CustomModelProfile {
 }
 
 export interface AiProviderConfig {
+  /**
+   * Two-Phase Deployment Architecture:
+   * - 'phase1_stability_lock' (DEFAULT): Strictly locked to built-in Gemini 4 Neon platform quota;
+   *   external Google AI Studio API keys and third-party provider keys are hard-blocked.
+   * - 'phase2_open_multi_provider': Full provider-agnostic freedom for any user, model, provider, or API.
+   */
+  deploymentPhase?: AiDeploymentPhase;
   provider: AiProviderType;
   /**
    * Authentication strategy:
@@ -851,6 +864,7 @@ export const DEFAULT_MULTI_TIER_ROUTING: MultiTierRoutingConfig = {
 };
 
 export const DEFAULT_AI_PROVIDER_CONFIG: AiProviderConfig = {
+  deploymentPhase: 'phase1_stability_lock',
   provider: 'google_aistudio',
   googleKeyMode: 'auto_creator_first',
   providers: {
@@ -1425,6 +1439,14 @@ export function getProviderDisplaySummary(
   config: AiProviderConfig,
   googleModelId: AiModelId
 ): { providerLabel: string; modelLabel: string; keySourceLabel: string } {
+  if (isPhase1StabilityLocked(config.deploymentPhase)) {
+    return {
+      providerLabel: 'Gemini (فاز ۱ — قفل پایداری)',
+      modelLabel: 'Gemini 4 Neon',
+      keySourceLabel: 'سهمیه داخلی پلتفرم (کلید AI Studio مسدود)',
+    };
+  }
+
   const provider = normalizeProviderType(config.provider);
   const meta = AI_PROVIDER_METADATA[provider];
   const creds = getActiveProviderCredentials(config);

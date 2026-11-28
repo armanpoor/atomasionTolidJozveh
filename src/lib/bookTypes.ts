@@ -44,6 +44,20 @@ export interface BlockProvenance {
   sourceUnitIds?: string[];
 }
 
+export type WinolsTableKind = 'matrix_2d' | 'damos_directory' | 'hex_dump';
+
+export interface WinolsTableMetadata {
+  kind: WinolsTableKind;
+  mapCode?: string;
+  hexAddress?: string;
+  dimensionsLabel?: string;
+  xAxisLabel?: string;
+  yAxisLabel?: string;
+  unit?: string;
+  factorOffset?: string;
+  sourceFormat?: 'markdown_pipe' | 'tab_separated' | 'space_aligned' | 'semicolon_csv' | 'hex_dump';
+}
+
 export interface TableBlock extends BlockProvenance {
   type: 'table';
   id: string;
@@ -53,6 +67,7 @@ export interface TableBlock extends BlockProvenance {
   rows: string[][];
   generatedBy?: 'ai' | 'local';
   rationale?: string;
+  winolsMeta?: WinolsTableMetadata;
 }
 
 export interface CalloutBlock extends BlockProvenance {
@@ -92,14 +107,18 @@ export interface FigureBlock extends BlockProvenance {
   caption: string;
   description: string;
   imageStrategy?: 'WEB_SEARCH' | 'AI_PLACEHOLDER';
-  resolutionStatus?: 'resolved_web' | 'ai_placeholder' | 'fallback_placeholder';
+  resolutionStatus?: 'pending' | 'resolved_web' | 'ai_placeholder' | 'fallback_placeholder';
   anchorId?: string;
   searchQuery?: string;
   targetEntity?: string;
   imageCategory?: 'ecu_pinout' | 'pcb_boot' | 'winols_map' | 'waveform_component';
   imageUrl?: string;
+  mimeType?: 'image/png' | 'image/jpeg' | 'image/webp' | 'image/svg+xml';
+  widthPx?: number;
+  heightPx?: number;
   sourceUri?: string;
   sourceTitle?: string;
+  fallbackReasonFa?: string;
   aiPlaceholderSpec?: AiImagePlaceholderSpec;
 }
 
@@ -180,6 +199,234 @@ export interface SubheadingBlock extends BlockProvenance {
   text: string;
 }
 
+export type ContentArchetypeId =
+  | 'dyno_graph_reading'
+  | 'winols_hex_maps'
+  | 'ecu_pinout_harness'
+  | 'diagnostics_dtc_waveform'
+  | 'combustion_afr_ignition'
+  | 'thermal_pressure_telemetry'
+  | 'general_technical_pedagogy';
+
+export type AdaptiveVisualKind =
+  | 'dyno_chart'
+  | 'winols_heatmap'
+  | 'ecu_pinout'
+  | 'diagnostic_waveform'
+  | 'afr_ignition_curve'
+  | 'numeric_telemetry_chart';
+
+export interface DynoDataPoint {
+  rpm: number;
+  stockHp: number;
+  tunedHp: number;
+  stockTorqueNm: number;
+  tunedTorqueNm: number;
+  stockAfr?: number;
+  tunedAfr?: number;
+  boostBar?: number;
+}
+
+export interface DynoVisualPayload {
+  kind: 'dyno_chart';
+  subtitle: string;
+  stageLabel: string;
+  peakStockHp: number;
+  peakTunedHp: number;
+  peakStockTorqueNm: number;
+  peakTunedTorqueNm: number;
+  crossoverRpm: number;
+  annotations: Array<{ rpm: number; label: string; tone: 'nominal' | 'gain' | 'caution' }>;
+  points: DynoDataPoint[];
+}
+
+export interface WinolsHeatmapPayload {
+  kind: 'winols_heatmap';
+  mapCode: string;
+  mapNameFa: string;
+  hexAddress: string;
+  dataFormat: string;
+  factorOffset: string;
+  unit: string;
+  rpmAxis: number[];
+  loadAxis: number[];
+  stockMatrix: number[][];
+  tunedMatrix: number[][];
+  highlightZoneLabel: string;
+}
+
+export interface EcuPinSpec {
+  pin: string;
+  label: string;
+  rail: 'power' | 'ground' | 'can_comm' | 'sensor' | 'actuator';
+  signalSpec: string;
+  voltageRange: string;
+}
+
+export interface EcuPinoutPayload {
+  kind: 'ecu_pinout';
+  ecuName: string;
+  connectorLabel: string;
+  totalPinsLabel: string;
+  pins: EcuPinSpec[];
+}
+
+export interface DiagnosticWaveformPayload {
+  kind: 'diagnostic_waveform';
+  sensorName: string;
+  dtcCodes: string[];
+  unit: string;
+  thresholdValue: number;
+  thresholdLabel: string;
+  faultSummaryFa: string;
+  diagnosticSteps: string[];
+  samples: Array<{ tMs: number; nominal: number; faulty: number }>;
+}
+
+export interface AfrIgnitionPayload {
+  kind: 'afr_ignition_curve';
+  fuelOctaneLabel: string;
+  targetWotAfr: number;
+  stoichAfr: number;
+  points: Array<{
+    rpm: number;
+    stockAdvanceDeg: number;
+    tunedAdvanceDeg: number;
+    knockLimitDeg: number;
+    afr: number;
+  }>;
+}
+
+export type NumericKeywordCategory =
+  | 'temperature'
+  | 'pressure'
+  | 'torque'
+  | 'winols'
+  | 'numeric_series';
+
+export interface NumericTelemetryPoint {
+  xLabel: string;
+  xNumeric: number;
+  primaryValue: number;
+  secondaryValue?: number;
+}
+
+export interface NumericTelemetryPayload {
+  kind: 'numeric_telemetry_chart';
+  metricCategory: 'temperature' | 'pressure' | 'torque' | 'combined_telemetry';
+  chartTitleFa: string;
+  subtitleFa: string;
+  xAxisLabel: string;
+  primarySeriesLabel: string;
+  primaryUnit: string;
+  secondarySeriesLabel?: string;
+  secondaryUnit?: string;
+  safeLimitValue?: number;
+  safeLimitLabel?: string;
+  matchedKeywords: string[];
+  peakPrimary: number;
+  minPrimary: number;
+  avgPrimary: number;
+  points: NumericTelemetryPoint[];
+}
+
+export interface NumericChartKeywordHit {
+  category: NumericKeywordCategory;
+  labelFa: string;
+  keywordToken: string;
+  occurrences: number;
+  sampleValues: string[];
+}
+
+export interface NumericChartFileReport {
+  fileName: string;
+  triggered: boolean;
+  categories: NumericKeywordCategory[];
+  matchedKeywords: string[];
+  extractedPairsCount: number;
+  winolsTablesDetected: number;
+}
+
+export interface NumericChartAnalysisReport {
+  shouldActivatePythonVisualizer: boolean;
+  triggeredCategories: NumericKeywordCategory[];
+  keywordHits: NumericChartKeywordHit[];
+  recommendedVisualKinds: AdaptiveVisualKind[];
+  totalExtractedDataPoints: number;
+  totalWinolsTablesDetected: number;
+  analyzedFiles: NumericChartFileReport[];
+  summaryFa: string;
+  analyzedAt: string;
+}
+
+export type AdaptiveVisualPayload =
+  | DynoVisualPayload
+  | WinolsHeatmapPayload
+  | EcuPinoutPayload
+  | DiagnosticWaveformPayload
+  | AfrIgnitionPayload
+  | NumericTelemetryPayload;
+
+export interface AdaptiveVisualBlock extends BlockProvenance {
+  type: 'adaptive_visual';
+  id: string;
+  visualKind: AdaptiveVisualKind;
+  archetype: ContentArchetypeId;
+  title: string;
+  caption: string;
+  pedagogicalTakeaway: string;
+  svgMarkup: string;
+  pythonRenderedSvg?: string;
+  pythonScript?: string;
+  renderedByPython?: boolean;
+  pythonEngineLabel?: string;
+  groundedFromText: boolean;
+  extractedMetrics?: string[];
+  widthPx: number;
+  heightPx: number;
+  pngDataUrl?: string;
+  pngBytes?: Uint8Array;
+  payload: AdaptiveVisualPayload;
+}
+
+export interface DetectedArchetypeScore {
+  id: ContentArchetypeId;
+  labelFa: string;
+  score: number;
+  sharePercent: number;
+  matchedTerms: string[];
+  recommendedVisualFa: string;
+}
+
+export interface AdaptiveProjectChange {
+  field: string;
+  labelFa: string;
+  detailFa: string;
+  appliedAt: string;
+}
+
+export interface AdaptiveProjectProfile {
+  dominantArchetype: ContentArchetypeId;
+  dominantLabelFa: string;
+  visualStylePreset:
+    | 'dyno_telemetry'
+    | 'winols_precision'
+    | 'ecu_schematic'
+    | 'diagnostic_lab'
+    | 'combustion_physics'
+    | 'editorial_classic';
+  visualStyleLabelFa: string;
+  archetypes: DetectedArchetypeScore[];
+  autoAppliedChanges: AdaptiveProjectChange[];
+  recommendedVisualModules: AdaptiveVisualKind[];
+  pythonChartingRecommended: boolean;
+  numericChartReport?: NumericChartAnalysisReport;
+  analyzedFileCount: number;
+  analyzedUnitCount: number;
+  summaryFa: string;
+  analyzedAt: string;
+}
+
 export type ContentBlock =
   | ParagraphBlock
   | SubheadingBlock
@@ -191,7 +438,8 @@ export type ContentBlock =
   | EmbeddedImageBlock
   | WebEnrichmentBlock
   | ConflictNoteBlock
-  | DiagramBlock;
+  | DiagramBlock
+  | AdaptiveVisualBlock;
 
 export interface SectionNode {
   id: string;
@@ -410,6 +658,7 @@ export interface ParsedBook {
   sourceMapRows: string[][];
   audit?: OptimizationAudit;
   aiReport?: AiAnalysisReport;
+  adaptiveVisualProfile?: AdaptiveProjectProfile;
 }
 
 export interface OptimizationOptions {
@@ -459,6 +708,8 @@ export interface DocxExportConfig {
   includeListOfTables: boolean;
   includeFootnotesSection: boolean;
   includeHeadersAndFooters: boolean;
+  adaptiveVisualsEnabled?: boolean;
+  adaptiveVisualProfile?: AdaptiveProjectProfile;
   optimization: OptimizationOptions;
 }
 
@@ -525,6 +776,7 @@ export const DEFAULT_DOCX_CONFIG: DocxExportConfig = {
   includeListOfTables: true,
   includeFootnotesSection: true,
   includeHeadersAndFooters: true,
+  adaptiveVisualsEnabled: true,
   optimization: DEFAULT_OPTIMIZATION_OPTIONS,
 };
 

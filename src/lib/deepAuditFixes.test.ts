@@ -944,7 +944,7 @@ describe('16. Anchor-First Smart Image Orchestrator, 3-Line AI Placeholder & Gem
                 {
                   type: 'paragraph' as const,
                   id: 'b1',
-                  text: 'بررسی کامل پین‌اوت و کانکتور ایسیو Bosch ME7.4.4 همراه با پایه‌های تغذیه و خط ارتباطی K-Line روی میز کار.',
+                  text: 'بررسی کامل پین‌اوت و کانکتور ایسیو Bosch ME7.4.4 همراه با پایه‌های تغذیه و خط ارتباطی K-Line روی میز کار و مراحل تست ولتاژ سوکت‌های سه‌تایی ۳۲، ۴۸ و ۳۲ پین. '.repeat(14),
                 },
               ],
             },
@@ -957,7 +957,7 @@ describe('16. Anchor-First Smart Image Orchestrator, 3-Line AI Placeholder & Gem
                 {
                   type: 'paragraph' as const,
                   id: 'b2',
-                  text: 'در نرم‌افزار WinOLS 2.24 نقشه آوانس جرقه KFZW در آدرس 0x1C200 در نمای 2D و 3D با ضریب فاکتور 0.75 اصلاح می‌شود.',
+                  text: 'در نرم‌افزار WinOLS 2.24 نقشه آوانس جرقه KFZW در آدرس 0x1C200 در نمای 2D و 3D با ضریب فاکتور 0.75 و محورهای دور موتور و بار اصلاح می‌شود. '.repeat(14),
                 },
               ],
             },
@@ -1006,7 +1006,514 @@ describe('16. Anchor-First Smart Image Orchestrator, 3-Line AI Placeholder & Gem
       assert.ok(fig2.aiPlaceholderSpec?.compactTag.includes('AI_IMAGE_PLACEHOLDER'));
     }
   });
+
+  it('enforces Phase 1 Stability Lock (blocks external Google AI Studio & third-party keys) and supports Phase 2 open multi-provider + custom adapter registration', async () => {
+    const {
+      resolvePhaseAwareLlmRoute,
+      registerCustomLlmAdapter,
+      unregisterCustomLlmAdapter,
+      getLlmProviderAdapter,
+      PHASE1_LOCKED_MODEL,
+      PHASE1_LOCKED_PROVIDER,
+    } = await import('./llmAbstractionLayer.ts');
+    const { DEFAULT_AI_PROVIDER_CONFIG } = await import('./aiProviderConfig.ts');
+    const { buildProviderHeaders } = await import('./apiClient.ts');
+    const {
+      resolveAiProviderFromRequest,
+      resolveProviderForTaskFromRequest,
+    } = await import('../server/aiProvider.ts');
+
+    // 1. Phase 1 hard-lock overrides attempted external provider & strips personal Google AI Studio key
+    const phase1Route = resolvePhaseAwareLlmRoute({
+      deploymentPhase: 'phase1_stability_lock',
+      requestedProviderId: 'openai',
+      requestedModelId: 'gpt-4.1',
+      requestedBaseUrl: 'https://api.openai.com/v1',
+      requestedKeyMode: 'personal',
+      externalApiKey: 'AIzaSyFakeExternalGoogleKey1234567890',
+    });
+    assert.equal(phase1Route.deploymentPhase, 'phase1_stability_lock');
+    assert.equal(phase1Route.phaseLocked, true);
+    assert.equal(phase1Route.providerId, PHASE1_LOCKED_PROVIDER);
+    assert.equal(phase1Route.modelId, PHASE1_LOCKED_MODEL);
+    assert.equal(phase1Route.externalApiKey, '');
+    assert.equal(phase1Route.allowExternalKeyFallback, false);
+    assert.equal(phase1Route.keyMode, 'auto_creator_first');
+
+    // 2. buildProviderHeaders in Phase 1 strips X-AI-Api-Key and forces X-AI-Deployment-Phase
+    const phase1Headers = buildProviderHeaders({
+      ...DEFAULT_AI_PROVIDER_CONFIG,
+      deploymentPhase: 'phase1_stability_lock',
+      provider: 'openai',
+      googleKeyMode: 'personal',
+      personalGoogleApiKey: 'AIzaSyShouldBeStripped',
+      customApiKey: 'sk-should-be-stripped',
+      customBaseUrl: 'https://api.openai.com/v1',
+      customModelId: 'gpt-4o',
+    });
+    assert.equal(phase1Headers['X-AI-Deployment-Phase'], 'phase1_stability_lock');
+    assert.equal(phase1Headers['X-AI-Provider'], PHASE1_LOCKED_PROVIDER);
+    assert.equal(phase1Headers['X-AI-Custom-Model'], PHASE1_LOCKED_MODEL);
+    assert.equal(phase1Headers['X-AI-Api-Key'], undefined);
+
+    // 3. Server-side resolveAiProviderFromRequest & resolveProviderForTaskFromRequest enforce Phase 1 lock even if forged headers arrive
+    const fakeHeaders: Record<string, string> = {
+      'x-ai-deployment-phase': 'phase1_stability_lock',
+      'x-ai-provider': 'openai',
+      'x-ai-custom-model': 'gpt-4.1',
+      'x-ai-api-key': 'AIzaSyShouldNeverBeUsedInPhase1',
+    };
+    const fakeReq = {
+      headers: fakeHeaders,
+      header(name: string) {
+        return fakeHeaders[name.toLowerCase()];
+      },
+    } as unknown as import('express').Request;
+    const serverResolved = resolveAiProviderFromRequest(fakeReq);
+    assert.equal(serverResolved.deploymentPhase, 'phase1_stability_lock');
+    assert.equal(serverResolved.provider, PHASE1_LOCKED_PROVIDER);
+    assert.equal(serverResolved.customModelId, PHASE1_LOCKED_MODEL);
+    assert.equal(serverResolved.personalApiKey, '');
+
+    const taskResolved = resolveProviderForTaskFromRequest(fakeReq, 'deep_review');
+    assert.equal(taskResolved.provider.provider, PHASE1_LOCKED_PROVIDER);
+    assert.equal(taskResolved.googleModel, PHASE1_LOCKED_MODEL);
+    assert.equal(taskResolved.provider.personalApiKey, '');
+
+    // 4. Phase 2 unlocks arbitrary providers & custom registered adapters without touching core pipeline
+    const customId = 'test_iranian_gateway_adapter';
+    const customAdapter = registerCustomLlmAdapter({
+      id: customId,
+      displayNameFa: 'درگاه سفارشی تست',
+      protocol: 'openai_compatible',
+      authScheme: 'custom_header',
+      customAuthHeaderName: 'X-Custom-Token',
+      defaultBaseUrl: 'https://gateway.example.ir/v1',
+      defaultModelId: 'deepseek-r1-ecu',
+    });
+    assert.equal(getLlmProviderAdapter(customId).id, customId);
+    assert.equal(customAdapter.customAuthHeaderName, 'X-Custom-Token');
+    const authHeaders = customAdapter.buildAuthHeaders('custom-secret-token');
+    assert.equal(authHeaders['X-Custom-Token'], 'custom-secret-token');
+
+    const phase2Route = resolvePhaseAwareLlmRoute({
+      deploymentPhase: 'phase2_open_multi_provider',
+      requestedProviderId: customId,
+      requestedModelId: 'deepseek-r1-ecu',
+      requestedKeyMode: 'personal',
+      externalApiKey: 'custom-secret-token',
+    });
+    assert.equal(phase2Route.phaseLocked, false);
+    assert.equal(phase2Route.providerId, customId);
+    assert.equal(phase2Route.modelId, 'deepseek-r1-ecu');
+    assert.equal(phase2Route.externalApiKey, 'custom-secret-token');
+    assert.equal(phase2Route.baseUrl, 'https://gateway.example.ir/v1');
+    assert.equal(phase2Route.allowExternalKeyFallback, true);
+
+    assert.equal(unregisterCustomLlmAdapter(customId), true);
+  });
+
+  it('validates candidate web images strictly (MIME, min resolution, watermark blocklist, automotive relevance)', async () => {
+    const { validateCandidateWebImage } = await import('./smartImageOrchestrator.ts');
+
+    const valid = validateCandidateWebImage(
+      {
+        url: 'https://upload.wikimedia.org/wikipedia/commons/a/ab/Bosch_ME7_ECU_PCB.png',
+        mimeType: 'image/png',
+        width: 800,
+        height: 600,
+        title: 'Bosch ME7.4.4 ECU PCB pinout diagram',
+        sourcePageUrl: 'https://commons.wikimedia.org/wiki/File:Bosch_ME7_ECU_PCB.png',
+      },
+      ['Bosch', 'ME7.4.4', 'ECU', 'pinout']
+    );
+    assert.equal(valid.valid, true);
+
+    const watermarked = validateCandidateWebImage(
+      {
+        url: 'https://image.shutterstock.com/z/stock-photo-ecu-123.jpg',
+        mimeType: 'image/jpeg',
+        width: 1200,
+        height: 800,
+        title: 'Bosch ME7 ECU pinout',
+      },
+      ['Bosch', 'ME7', 'ECU']
+    );
+    assert.equal(watermarked.valid, false);
+    assert.ok(watermarked.rejectionReason?.startsWith('blocked_stock_or_watermark'));
+
+    const tiny = validateCandidateWebImage(
+      {
+        url: 'https://upload.wikimedia.org/wikipedia/commons/thumb.png',
+        mimeType: 'image/png',
+        width: 160,
+        height: 120,
+        title: 'Bosch ME7 ECU PCB',
+      },
+      ['Bosch', 'ME7', 'ECU']
+    );
+    assert.equal(tiny.valid, false);
+    assert.ok(tiny.rejectionReason?.startsWith('resolution_too_low'));
+
+    const wrongMime = validateCandidateWebImage(
+      {
+        url: 'https://example.org/animated.gif',
+        mimeType: 'image/gif',
+        width: 640,
+        height: 480,
+        title: 'Bosch ECU pinout',
+      },
+      ['Bosch', 'ECU']
+    );
+    assert.equal(wrongMime.valid, false);
+    assert.ok(wrongMime.rejectionReason?.startsWith('unsupported_mime'));
+
+    const irrelevant = validateCandidateWebImage(
+      {
+        url: 'https://upload.wikimedia.org/wikipedia/commons/cat.jpg',
+        mimeType: 'image/jpeg',
+        width: 1024,
+        height: 768,
+        title: 'Cute domestic cat sleeping on sofa',
+      },
+      ['Bosch', 'ME7.4.4', 'pinout']
+    );
+    assert.equal(irrelevant.valid, false);
+    assert.equal(irrelevant.rejectionReason, 'irrelevant_metadata_no_technical_keyword_match');
+  });
+
+  it('enforces strict 3-State Decision Matrix (short text <120w, safety checklists, math formulas, visual density guard) & inline AI placeholder hydration', async () => {
+    const {
+      evaluateSectionImageDecision,
+      hydrateInlineAiPlaceholderTagsInBook,
+      FALLBACK_NO_VALID_WEB_IMAGE_NOTICE_FA,
+      WebImageQueryCache,
+      resolveBookWebImagesParallel,
+    } = await import('./smartImageOrchestrator.ts');
+
+    // Short general conceptual section (<120 words) => NO_IMAGE
+    const shortConceptual = evaluateSectionImageDecision({
+      chapterNumber: 1,
+      chapterTitle: 'فصل ۱: مقدمه',
+      sectionIndex: 0,
+      sectionTitle: 'مقدمه‌ای کوتاه بر تاریخچه تیونینگ',
+      blocks: [
+        {
+          type: 'paragraph',
+          id: 'p_short',
+          text: 'تیونینگ موتور در سال‌های اخیر پیشرفت چشمگیری داشته است و مهندسان بسیاری روی بهینه‌سازی کار می‌کنند.',
+        },
+      ],
+    });
+    assert.equal(shortConceptual.strategy, 'NO_IMAGE');
+
+    // Pure safety checklist => NO_IMAGE
+    const safetyChecklist = evaluateSectionImageDecision({
+      chapterNumber: 1,
+      chapterTitle: 'فصل ۱: ایمنی',
+      sectionIndex: 1,
+      sectionTitle: 'چک‌لیست ایمنی پیش از فلش و پروگرام ایسیو',
+      blocks: [
+        {
+          type: 'paragraph',
+          id: 'p_safe',
+          text: 'ولتاژ باتری حتماً بالاتر از ۱۳.۲ ولت و شارژر استابلایزر متصل باشد. پیش از رایت فایل حتماً چک‌سام checksum اصلاح شود و بکاپ کامل تهیه گردد.',
+        },
+      ],
+    });
+    assert.equal(safetyChecklist.strategy, 'NO_IMAGE');
+
+    // Pure math formula section => NO_IMAGE
+    const formulaOnly = evaluateSectionImageDecision({
+      chapterNumber: 1,
+      chapterTitle: 'فصل ۱: محاسبات',
+      sectionIndex: 2,
+      sectionTitle: 'فرمول تبدیل مقادیر خام هگز به واحد فیزیکی',
+      blocks: [
+        {
+          type: 'paragraph',
+          id: 'p_math',
+          text: 'برای محاسبه مقدار واقعی آوانس از فرمول Physical = Factor * Raw + Offset استفاده می‌شود. در اینجا Factor = 0.75 و Offset = -22.5 است.',
+        },
+      ],
+    });
+    assert.equal(formulaOnly.strategy, 'NO_IMAGE');
+
+    // Visual Density Guard: 1 visual already exists in a 400-word chapter -> blocks second visual
+    const densityBlocked = evaluateSectionImageDecision({
+      chapterNumber: 1,
+      chapterTitle: 'فصل ۱: احتراق',
+      sectionIndex: 3,
+      sectionTitle: 'نقشه جبهه شعله و ناک در محفظه احتراق',
+      blocks: [
+        {
+          type: 'paragraph',
+          id: 'p_dens',
+          text: 'جبهه شعله در محفظه احتراق پس از جرقه شمع و نقطه مرگ بالا TDC باعث افزایش فشار سیلندر و پدیده ناک می‌شود. '.repeat(
+            12
+          ),
+        },
+      ],
+      existingVisualCountInChapter: 1,
+      chapterTotalWordCount: 400,
+    });
+    assert.equal(densityBlocked.strategy, 'NO_IMAGE');
+
+    // Inline [[AI_IMAGE_PLACEHOLDER | ...]] hydration preserves surrounding text and creates structured FigureBlock
+    const bookWithInlineTag: import('./bookTypes.ts').ParsedBook = {
+      title: 'تست هیدراتاسیون تگ AI',
+      subtitle: '',
+      editionNote: '',
+      sourceFiles: ['test.md'],
+      volumes: [{ id: 'v1', index: 1, title: 'جلد ۱' }],
+      chapters: [
+        {
+          id: 'c1',
+          chapterNumber: 1,
+          title: 'فصل ۱: فیزیک احتراق',
+          volumeIndex: 1,
+          volumeTitle: 'جلد ۱',
+          meta: [],
+          introBlocks: [],
+          sourceFileName: 'test.md',
+          sections: [
+            {
+              id: 's1',
+              numberLabel: '۱-۱',
+              title: 'پدیده ناک و جبهه شعله',
+              originalTitle: 'پدیده ناک و جبهه شعله',
+              blocks: [
+                {
+                  type: 'paragraph',
+                  id: 'p_inline',
+                  text: 'متن علمی پیش از تگ.\n[[AI_IMAGE_PLACEHOLDER | موضوع: مقایسه جبهه شعله عادی و ناک در محفظه احتراق | عناصر کلیدی: پیستون، شمع، موج ضربه‌ای ناک | سبک پیشنهادی: برش فنی دوگانه با پس‌زمینه سفید]]\nمتن علمی پس از تگ.',
+                },
+              ],
+            },
+          ],
+        },
+      ],
+      footnotes: [],
+      glossary: [],
+      tableIndex: [],
+      cheatSheets: [],
+      visualSuggestions: [],
+      sourceMapRows: [],
+    };
+    const hydratedCount = hydrateInlineAiPlaceholderTagsInBook(bookWithInlineTag);
+    assert.equal(hydratedCount, 1);
+    const blocks = bookWithInlineTag.chapters[0].sections[0].blocks;
+    const hydratedFig = blocks.find((b) => b.type === 'figure' && b.resolutionStatus === 'ai_placeholder');
+    assert.ok(hydratedFig && hydratedFig.type === 'figure');
+    assert.ok(hydratedFig.aiPlaceholderSpec?.subjectFa.includes('مقایسه جبهه شعله'));
+    assert.equal(
+      blocks.some((b) => b.type === 'paragraph' && b.text.includes('متن علمی پیش از تگ')),
+      true
+    );
+    assert.equal(
+      blocks.some((b) => b.type === 'paragraph' && b.text.includes('متن علمی پس از تگ')),
+      true
+    );
+
+    // LRU cache + exact fallback notice verification
+    const cache = new WebImageQueryCache(16);
+    const cacheBook: import('./bookTypes.ts').ParsedBook = {
+      ...bookWithInlineTag,
+      chapters: [
+        {
+          ...bookWithInlineTag.chapters[0],
+          sections: [
+            {
+              id: 's_web_1',
+              numberLabel: '۱-۱',
+              title: 'پین‌اوت ایسیو ME7.4.4',
+              originalTitle: 'پین‌اوت ایسیو ME7.4.4',
+              blocks: [
+                {
+                  type: 'figure',
+                  id: 'fig_cache_1',
+                  caption: 'پین‌اوت ایسیو ME7.4.4',
+                  description: 'پین‌اوت سوکت ایسیو',
+                  imageStrategy: 'WEB_SEARCH',
+                  resolutionStatus: 'pending',
+                  searchQuery: 'Bosch ME7.4.4 ECU pinout diagram',
+                },
+              ],
+            },
+            {
+              id: 's_web_2',
+              numberLabel: '۱-۲',
+              title: 'پین‌اوت تکرارشونده ME7.4.4',
+              originalTitle: 'پین‌اوت تکرارشونده ME7.4.4',
+              blocks: [
+                {
+                  type: 'figure',
+                  id: 'fig_cache_2',
+                  caption: 'پین‌اوت تکرارشونده ME7.4.4',
+                  description: 'پین‌اوت تکراری برای بررسی کش',
+                  imageStrategy: 'WEB_SEARCH',
+                  resolutionStatus: 'pending',
+                  searchQuery: 'Bosch ME7.4.4 ECU pinout diagram',
+                },
+              ],
+            },
+            {
+              id: 's_web_miss',
+              numberLabel: '۱-۳',
+              title: 'ایسیو کمیاب بدون عکس وب',
+              originalTitle: 'ایسیو کمیاب بدون عکس وب',
+              blocks: [
+                {
+                  type: 'figure',
+                  id: 'fig_miss',
+                  caption: 'ایسیو کمیاب بدون عکس وب',
+                  description: 'تست فالبک خودکار',
+                  imageStrategy: 'WEB_SEARCH',
+                  resolutionStatus: 'pending',
+                  searchQuery: 'Rare Unfindable ECU PCB XYZ999',
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    };
+
+    let fetchCalls = 0;
+    const res = await resolveBookWebImagesParallel(cacheBook, {
+      concurrency: 1,
+      timeoutMs: 1000,
+      cache,
+      fetcher: async ({ searchQuery }) => {
+        fetchCalls += 1;
+        if (searchQuery.includes('ME7.4.4')) {
+          return {
+            imageUrl: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=',
+            mimeType: 'image/png',
+            widthPx: 640,
+            heightPx: 480,
+            sourceTitle: 'Bosch ME7.4.4 Pinout',
+            sourceUri: 'https://commons.wikimedia.org/wiki/File:ME744.png',
+          };
+        }
+        return null;
+      },
+    });
+    assert.equal(fetchCalls, 2); // second identical query served from LRU cache
+    assert.equal(res.cacheHitsCount, 1);
+    assert.equal(res.resolvedFromWebCount, 2);
+    assert.equal(res.fallbackToAiPlaceholderCount, 1);
+    const missFig = cacheBook.chapters[0].sections[2].blocks[0];
+    assert.equal(missFig.type, 'figure');
+    if (missFig.type === 'figure') {
+      assert.equal(missFig.resolutionStatus, 'fallback_placeholder');
+      assert.equal(missFig.fallbackReasonFa, FALLBACK_NO_VALID_WEB_IMAGE_NOTICE_FA);
+      assert.ok(missFig.aiPlaceholderSpec?.subjectFa.includes(FALLBACK_NO_VALID_WEB_IMAGE_NOTICE_FA));
+    }
+  });
+
+  it('embeds real binary PNG images into generated Word (.docx) files and prints exact Persian AI placeholder header', async () => {
+    const { DEFAULT_DOCX_CONFIG } = await import('./bookTypes.ts');
+    const { generateDocxUint8Array } = await import('./docxGenerator.ts');
+    const { AI_PLACEHOLDER_HEADER_FA } = await import('./smartImageOrchestrator.ts');
+    const JSZip = (await import('jszip')).default;
+
+    // Minimal valid 1x1 PNG data URL
+    const tinyPngDataUrl =
+      'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
+
+    const bookForDocx: import('./bookTypes.ts').ParsedBook = {
+      title: 'کتاب تست خروجی Word با تصویر وب و قالب AI',
+      subtitle: 'تست جامع',
+      editionNote: '',
+      sourceFiles: ['test.md'],
+      volumes: [{ id: 'v1', index: 1, title: 'جلد ۱' }],
+      chapters: [
+        {
+          id: 'c1',
+          chapterNumber: 1,
+          title: 'فصل ۱: تست تصاویر در Word',
+          volumeIndex: 1,
+          volumeTitle: 'جلد ۱',
+          meta: [],
+          introBlocks: [],
+          sourceFileName: 'test.md',
+          sections: [
+            {
+              id: 's1',
+              numberLabel: '۱-۱',
+              title: 'تصویر وب واقعی و قالب AI',
+              originalTitle: 'تصویر وب واقعی و قالب AI',
+              blocks: [
+                {
+                  type: 'paragraph',
+                  id: 'p1',
+                  text: 'توضیح فنی درباره سوکت ایسیو و محفظه احتراق.',
+                },
+                {
+                  type: 'figure',
+                  id: 'fig_real_png',
+                  caption: 'پین‌اوت واقعی Bosch ME7.4.4',
+                  description: 'تصویر واقعی پین‌اوت دانلودشده از وب',
+                  imageStrategy: 'WEB_SEARCH',
+                  resolutionStatus: 'resolved_web',
+                  imageUrl: tinyPngDataUrl,
+                  mimeType: 'image/png',
+                  widthPx: 640,
+                  heightPx: 400,
+                  sourceTitle: 'Wikimedia Technical Archive',
+                  sourceUri: 'https://commons.wikimedia.org/wiki/File:ME744_Pinout.png',
+                },
+                {
+                  type: 'figure',
+                  id: 'fig_ai_box',
+                  caption: 'شماتیک مفهومی جبهه شعله و ناک',
+                  description: 'قالب ۳ خطی تصویر مفهومی',
+                  imageStrategy: 'AI_PLACEHOLDER',
+                  resolutionStatus: 'ai_placeholder',
+                  aiPlaceholderSpec: {
+                    codeId: 'IMG-AI-01',
+                    typeFa: 'برش فنی دوگانه با پس‌زمینه سفید',
+                    subjectFa: 'مقایسه جبهه شعله عادی و پدیده ناک در سیلندر موتور',
+                    elementsFa: 'پیستون، شمع، جبهه شعله، نقطه خوداشتعالی ناک',
+                    labelsFa: 'TDC, Flame Front, Knock Wave, Spark Plug',
+                    compactTag:
+                      '[[AI_IMAGE_PLACEHOLDER | type="برش فنی دوگانه" | subject="مقایسه جبهه شعله عادی و پدیده ناک در سیلندر موتور" | elements="پیستون، شمع، جبهه شعله" | labels="TDC, Knock"]] ',
+                  },
+                },
+              ],
+            },
+          ],
+        },
+      ],
+      footnotes: [],
+      glossary: [],
+      tableIndex: [],
+      cheatSheets: [],
+      visualSuggestions: [],
+      sourceMapRows: [],
+    };
+
+    const bytes = await generateDocxUint8Array(bookForDocx, DEFAULT_DOCX_CONFIG);
+    assert.ok(bytes.byteLength > 2000);
+    const zip = await JSZip.loadAsync(bytes);
+    const mediaFiles = Object.keys(zip.files).filter((k) => k.startsWith('word/media/'));
+    assert.ok(mediaFiles.length >= 1, 'Expected at least 1 embedded image inside word/media/');
+
+    const documentXml = await zip.file('word/document.xml')?.async('string');
+    assert.ok(documentXml, 'Expected word/document.xml inside generated docx');
+    const plainWordText = documentXml
+      .replace(/<[^>]+>/g, '')
+      .replace(/[\u200E\u200F\u202A-\u202E\u2066-\u2069]/g, '');
+    assert.ok(
+      plainWordText.includes(AI_PLACEHOLDER_HEADER_FA),
+      'Expected exact Persian AI placeholder header inside word/document.xml'
+    );
+    assert.ok(plainWordText.includes('مقایسه جبهه شعله عادی و پدیده ناک'));
+  });
 });
+
+
 
 
 

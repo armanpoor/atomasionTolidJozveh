@@ -35,6 +35,14 @@ import {
 import type { AiUsageDelta } from '../lib/aiUsageMetrics.ts';
 import type { ProjectAiUsageLedger, WebGroundingSource } from '../lib/bookTypes.ts';
 import {
+  type AiDeploymentPhase,
+  isPhase1StabilityLocked,
+  normalizeAiDeploymentPhase,
+  PHASE1_LOCKED_BASE_URL,
+  PHASE1_LOCKED_MODEL,
+  PHASE1_LOCKED_PROVIDER,
+} from '../lib/llmAbstractionLayer.ts';
+import {
   classifyProviderHttpResponse,
   computeRetryBackoffDelayMs,
   evaluateModelMismatch,
@@ -54,6 +62,7 @@ import {
 } from '../lib/tokenOptimizer.ts';
 
 export interface ResolvedServerAiProvider {
+  deploymentPhase?: AiDeploymentPhase;
   provider: AiProviderType;
   googleKeyMode: KeyAuthMode;
   /** Primary API key to attempt first */
@@ -171,6 +180,35 @@ export function parseCustomModelsFromRequest(
 }
 
 export function resolveAiProviderFromRequest(req: Request): ResolvedServerAiProvider {
+  const deploymentPhase = normalizeAiDeploymentPhase(
+    readHeaderString(req, 'x-ai-deployment-phase')
+  );
+
+  // PHASE 1 HARD-LOCK (Development & Stability Lock):
+  // Strictly lock to built-in platform quota + gemini-4-neon.
+  // NEVER consume external Google AI Studio API keys or switch to third-party keys.
+  if (isPhase1StabilityLocked(deploymentPhase)) {
+    const creatorApiKey = getCreatorKeyForProvider(PHASE1_LOCKED_PROVIDER);
+    return {
+      deploymentPhase: 'phase1_stability_lock',
+      provider: PHASE1_LOCKED_PROVIDER,
+      googleKeyMode: 'auto_creator_first',
+      apiKey: creatorApiKey,
+      creatorApiKey,
+      personalApiKey: '',
+      keySource: 'creator',
+      baseUrl: PHASE1_LOCKED_BASE_URL,
+      hasCustomGeminiBaseUrl: false,
+      customModelId: PHASE1_LOCKED_MODEL,
+      ...(creatorApiKey
+        ? {}
+        : {
+            validationError:
+              'سهمیه داخلی پلتفرم در این محیط تنظیم نشده است (فاز ۱ قفل پایداری مانع مصرف کلید API خارجی می‌شود).',
+          }),
+    };
+  }
+
   const provider = normalizeProviderType(readHeaderString(req, 'x-ai-provider'));
   const keyMode = normalizeKeyAuthMode(readHeaderString(req, 'x-ai-key-mode'));
   const personalApiKey = readHeaderString(req, 'x-ai-api-key');
@@ -405,6 +443,21 @@ export function resolveProviderForTaskFromRequest(
 ): TaskResolvedAiContext {
   const primary = resolveAiProviderFromRequest(req);
   const routing = parseTierRoutingFromRequest(req);
+
+  // In Phase 1 Stability Lock, force every task onto the locked built-in Gemini 4 Neon route
+  if (isPhase1StabilityLocked(primary.deploymentPhase)) {
+    return {
+      provider: primary,
+      googleModel: PHASE1_LOCKED_MODEL,
+      tierUsed: 'primary',
+      tierLabelFa: 'فاز ۱ · قفل سهمیه داخلی (Gemini 4 Neon)',
+      optimizationMode: routing.optimizationMode,
+      hardCostCapUsd: routing.hardCostCapUsd,
+      enablePromptCaching: routing.enablePromptCaching,
+      enableResponseCache: routing.enableResponseCache,
+      enableAntiDriftGuard: routing.enableAntiDriftGuard,
+    };
+  }
 
   if (!routing.enabled) {
     const resolvedFallbackGoogle =

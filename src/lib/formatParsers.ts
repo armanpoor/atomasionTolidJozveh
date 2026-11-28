@@ -18,6 +18,7 @@ import {
   resolveUploadedMediaUrl,
   stitchAndEnrichParsedBookTables,
 } from './tableStitcherAndConsolidator.ts';
+import { convertRawWinolsTablesToMarkdown } from './winolsTableDetector.ts';
 
 const PERSIAN_DIGITS = '۰۱۲۳۴۵۶۷۸۹';
 
@@ -242,7 +243,7 @@ export function preprocessMessyRemapText(rawContent: string): string {
     out.push(raw);
   }
 
-  return out.join('\n');
+  return convertRawWinolsTablesToMarkdown(out.join('\n')).markdown;
 }
 
 export function parseMarkdownDocument(rawContent: string, fileName: string): ParsedBook {
@@ -1680,11 +1681,12 @@ function parseHtmlDocument(rawContent: string, fileName: string): ParsedBook {
 
 function parsePlainTextDocument(rawContent: string, fileName: string): ParsedBook {
   const baseTitle = fileName.replace(/\.txt$/i, '').replace(/[_-]+/g, ' ').trim();
-  const hasMdHeadings = /^#{1,3}\s+/m.test(rawContent);
+  const withWinolsTables = convertRawWinolsTablesToMarkdown(rawContent).markdown;
+  const hasMdHeadings = /^#{1,3}\s+/m.test(withWinolsTables);
   if (hasMdHeadings) {
-    return parseMarkdownDocument(rawContent, fileName);
+    return parseMarkdownDocument(withWinolsTables, fileName);
   }
-  const lines = rawContent.replace(/\r\n/g, '\n').split('\n');
+  const lines = withWinolsTables.replace(/\r\n/g, '\n').split('\n');
   const mdLines: string[] = [`# فصل ۱: ${baseTitle}`, ''];
   let secCount = 0;
 
@@ -1692,6 +1694,11 @@ function parsePlainTextDocument(rawContent: string, fileName: string): ParsedBoo
     const l = raw.trim();
     if (!l) {
       mdLines.push('');
+      continue;
+    }
+    // Preserve converted Markdown table rows verbatim
+    if (l.startsWith('|')) {
+      mdLines.push(l);
       continue;
     }
     // Promote Persian chapter/section headings or short underlined/colon lines
@@ -1985,6 +1992,16 @@ export function exportBookToMarkdown(book: ParsedBook): string {
         block.items.forEach((it, idx) => {
           lines.push(`> ${idx + 1}. **${it.label}**${it.detail ? `: ${it.detail}` : ''}`);
         });
+        lines.push('');
+        break;
+      case 'adaptive_visual':
+        lines.push(`> **${block.caption || block.title}**`);
+        if (block.pedagogicalTakeaway) {
+          lines.push(`> ${block.pedagogicalTakeaway}`);
+        }
+        if (block.pythonScript) {
+          lines.push('', '```python', block.pythonScript.trim(), '```');
+        }
         lines.push('');
         break;
       case 'web_enrichment':

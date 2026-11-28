@@ -32,8 +32,14 @@ import {
 } from '../lib/calloutThemes';
 import { sanitizeSvgMarkup } from '../lib/diagramRenderer';
 import { toPersianDigits } from '../lib/formatParsers';
+import {
+  analyzeTableBlockAsWinols,
+  extractWinolsTableSegmentsFromParagraph,
+} from '../lib/winolsTableDetector';
 import { SelectedChapterKey } from './ChapterSidebar';
+import { AdaptiveVisualExhibit } from './AdaptiveVisualExhibit';
 import { RichText } from './RichText';
+import { WinolsGraphicalTableCard } from './WinolsGraphicalTableCard';
 
 interface BookPreviewProps {
   book: ParsedBook;
@@ -147,12 +153,33 @@ function BlockRenderer({
   };
 
   switch (block.type) {
-    case 'paragraph':
+    case 'paragraph': {
+      const winolsSegments = extractWinolsTableSegmentsFromParagraph(block.text);
+      if (winolsSegments) {
+        return wrapWithProvenance(
+          <div className="my-3.5 space-y-3">
+            {winolsSegments.map((seg, sIdx) =>
+              seg.type === 'winols_table' && seg.table ? (
+                <WinolsGraphicalTableCard key={`${block.id}_wt_${sIdx}`} table={seg.table} />
+              ) : (
+                <p key={`${block.id}_tx_${sIdx}`} className="text-[14.5px] leading-[2] text-[#1A1816]">
+                  <RichText
+                    text={seg.text || ''}
+                    footnoteMap={footnoteMap}
+                    onSelectFootnote={onSelectFootnote}
+                  />
+                </p>
+              )
+            )}
+          </div>
+        );
+      }
       return wrapWithProvenance(
         <p className="my-3.5 text-[14.5px] leading-[2] text-[#1A1816]">
           <RichText text={block.text} footnoteMap={footnoteMap} onSelectFootnote={onSelectFootnote} />
         </p>
       );
+    }
 
     case 'subheading':
       return (
@@ -170,6 +197,10 @@ function BlockRenderer({
       );
 
     case 'table': {
+      const detectedWinols = analyzeTableBlockAsWinols(block);
+      if (detectedWinols) {
+        return wrapWithProvenance(<WinolsGraphicalTableCard table={detectedWinols} />);
+      }
       const colTypes = block.headers.map((h, cIdx) => {
         const isHighlightHeader =
           /(آدرس|hex|کد|داموس|تغییر|مقدار|دلتا|ضریب|rpm|بار|load|lambda|afr|جرقه|advance)/i.test(
@@ -304,10 +335,14 @@ function BlockRenderer({
         block.imageStrategy === 'WEB_SEARCH' &&
         block.resolutionStatus === 'resolved_web' &&
         Boolean(block.imageUrl);
+      const isPendingWeb =
+        block.imageStrategy === 'WEB_SEARCH' &&
+        block.resolutionStatus === 'pending';
+      const isFallbackPlaceholder = block.resolutionStatus === 'fallback_placeholder';
       const isAiPlaceholder =
         block.imageStrategy === 'AI_PLACEHOLDER' ||
         block.resolutionStatus === 'ai_placeholder' ||
-        block.resolutionStatus === 'fallback_placeholder' ||
+        isFallbackPlaceholder ||
         Boolean(block.aiPlaceholderSpec && !block.imageUrl);
 
       if (isResolvedWeb && block.imageUrl) {
@@ -324,7 +359,7 @@ function BlockRenderer({
                 <span>{block.caption}</span>
               </div>
               <span className="rounded bg-white px-2 py-0.5 text-[10px] font-bold text-[#14532D] border border-[#BBF7D0]">
-                تصویر فنی مرجع (WEB_SEARCH)
+                تصویر فنی دانلودشده از وب (WEB_SEARCH)
               </span>
             </div>
 
@@ -348,7 +383,7 @@ function BlockRenderer({
                   className="inline-flex items-center gap-1 rounded border border-[#CBD5E1] bg-white px-2 py-0.5 text-[10.5px] font-bold text-[#1E3A5F] hover:bg-[#EEF3F8]"
                 >
                   <ExternalLink className="h-3 w-3 shrink-0" />
-                  <span>{block.sourceTitle || 'مشاهده مرجع فنی'}</span>
+                  <span>{block.sourceTitle || 'مشاهده مرجع وب'}</span>
                 </a>
               )}
             </figcaption>
@@ -356,14 +391,55 @@ function BlockRenderer({
         );
       }
 
+      if (isPendingWeb) {
+        return wrapWithProvenance(
+          <aside
+            data-testid="smart-figure-web-pending"
+            className="my-5 overflow-hidden rounded-xl border border-dashed border-[#3B82F6] bg-[#EFF6FF] shadow-[0_1px_2px_rgba(26,24,22,0.03)]"
+          >
+            <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[#BFDBFE] bg-[#DBEAFE] px-4 py-2.5 text-xs font-extrabold text-[#1E3A8A]">
+              <div className="flex items-center gap-2">
+                <span className="flex h-6 w-6 items-center justify-center rounded-md bg-[#1D4ED8] text-white">
+                  <Search className="h-3.5 w-3.5" />
+                </span>
+                <span>{block.caption}</span>
+              </div>
+              <span className="rounded bg-white px-2 py-0.5 text-[10px] font-bold text-[#1D4ED8] border border-[#93C5FD]">
+                لنگر در صف جستجوی موازی وب (Pending)
+              </span>
+            </div>
+            <div className="px-4 py-3 text-[12px] leading-6 text-[#1E3A5F] space-y-1">
+              <div>
+                <strong>کوئری جستجوی وب:</strong>{' '}
+                <span className="font-mono text-[11.5px]" dir="ltr">
+                  {block.searchQuery}
+                </span>
+              </div>
+              <p className="text-[11px] text-[#475569]">
+                برای دریافت خودکار تصویر معتبر از وب، دکمه «جستجو و درج موازی تصاویر وب» را در نوار بالای پیش‌نمایش بزنید.
+              </p>
+            </div>
+          </aside>
+        );
+      }
+
       if (isAiPlaceholder && block.aiPlaceholderSpec) {
         const spec = block.aiPlaceholderSpec;
         return wrapWithProvenance(
           <aside
-            data-testid="smart-figure-ai-placeholder"
+            data-testid={isFallbackPlaceholder ? 'smart-figure-fallback-placeholder' : 'smart-figure-ai-placeholder'}
             className="my-5 overflow-hidden rounded-xl border border-dashed border-[#B45309] bg-[#FFFBEB] shadow-[0_1px_2px_rgba(26,24,22,0.03)]"
           >
-            <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[#FDE68A] bg-[#FEF3C7] px-4 py-2.5 text-xs font-extrabold text-[#92400E]">
+            <div className="border-b border-[#FDE68A] bg-[#FEF9E7] px-4 py-1.5 text-[11px] font-extrabold text-[#92400E] flex flex-wrap items-center justify-between gap-2">
+              <span>محل درج تصویر اختصاصی (نیازمند تولید با AI)</span>
+              <span className="rounded bg-white px-2 py-0.5 text-[10px] font-bold text-[#92400E] border border-[#FCD34D]">
+                {isFallbackPlaceholder
+                  ? 'بازگشت خودکار از وب (۰ توکن تولید تصویر)'
+                  : 'قالب خلاصه ۳ خطی (۰ توکن تولید تصویر)'}
+              </span>
+            </div>
+
+            <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[#FDE68A] bg-[#FEF3C7] px-4 py-2 text-xs font-extrabold text-[#92400E]">
               <div className="flex items-center gap-2">
                 <span className="flex h-6 w-6 items-center justify-center rounded-md bg-[#B45309] text-white">
                   <ImageIcon className="h-3.5 w-3.5" />
@@ -372,9 +448,6 @@ function BlockRenderer({
                   [تصویر تولیدی AI | شناسه: {spec.codeId} | نوع: {spec.typeFa}]
                 </span>
               </div>
-              <span className="rounded bg-white px-2 py-0.5 text-[10px] font-bold text-[#92400E] border border-[#FCD34D]">
-                قالب خلاصه ۳ خطی (۰ توکن تولید تصویر)
-              </span>
             </div>
 
             <div className="px-4 py-3 space-y-1.5 text-[12.5px] leading-6 text-[#292524]">
@@ -509,6 +582,9 @@ function BlockRenderer({
           </figcaption>
         </figure>
       );
+
+    case 'adaptive_visual':
+      return <AdaptiveVisualExhibit block={block} />;
 
     default:
       return null;

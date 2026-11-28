@@ -26,7 +26,8 @@ export type RevisionActionType =
   | 'settings_updated'
   | 'harness_blueprint_approved'
   | 'harness_section_verified'
-  | 'harness_quarantine_resolved';
+  | 'harness_quarantine_resolved'
+  | 'adaptive_visuals_generated';
 
 export type RevisionCategoryFilter =
   | 'all'
@@ -144,6 +145,7 @@ export function getRevisionCategory(actionType: RevisionActionType): Exclude<Rev
     case 'harness_blueprint_approved':
     case 'harness_section_verified':
     case 'harness_quarantine_resolved':
+    case 'adaptive_visuals_generated':
       return 'ai';
     case 'winols_map_edited':
     case 'winols_damos_exported':
@@ -211,6 +213,8 @@ export function getActionLabelFa(actionType: RevisionActionType): string {
       return 'تأیید زیربخش توسط ممیزی دولایه هارنس';
     case 'harness_quarantine_resolved':
       return 'تعیین‌تکلیف دستی زیربخش قرنطینه‌شده';
+    case 'adaptive_visuals_generated':
+      return 'تطبیق بصری پروژه و رسم نمودارهای پایتون';
     default:
       return 'تغییر در پروژه';
   }

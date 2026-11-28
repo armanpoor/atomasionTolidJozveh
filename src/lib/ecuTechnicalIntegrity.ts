@@ -438,6 +438,9 @@ function collectBookAllText(book: ParsedBook): string {
         case 'diagram':
           parts.push(b.title, b.caption, ...b.items.map((it) => `${it.label} ${it.detail || ''}`));
           break;
+        case 'adaptive_visual':
+          parts.push(b.title, b.caption, b.pedagogicalTakeaway);
+          break;
         case 'web_enrichment':
           parts.push(b.title, b.summary);
           break;

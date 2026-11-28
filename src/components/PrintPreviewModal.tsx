@@ -318,6 +318,24 @@ function PrintBlock({
         </figure>
       );
 
+    case 'adaptive_visual':
+      return (
+        <figure className="print-avoid-break my-4 overflow-hidden rounded-lg border border-[#CBD5E1] bg-white">
+          <div
+            className="p-2.5 [&>svg]:h-auto [&>svg]:w-full"
+            dangerouslySetInnerHTML={{
+              __html: sanitizeSvgMarkup(block.pythonRenderedSvg || block.svgMarkup),
+            }}
+          />
+          <figcaption className="border-t border-[#E2E8F0] bg-[#F8FAFC] px-3 py-2 text-center text-[0.82em]">
+            <div className="font-bold text-[#1E3A5F]">{block.caption}</div>
+            {block.pedagogicalTakeaway && (
+              <div className="mt-0.5 text-[0.92em] text-[#475569]">{block.pedagogicalTakeaway}</div>
+            )}
+          </figcaption>
+        </figure>
+      );
+
     default:
       return null;
   }

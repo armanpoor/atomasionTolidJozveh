@@ -7,7 +7,6 @@ import {
   getDoc,
   getDocFromServer,
   getFirestore,
-  initializeFirestore,
   onSnapshot,
   orderBy,
   query,
@@ -15,7 +14,6 @@ import {
   setDoc,
   updateDoc,
   where,
-  type Firestore,
 } from 'firebase/firestore';
 import firebaseConfig from '../../firebase-applet-config.json';
 import { GOOGLE_WORKSPACE_SCOPES } from './googleWorkspace.ts';
@@ -38,23 +36,12 @@ const configuredDatabaseId = (
   firebaseConfig as { firestoreDatabaseId?: string }
 ).firestoreDatabaseId?.trim();
 
-function createResilientFirestore(): Firestore {
-  try {
-    return configuredDatabaseId
-      ? initializeFirestore(
-          app,
-          { experimentalForceLongPolling: true },
-          configuredDatabaseId
-        )
-      : initializeFirestore(app, { experimentalForceLongPolling: true });
-  } catch {
-    return configuredDatabaseId
-      ? getFirestore(app, configuredDatabaseId)
-      : getFirestore(app);
-  }
-}
-
-export const db = createResilientFirestore();
+// Use standard getFirestore so Firebase SDK uses HTTP/2 WebChannel streaming
+// with built-in experimentalAutoDetectLongPolling fallback instead of forcing
+// legacy XHR long-polling on every client connection.
+export const db = configuredDatabaseId
+  ? getFirestore(app, configuredDatabaseId)
+  : getFirestore(app);
 
 export enum OperationType {
   CREATE = 'create',
@@ -109,6 +96,9 @@ export function handleFirestoreError(
 }
 
 async function testConnection() {
+  if (typeof window === 'undefined' || navigator.onLine === false) {
+    return;
+  }
   try {
     await getDocFromServer(doc(db, 'test', 'connection'));
   } catch (error) {

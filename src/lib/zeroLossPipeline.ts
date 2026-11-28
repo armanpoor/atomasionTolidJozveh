@@ -28,6 +28,7 @@ import {
   runStage2EntityMicroRouting,
 } from './entityMicroRouter.ts';
 import { injectSmartImageAnchorsIntoBook } from './smartImageOrchestrator.ts';
+import { injectAdaptiveVisualExhibitsIntoBook } from './adaptiveVisualEngine.ts';
 
 // ============================================================================
 // DETERMINISTIC NORMALIZATION, HASHING & TOKEN SIMILARITY
@@ -156,6 +157,8 @@ function blockToPlainText(block: ContentBlock): string {
       return `[تصویر] ${block.caption}`;
     case 'diagram':
       return `${block.title}: ${block.items.map((i) => i.label).join('، ')}`;
+    case 'adaptive_visual':
+      return `${block.title}: ${block.pedagogicalTakeaway}`;
     case 'web_enrichment':
       return `${block.title}: ${block.summary}`;
     case 'conflict_note':
@@ -2233,6 +2236,13 @@ export function assembleFinalBookAndAudit(params: {
       smartImageSummary.webSearchSlotsCount + smartImageSummary.aiPlaceholderSlotsCount;
   }
 
+  // Adaptive Creative Visuals (Dyno Python charts, WinOLS heatmaps/3D surfaces, Pinouts, Waveforms, AFR/Ignition)
+  const adaptiveVisualSummary = injectAdaptiveVisualExhibitsIntoBook(
+    book,
+    params.config,
+    params.config.adaptiveVisualProfile
+  );
+
   // Compute Entity-Centric Micro-Routing Report for Stage 2 & Stage 5 Audit Views
   const entityMicroRoutingReport = runStage2EntityMicroRouting({
     projectId: params.projectId,
@@ -2262,6 +2272,7 @@ export function assembleFinalBookAndAudit(params: {
         winolsGoogleCoverage,
         entityMicroRoutingReport,
         smartImageSummary,
+        adaptiveVisualSummary,
         perFileCoverage: params.sourceFiles.map((f) => {
           const fUnits = params.units.filter((u) => u.sourceFileId === f.id);
           const fCovered = fUnits.filter(

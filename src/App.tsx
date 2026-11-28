@@ -12,6 +12,8 @@ import {
   Globe,
   Grid2x2,
   History,
+  Image as ImageIcon,
+  LineChart,
   ListTree,
   Loader2,
   Lock,
@@ -44,6 +46,7 @@ import { ProjectChangeLogModal } from './components/ProjectChangeLogModal';
 import { GoogleWorkspaceModal } from './components/GoogleWorkspaceModal';
 import { PrintPreviewModal } from './components/PrintPreviewModal';
 import { MasterEncyclopediaAdminModal } from './components/MasterEncyclopediaAdminModal';
+import { AdaptiveProjectProfileBanner } from './components/AdaptiveProjectProfileBanner';
 import { CollaborativeHubShell } from './components/collaborative/CollaborativeHubShell';
 import { ChapterSidebar, SelectedChapterKey } from './components/ChapterSidebar';
 import { QueuedUploadFile } from './components/FileDropzone';
@@ -55,6 +58,7 @@ import {
 } from './lib/winolsMapGuide';
 import type { ProjectRevisionDto } from './lib/changeLogUtils';
 import {
+  AdaptiveProjectProfile,
   AiModelId,
   ChatProposal,
   DEFAULT_DOCX_CONFIG,
@@ -256,14 +260,44 @@ export default function App() {
   const [workflowMode, setWorkflowMode] = useState<WorkflowMode>('multi_merge');
   const [config, setConfig] = useState<DocxExportConfig>(DEFAULT_DOCX_CONFIG);
 
+  const [autoSaveState, setAutoSaveState] = useState<{
+    status: 'idle' | 'saving' | 'saved' | 'error';
+    lastSavedAt: string | null;
+    lastSyncTarget: 'settings' | 'units' | 'project' | null;
+  }>({
+    status: 'idle',
+    lastSavedAt: null,
+    lastSyncTarget: null,
+  });
+
+  const markAutoSaving = useCallback(() => {
+    setAutoSaveState((prev) => ({ ...prev, status: 'saving' }));
+  }, []);
+
+  const markAutoSaved = useCallback(
+    (target: 'settings' | 'units' | 'project' = 'project', timestamp?: string | null) => {
+      setAutoSaveState({
+        status: 'saved',
+        lastSavedAt: timestamp || new Date().toISOString(),
+        lastSyncTarget: target,
+      });
+    },
+    []
+  );
+
+  const markAutoSaveError = useCallback(() => {
+    setAutoSaveState((prev) => ({ ...prev, status: 'error' }));
+  }, []);
+
   const handleHarnessBundleUpdated = useCallback(
     (nextBundle: ProjectBundleDto, nextRevisions?: ProjectRevisionDto[]) => {
       setBundle(nextBundle);
+      markAutoSaved('units', nextBundle.project.updatedAt);
       if (Array.isArray(nextRevisions)) {
         setRevisions(nextRevisions);
       }
     },
-    []
+    [markAutoSaved]
   );
 
   const harnessRunner = useHarnessRunner({
@@ -287,6 +321,8 @@ export default function App() {
   const [exportingDocx, setExportingDocx] = useState(false);
   const [groundingNodeId, setGroundingNodeId] = useState<string | null>(null);
   const [enrichingFullGoogle, setEnrichingFullGoogle] = useState(false);
+  const [resolvingImagesParallel, setResolvingImagesParallel] = useState(false);
+  const [generatingAdaptiveVisuals, setGeneratingAdaptiveVisuals] = useState(false);
   const [runningDeepReview, setRunningDeepReview] = useState(false);
   const [deepReviewProgress, setDeepReviewProgress] = useState<DeepReviewProgressState | null>(null);
   const [deepReviewReport, setDeepReviewReport] = useState<DeepReviewReportDto | null>(null);
@@ -375,11 +411,12 @@ export default function App() {
         setDeepReviewReport(savedReview);
         const progress = computeWorkflowProgress({ bundle: b, queuedFilesCount: 0 });
         setActiveStage(progress.recommendedStage);
+        markAutoSaved('project', b.project.updatedAt);
       } catch (err) {
         setBannerError(err instanceof Error ? err.message : 'خطا در بارگذاری پروژه.');
       }
     },
-    [api]
+    [api, markAutoSaved]
   );
 
   const handleRunLiveProbe = useCallback(
@@ -556,6 +593,7 @@ export default function App() {
             setSelectedView({ kind: 'cover' });
             const progress = computeWorkflowProgress({ bundle: seeded, queuedFilesCount: 0 });
             setActiveStage(progress.recommendedStage);
+            markAutoSaved('project', seeded.project.updatedAt);
             setBannerToast(
               'حالت مهمان فعال شد — یک پروژه نمونه آماده با تاریخچه تغییرات و پیش‌نمایش چاپ A4 برای بررسی شما ایجاد شد.'
             );
@@ -569,6 +607,7 @@ export default function App() {
             setProjects([created.project]);
             setBundle(created);
             setActiveProjectId(created.project.id);
+            markAutoSaved('project', created.project.updatedAt);
           }
         } else {
           setProjects(list);
@@ -727,13 +766,20 @@ export default function App() {
         );
       }
       if (activeProjectId) {
-        void api.updateProject(activeProjectId, { workflowMode: mode }).then((b) => {
-          setBundle(b);
-          void refreshProjectsList();
-        });
+        markAutoSaving();
+        void api
+          .updateProject(activeProjectId, { workflowMode: mode })
+          .then((b) => {
+            setBundle(b);
+            markAutoSaved('settings', b.project.updatedAt);
+            void refreshProjectsList();
+          })
+          .catch(() => {
+            markAutoSaveError();
+          });
       }
     },
-    [activeProjectId, api, refreshProjectsList]
+    [activeProjectId, api, refreshProjectsList, markAutoSaving, markAutoSaved, markAutoSaveError]
   );
 
   const [uploadHistory, setUploadHistory] = useState<PersistentUploadHistoryEntry[]>(() =>
@@ -862,6 +908,13 @@ export default function App() {
         return f;
       })
     );
+  }, []);
+
+  const handleBulkRemoveFiles = useCallback((ids: string[]) => {
+    const idSet = new Set(ids);
+    if (idSet.size === 0) return;
+    setQueuedFiles((prev) => prev.filter((f) => !idSet.has(f.id)));
+    setBannerToast(`${toPersianDigits(idSet.size)} فایل انتخاب‌شده از صف پروژه حذف شد.`);
   }, []);
 
   const handleLoadQuickDemoFiles = useCallback(() => {
@@ -1041,6 +1094,17 @@ export default function App() {
         });
         latestBundle = res.bundle;
         setBundle(res.bundle);
+        if (res.bundle?.project?.settingsJson) {
+          const syncedSettings = res.bundle.project.settingsJson as Partial<DocxExportConfig>;
+          setConfig((prev) => ({
+            ...prev,
+            ...syncedSettings,
+            optimization: {
+              ...prev.optimization,
+              ...(syncedSettings.optimization || {}),
+            },
+          }));
+        }
         processedCount += slice.length;
 
         // Record each ingested file in persistent cross-session Upload History
@@ -1107,6 +1171,7 @@ export default function App() {
       }
 
       // Keep completed items visible with 'complete' (100%) status bar in the queue
+      markAutoSaved('units', latestBundle?.project.updatedAt);
       await refreshProjectsList();
       await syncFirestoreJobState(activeProjectId, {
         stage: 1,
@@ -1125,11 +1190,17 @@ export default function App() {
         0
       );
 
+      const detectedProfile = (latestBundle?.project?.settingsJson as Partial<DocxExportConfig> | undefined)
+        ?.adaptiveVisualProfile;
+      const adaptSuffix = detectedProfile
+        ? ` · پروژه به‌طور خودکار با ماهیت «${detectedProfile.dominantLabelFa}» تطبیق داده شد.`
+        : '';
+
       setActiveStage(1);
       setBannerToast(
         hybridPrunedTotal > 0
-          ? `مرحله ۱ تکمیل شد: ${toPersianDigits(latestBundle?.sourceFiles.length ?? processedCount)} فایل و ${toPersianDigits(latestBundle?.contentUnits.length ?? 0)} واحد متنی استخراج شد (${toPersianDigits(hybridPrunedTotal)} بخش غیرخودرویی هرس شد · صرفه‌جویی ${toPersianDigits(savedTokensTotal)} توکن).`
-          : `مرحله ۱ تکمیل شد: ${toPersianDigits(latestBundle?.sourceFiles.length ?? processedCount)} فایل و ${toPersianDigits(latestBundle?.contentUnits.length ?? 0)} واحد متنی استخراج شد. پس از بررسی، دکمه اجرای مرحله ۲ را بزنید.`
+          ? `مرحله ۱ تکمیل شد: ${toPersianDigits(latestBundle?.sourceFiles.length ?? processedCount)} فایل و ${toPersianDigits(latestBundle?.contentUnits.length ?? 0)} واحد متنی استخراج شد (${toPersianDigits(hybridPrunedTotal)} بخش غیرخودرویی هرس شد · صرفه‌جویی ${toPersianDigits(savedTokensTotal)} توکن)${adaptSuffix}`
+          : `مرحله ۱ تکمیل شد: ${toPersianDigits(latestBundle?.sourceFiles.length ?? processedCount)} فایل و ${toPersianDigits(latestBundle?.contentUnits.length ?? 0)} واحد متنی استخراج شد${adaptSuffix}`
       );
     } catch (err) {
       setBannerError(err instanceof Error ? err.message : 'خطا هنگام اجرای مرحله ۱ (استخراج فایل‌ها).');
@@ -1257,6 +1328,7 @@ export default function App() {
 
       const afterDedup = await api.runDedupStage(activeProjectId);
       setBundle(afterDedup);
+      markAutoSaved('units', afterDedup.project.updatedAt);
       await refreshProjectsList();
 
       await syncFirestoreJobState(activeProjectId, {
@@ -1373,6 +1445,7 @@ export default function App() {
           validationDomain: config.validationDomain || 'ecu_winols',
         });
         setBundle(updated);
+        markAutoSaved('units', updated.project.updatedAt);
         if (!silent) {
           setBannerToast('چیدمان جدید فصل‌ها ذخیره شد.');
         }
@@ -1388,7 +1461,7 @@ export default function App() {
         }
       }
     },
-    [activeProjectId, api, config.validationDomain]
+    [activeProjectId, api, config.validationDomain, markAutoSaved]
   );
 
   const handleChangeValidationDomain = useCallback(
@@ -1396,18 +1469,22 @@ export default function App() {
       setConfig((prev) => {
         const updated = { ...prev, validationDomain: nextDomain };
         if (activeProjectId) {
+          markAutoSaving();
           void api
             .updateProject(activeProjectId, {
               settingsJson: updated as unknown as Record<string, unknown>,
             })
+            .then((b) => {
+              markAutoSaved('settings', b?.project?.updatedAt);
+            })
             .catch(() => {
-              // ignore transient save warning
+              markAutoSaveError();
             });
         }
         return updated;
       });
     },
-    [activeProjectId, api]
+    [activeProjectId, api, markAutoSaving, markAutoSaved, markAutoSaveError]
   );
 
   const handleChangeConfig = useCallback(
@@ -1415,18 +1492,22 @@ export default function App() {
       setConfig((prev) => {
         const updated = { ...prev, ...patch };
         if (activeProjectId) {
+          markAutoSaving();
           void api
             .updateProject(activeProjectId, {
               settingsJson: updated as unknown as Record<string, unknown>,
             })
+            .then((b) => {
+              markAutoSaved('settings', b?.project?.updatedAt);
+            })
             .catch(() => {
-              // ignore transient save warning
+              markAutoSaveError();
             });
         }
         return updated;
       });
     },
-    [activeProjectId, api]
+    [activeProjectId, api, markAutoSaving, markAutoSaved, markAutoSaveError]
   );
 
   const handleChangeOptimization = useCallback(
@@ -1437,18 +1518,22 @@ export default function App() {
           optimization: { ...prev.optimization, ...patch },
         };
         if (activeProjectId) {
+          markAutoSaving();
           void api
             .updateProject(activeProjectId, {
               settingsJson: updated as unknown as Record<string, unknown>,
             })
+            .then((b) => {
+              markAutoSaved('settings', b?.project?.updatedAt);
+            })
             .catch(() => {
-              // ignore transient save warning
+              markAutoSaveError();
             });
         }
         return updated;
       });
     },
-    [activeProjectId, api]
+    [activeProjectId, api, markAutoSaving, markAutoSaved, markAutoSaveError]
   );
 
   const handleApproveAndFinalize = useCallback(
@@ -1459,6 +1544,7 @@ export default function App() {
       if (!activeProjectId) return;
       setFinalizing(true);
       setBannerError(null);
+      markAutoSaving();
       try {
         await syncFirestoreJobState(activeProjectId, {
           stage: 4,
@@ -1474,6 +1560,7 @@ export default function App() {
         });
         const finished = await api.finalizeProject(activeProjectId);
         setBundle(finished);
+        markAutoSaved('units', finished.project.updatedAt);
         setSelectedView({ kind: 'cover' });
         setActiveStage(4);
         await refreshProjectsList();
@@ -1486,12 +1573,23 @@ export default function App() {
         });
         setBannerToast('مرحله ۴ انجام شد: پیش‌نمایش کادربندی‌شده آماده بازبینی، غنی‌سازی اختیاری و انتقال به مرحله ۵ (خروجی) است.');
       } catch (err) {
+        markAutoSaveError();
         setBannerError(err instanceof Error ? err.message : 'خطا در تدوین نهایی سند.');
       } finally {
         setFinalizing(false);
       }
     },
-    [activeProjectId, api, workflowMode, config.validationDomain, refreshProjectsList, syncFirestoreJobState]
+    [
+      activeProjectId,
+      api,
+      workflowMode,
+      config.validationDomain,
+      refreshProjectsList,
+      syncFirestoreJobState,
+      markAutoSaving,
+      markAutoSaved,
+      markAutoSaveError,
+    ]
   );
 
   const handleGenerateQuickDraft = useCallback(
@@ -1499,9 +1597,11 @@ export default function App() {
       if (!activeProjectId) return;
       setApplyingQuickDraft(true);
       setBannerError(null);
+      markAutoSaving();
       try {
         const updated = await api.generateQuickDraft(activeProjectId, options);
         setBundle(updated);
+        markAutoSaved('units', updated.project.updatedAt);
         if (options.openStage4Preview) {
           setSelectedView({ kind: 'cover' });
           setActiveStage(4);
@@ -1515,6 +1615,7 @@ export default function App() {
           );
         }
       } catch (err) {
+        markAutoSaveError();
         setBannerError(
           err instanceof Error ? err.message : 'خطا در ایجاد پیش‌نویس سریع ساختار فصل‌ها.'
         );
@@ -1522,7 +1623,7 @@ export default function App() {
         setApplyingQuickDraft(false);
       }
     },
-    [activeProjectId, api, refreshProjectsList]
+    [activeProjectId, api, refreshProjectsList, markAutoSaving, markAutoSaved, markAutoSaveError]
   );
 
   const handleEnrichNodeWithGoogle = useCallback(
@@ -1530,20 +1631,25 @@ export default function App() {
       if (!activeProjectId) return;
       setGroundingNodeId(nodeId);
       setBannerError(null);
+      markAutoSaving();
       try {
         const res = await api.runGrounding(activeProjectId, {
           targetType: 'outline_node',
           targetId: nodeId,
         });
-        if (res.bundle) setBundle(res.bundle);
+        if (res.bundle) {
+          setBundle(res.bundle);
+          markAutoSaved('units', res.bundle.project.updatedAt);
+        }
         setBannerToast('باکس اطلاعات تکمیلی از جستجوی گوگل (همراه با لینک منابع) به فصل اضافه شد.');
       } catch (err) {
+        markAutoSaveError();
         setBannerError(err instanceof Error ? err.message : 'خطا در دریافت اطلاعات از جستجوی گوگل.');
       } finally {
         setGroundingNodeId(null);
       }
     },
-    [activeProjectId, api]
+    [activeProjectId, api, markAutoSaving, markAutoSaved, markAutoSaveError]
   );
 
   const handleEnrichFullDocumentWithGoogle = useCallback(async () => {
@@ -1551,11 +1657,15 @@ export default function App() {
     setEnrichingFullGoogle(true);
     setBannerError(null);
     setBannerToast(null);
+    markAutoSaving();
     try {
       const res = await api.runGrounding(activeProjectId, {
         targetType: 'full_document',
       });
-      if (res.bundle) setBundle(res.bundle);
+      if (res.bundle) {
+        setBundle(res.bundle);
+        markAutoSaved('units', res.bundle.project.updatedAt);
+      }
       const done = res.enrichedChaptersCount ?? 0;
       const total = res.totalChapters ?? done;
       if (res.failedChaptersCount && res.failedChaptersCount > 0) {
@@ -1568,13 +1678,78 @@ export default function App() {
         );
       }
     } catch (err) {
+      markAutoSaveError();
       setBannerError(
         err instanceof Error ? err.message : 'خطا در تکمیل کل متن خروجی با جستجوی گوگل.'
       );
     } finally {
       setEnrichingFullGoogle(false);
     }
-  }, [activeProjectId, api]);
+  }, [activeProjectId, api, markAutoSaving, markAutoSaved, markAutoSaveError]);
+
+  const handleResolveBookImagesParallel = useCallback(async () => {
+    if (!activeProjectId) return;
+    setResolvingImagesParallel(true);
+    setBannerError(null);
+    setBannerToast(null);
+    markAutoSaving();
+    try {
+      const res = await api.resolveProjectImagesParallel(activeProjectId, {
+        forceRequery: true,
+      });
+      if (res.bundle) {
+        setBundle(res.bundle);
+        markAutoSaved('units', res.bundle.project.updatedAt);
+      }
+      const r = res.resolution;
+      setBannerToast(
+        `جستجو و درج موازی تصاویر وب تکمیل شد — ${toPersianDigits(r.resolvedFromWebCount)} تصویر معتبر وب، ${toPersianDigits(r.fallbackToAiPlaceholderCount)} تبدیل خودکار به قالب ۳خطی AI و ${toPersianDigits(r.cacheHitsCount)} پاسخ از کش (در ${toPersianDigits(r.durationMs)} میلی‌ثانیه).`
+      );
+    } catch (err) {
+      markAutoSaveError();
+      setBannerError(
+        err instanceof Error ? err.message : 'خطا در جستجو و درج موازی تصاویر وب.'
+      );
+    } finally {
+      setResolvingImagesParallel(false);
+    }
+  }, [activeProjectId, api, markAutoSaving, markAutoSaved, markAutoSaveError]);
+
+  const handleGenerateAdaptiveVisuals = useCallback(async () => {
+    if (!activeProjectId) return;
+    setGeneratingAdaptiveVisuals(true);
+    setBannerError(null);
+    setBannerToast(null);
+    markAutoSaving();
+    try {
+      const res = await api.generateAdaptiveVisuals(activeProjectId);
+      if (res.bundle) {
+        setBundle(res.bundle);
+        const syncedSettings = (res.bundle.project.settingsJson || {}) as Partial<DocxExportConfig>;
+        setConfig((prev) => ({
+          ...prev,
+          ...syncedSettings,
+          optimization: {
+            ...prev.optimization,
+            ...(syncedSettings.optimization || {}),
+          },
+        }));
+        markAutoSaved('units', res.bundle.project.updatedAt);
+      }
+      setBannerToast(
+        `تطبیق بصری پروژه (${res.profile.dominantLabelFa}) انجام شد — ${toPersianDigits(res.injectedCount)} نمایشگر خلاقانه (${toPersianDigits(res.pythonRenderedCount)} نمودار رسم‌شده با پایتون) ساخته و در فصل‌ها درج گردید.`
+      );
+    } catch (err) {
+      markAutoSaveError();
+      setBannerError(
+        err instanceof Error
+          ? err.message
+          : 'خطا در تحلیل ماهیت فایل‌ها و تولید نمودارهای پایتون و خلاقیت بصری.'
+      );
+    } finally {
+      setGeneratingAdaptiveVisuals(false);
+    }
+  }, [activeProjectId, api, markAutoSaving, markAutoSaved, markAutoSaveError]);
 
   const handleRunDeepAiReview = useCallback(async () => {
     if (!activeProjectId) return;
@@ -1587,6 +1762,7 @@ export default function App() {
     });
     setBannerError(null);
     setBannerToast(null);
+    markAutoSaving();
     try {
       const res = await api.runDeepAiReview(activeProjectId, {}, (ev) => {
         setDeepReviewProgress((prev) => ({
@@ -1602,6 +1778,7 @@ export default function App() {
 
       if (res.bundle) {
         setBundle(res.bundle);
+        markAutoSaved('units', res.bundle.project.updatedAt);
       }
       const normalizedReview = normalizeDeepReviewReport(res.review);
       if (!normalizedReview) {
@@ -1627,6 +1804,7 @@ export default function App() {
         `بازبینی عمیق هوش مصنوعی (${normalizedReview.thinkingLevel}) انجام شد — امتیاز کیفیت ${toPersianDigits(normalizedReview.overallScore)} از ۱۰۰ و ${toPersianDigits(totalFixes)} بهبود بدون افت روی سند اعمال گردید.`
       );
     } catch (err) {
+      markAutoSaveError();
       setBannerError(
         err instanceof Error ? err.message : 'خطا در اجرای بازبینی با قدرت بیشتر هوش مصنوعی.'
       );
@@ -1634,16 +1812,20 @@ export default function App() {
       setRunningDeepReview(false);
       setDeepReviewProgress(null);
     }
-  }, [activeProjectId, api]);
+  }, [activeProjectId, api, markAutoSaving, markAutoSaved, markAutoSaveError]);
 
   const handleRescanConflicts = useCallback(async () => {
     if (!activeProjectId) return;
     setRescanningConflicts(true);
     setBannerError(null);
     setBannerToast(null);
+    markAutoSaving();
     try {
       const res = await api.rescanConflicts(activeProjectId);
-      if (res.bundle) setBundle(res.bundle);
+      if (res.bundle) {
+        setBundle(res.bundle);
+        markAutoSaved('units', res.bundle.project.updatedAt);
+      }
       if (res.removedCount > 0) {
         setBannerToast(
           `پالایش دقیق انجام شد: ${toPersianDigits(res.removedCount)} مورد مکمل/غیرمتناقض حذف شد و ${toPersianDigits(res.currentCount)} تناقض واقعی باقی ماند (تمام متون مکمل بدون افت در سند حفظ شده‌اند).`
@@ -1654,31 +1836,37 @@ export default function App() {
         );
       }
     } catch (err) {
+      markAutoSaveError();
       setBannerError(err instanceof Error ? err.message : 'خطا در پالایش مجدد تناقض‌ها.');
     } finally {
       setRescanningConflicts(false);
     }
-  }, [activeProjectId, api]);
+  }, [activeProjectId, api, markAutoSaving, markAutoSaved, markAutoSaveError]);
 
   const handleCheckConflictWithGoogle = useCallback(
     async (conflictId: string) => {
       if (!activeProjectId) return;
       setGroundingConflictId(conflictId);
       setBannerError(null);
+      markAutoSaving();
       try {
         const res = await api.runGrounding(activeProjectId, {
           targetType: 'conflict',
           targetId: conflictId,
         });
-        if (res.bundle) setBundle(res.bundle);
+        if (res.bundle) {
+          setBundle(res.bundle);
+          markAutoSaved('units', res.bundle.project.updatedAt);
+        }
         setBannerToast('راستی‌آزمایی تناقض با جستجوی گوگل انجام و لینک منابع ثبت شد.');
       } catch (err) {
+        markAutoSaveError();
         setBannerError(err instanceof Error ? err.message : 'خطا در بررسی تناقض با جستجوی گوگل.');
       } finally {
         setGroundingConflictId(null);
       }
     },
-    [activeProjectId, api]
+    [activeProjectId, api, markAutoSaving, markAutoSaved, markAutoSaveError]
   );
 
   const handleResolveConflict = useCallback(
@@ -1695,7 +1883,10 @@ export default function App() {
           status,
           resolutionNote,
         });
-        if (res.bundle) setBundle(res.bundle);
+        if (res.bundle) {
+          setBundle(res.bundle);
+          markAutoSaved('units', res.bundle.project.updatedAt);
+        }
         setBannerToast('تصمیم شما درباره تناقض در پایگاه داده و سند ثبت شد.');
       } catch (err) {
         setBannerError(err instanceof Error ? err.message : 'خطا در ثبت تصمیم تناقض.');
@@ -1703,7 +1894,7 @@ export default function App() {
         setResolvingConflictId(null);
       }
     },
-    [activeProjectId, api]
+    [activeProjectId, api, markAutoSaved]
   );
 
   const handleApplyProposal = useCallback(
@@ -1712,10 +1903,11 @@ export default function App() {
       const res = await api.applyProposal(activeProjectId, proposal);
       if (res.bundle) {
         setBundle(res.bundle);
+        markAutoSaved('units', res.bundle.project.updatedAt);
         setBannerToast(`تغییر «${proposal.title}» با موفقیت روی سند و پایگاه داده اعمال شد.`);
       }
     },
-    [activeProjectId, api]
+    [activeProjectId, api, markAutoSaved]
   );
 
   const handleDownloadDocx = useCallback(async () => {
@@ -1899,6 +2091,60 @@ export default function App() {
   }
 
   const activeBook = bundle?.project.bookSnapshotJson ?? null;
+  const smartImageCounts = (() => {
+    let resolvedWeb = 0;
+    let pendingWeb = 0;
+    let aiPlaceholders = 0;
+    if (activeBook) {
+      for (const ch of activeBook.chapters) {
+        for (const sec of ch.sections) {
+          for (const blk of sec.blocks) {
+            if (blk.type !== 'figure') continue;
+            if (blk.resolutionStatus === 'resolved_web' || (blk.imageStrategy === 'WEB_SEARCH' && blk.imageUrl)) {
+              resolvedWeb += 1;
+            } else if (blk.resolutionStatus === 'pending') {
+              pendingWeb += 1;
+            } else {
+              aiPlaceholders += 1;
+            }
+          }
+        }
+      }
+    }
+    return { resolvedWeb, pendingWeb, aiPlaceholders, total: resolvedWeb + pendingWeb + aiPlaceholders };
+  })();
+
+  const activeAdaptiveProfile: AdaptiveProjectProfile | null =
+    activeBook?.adaptiveVisualProfile ??
+    ((bundle?.project.settingsJson as Partial<DocxExportConfig> | undefined)
+      ?.adaptiveVisualProfile ??
+      ((bundle?.project.checkpointJson as Record<string, unknown> | undefined)
+        ?.adaptiveVisualProfile as AdaptiveProjectProfile | undefined) ??
+      null);
+
+  const adaptiveVisualCounts = (() => {
+    let total = 0;
+    let pythonRendered = 0;
+    if (activeBook) {
+      for (const ch of activeBook.chapters) {
+        for (const blk of ch.introBlocks) {
+          if (blk.type === 'adaptive_visual') {
+            total += 1;
+            if (blk.renderedByPython) pythonRendered += 1;
+          }
+        }
+        for (const sec of ch.sections) {
+          for (const blk of sec.blocks) {
+            if (blk.type === 'adaptive_visual') {
+              total += 1;
+              if (blk.renderedByPython) pythonRendered += 1;
+            }
+          }
+        }
+      }
+    }
+    return { total, pythonRendered };
+  })();
   const openConflictsCount =
     bundle?.conflicts.filter((c) => c.status === 'open').length ?? 0;
   const completedStagesCount = BOOK_WORKFLOW_STAGES.filter(
@@ -1945,8 +2191,72 @@ export default function App() {
           </div>
 
           <div className="min-w-0">
-            <div className="truncate text-xs sm:text-sm font-extrabold text-[#1A1816]">
-              {bundle?.project.title || 'استودیو صفحه‌آرایی و ادغام بدون افت'}
+            <div className="flex items-center gap-2 min-w-0">
+              <div className="truncate text-xs sm:text-sm font-extrabold text-[#1A1816]">
+                {bundle?.project.title || 'استودیو صفحه‌آرایی و ادغام بدون افت'}
+              </div>
+              {activeProjectId && autoSaveState.status !== 'idle' && (
+                <span
+                  data-testid="header-autosave-indicator"
+                  data-autosave-status={autoSaveState.status}
+                  data-autosave-target={autoSaveState.lastSyncTarget || ''}
+                  role="status"
+                  aria-live="polite"
+                  title={
+                    autoSaveState.status === 'saving'
+                      ? 'در حال همگام‌سازی تنظیمات پروژه یا واحدهای محتوا با سرور...'
+                      : autoSaveState.status === 'error'
+                        ? 'خطا در همگام‌سازی خودکار با سرور'
+                        : `ذخیره خودکار انجام شد (${
+                            autoSaveState.lastSyncTarget === 'settings'
+                              ? 'تنظیمات پروژه'
+                              : autoSaveState.lastSyncTarget === 'units'
+                                ? 'واحدهای محتوا'
+                                : 'اطلاعات پروژه'
+                          })${
+                            autoSaveState.lastSavedAt
+                              ? ` · ${new Date(autoSaveState.lastSavedAt).toLocaleTimeString('fa-IR', {
+                                  hour: '2-digit',
+                                  minute: '2-digit',
+                                  second: '2-digit',
+                                })}`
+                              : ''
+                          }`
+                  }
+                  className={`hidden sm:inline-flex items-center gap-1 rounded-md border px-1.5 py-0.5 text-[10px] font-bold whitespace-nowrap shrink-0 tabular-nums transition-colors ${
+                    autoSaveState.status === 'saving'
+                      ? 'border-[#C6D5E6] bg-[#EEF3F8] text-[#1E3A5F]'
+                      : autoSaveState.status === 'error'
+                        ? 'border-[#FCD34D] bg-[#FFFBEB] text-[#92400E]'
+                        : 'border-[#BBF7D0] bg-[#F0FDF4] text-[#15803D]'
+                  }`}
+                >
+                  {autoSaveState.status === 'saving' ? (
+                    <>
+                      <Loader2 className="h-2.5 w-2.5 animate-spin shrink-0" />
+                      <span>در حال ذخیره...</span>
+                    </>
+                  ) : autoSaveState.status === 'error' ? (
+                    <>
+                      <AlertCircle className="h-2.5 w-2.5 shrink-0" />
+                      <span>خطای ذخیره</span>
+                    </>
+                  ) : (
+                    <>
+                      <CheckCircle2 className="h-2.5 w-2.5 shrink-0" />
+                      <span>ذخیره خودکار</span>
+                      {autoSaveState.lastSavedAt && (
+                        <span className="opacity-75">
+                          {new Date(autoSaveState.lastSavedAt).toLocaleTimeString('fa-IR', {
+                            hour: '2-digit',
+                            minute: '2-digit',
+                          })}
+                        </span>
+                      )}
+                    </>
+                  )}
+                </span>
+              )}
             </div>
             <div className="hidden sm:block text-[10.5px] text-[#78716C] tabular-nums">
               پیشرفت مراحل: {toPersianDigits(completedStagesCount)} از ۵ تکمیل‌شده ({toPersianDigits(completedStagesPercent)}٪)
@@ -2199,6 +2509,7 @@ export default function App() {
             onChangeWorkflowMode={handleChangeWorkflowMode}
             onAddFiles={handleAddFiles}
             onRemoveFile={(id) => setQueuedFiles((prev) => prev.filter((f) => f.id !== id))}
+            onBulkRemoveFiles={handleBulkRemoveFiles}
             onMoveFile={(id, dir) =>
               setQueuedFiles((prev) => {
                 const idx = prev.findIndex((f) => f.id === id);
@@ -2269,6 +2580,7 @@ export default function App() {
                 onChangeWorkflowMode={handleChangeWorkflowMode}
                 onAddFiles={handleAddFiles}
                 onRemoveFile={(id) => setQueuedFiles((prev) => prev.filter((f) => f.id !== id))}
+                onBulkRemoveFiles={handleBulkRemoveFiles}
                 onMoveFile={(id, dir) =>
                   setQueuedFiles((prev) => {
                     const idx = prev.findIndex((f) => f.id === id);
@@ -2359,35 +2671,47 @@ export default function App() {
                 <span>در حال بارگذاری پروژه‌های ذخیره‌شده...</span>
               </div>
             ) : activeStage === 1 ? (
-              <StageIngestView
-                projects={projects}
-                activeProjectId={activeProjectId}
-                activeBundle={bundle}
-                activeAiModel={config.aiModel}
-                audioEngineLabel={capabilityPlan.audioLabelFa}
-                probeData={quotaProbe}
-                sourceFiles={bundle?.sourceFiles ?? []}
-                contentUnitsCount={bundle?.contentUnits.length ?? 0}
-                queuedFilesCount={queuedFiles.length}
-                processing={processing}
-                transcribingAudio={transcribingAudio}
-                progress={workflowProgress}
-                onSelectProject={loadProjectBundle}
-                onCreateProject={handleCreateProject}
-                onOpenProviderSettings={() => setProviderModalOpen(true)}
-                onRunStage1Ingest={handleRunStage1Ingest}
-                onTranscribeAudioFile={handleTranscribeAudioToSourceFile}
-                onRunStage2Dedup={handleRunStage2Dedup}
-                onGoToStage2={() => setActiveStage(2)}
-                onLoadDemoFiles={handleLoadQuickDemoFiles}
-                onIngestWorkspaceQueue={handleIngestWorkspaceQueue}
-                ingestingWorkspaceQueue={ingestingWorkspaceQueue}
-                onOpenMobileSidebar={() => setMobileSidebarOpen(true)}
-                onOpenGoogleDriveImport={() => {
-                  setGoogleWorkspaceInitialTab('import');
-                  setGoogleWorkspaceModalOpen(true);
-                }}
-              />
+              <div className="space-y-4">
+                {activeAdaptiveProfile && (bundle?.sourceFiles.length ?? 0) > 0 && (
+                  <div className="mx-auto max-w-5xl px-4 pt-4 sm:px-6">
+                    <AdaptiveProjectProfileBanner
+                      profile={activeAdaptiveProfile}
+                      generatingVisuals={generatingAdaptiveVisuals}
+                      canGenerateVisuals={Boolean(activeBook)}
+                      onGenerateAdaptiveVisuals={handleGenerateAdaptiveVisuals}
+                    />
+                  </div>
+                )}
+                <StageIngestView
+                  projects={projects}
+                  activeProjectId={activeProjectId}
+                  activeBundle={bundle}
+                  activeAiModel={config.aiModel}
+                  audioEngineLabel={capabilityPlan.audioLabelFa}
+                  probeData={quotaProbe}
+                  sourceFiles={bundle?.sourceFiles ?? []}
+                  contentUnitsCount={bundle?.contentUnits.length ?? 0}
+                  queuedFilesCount={queuedFiles.length}
+                  processing={processing}
+                  transcribingAudio={transcribingAudio}
+                  progress={workflowProgress}
+                  onSelectProject={loadProjectBundle}
+                  onCreateProject={handleCreateProject}
+                  onOpenProviderSettings={() => setProviderModalOpen(true)}
+                  onRunStage1Ingest={handleRunStage1Ingest}
+                  onTranscribeAudioFile={handleTranscribeAudioToSourceFile}
+                  onRunStage2Dedup={handleRunStage2Dedup}
+                  onGoToStage2={() => setActiveStage(2)}
+                  onLoadDemoFiles={handleLoadQuickDemoFiles}
+                  onIngestWorkspaceQueue={handleIngestWorkspaceQueue}
+                  ingestingWorkspaceQueue={ingestingWorkspaceQueue}
+                  onOpenMobileSidebar={() => setMobileSidebarOpen(true)}
+                  onOpenGoogleDriveImport={() => {
+                    setGoogleWorkspaceInitialTab('import');
+                    setGoogleWorkspaceModalOpen(true);
+                  }}
+                />
+              </div>
             ) : activeStage === 2 && bundle ? (
               <AuditConflictsView
                 auditReport={bundle.auditReport}
@@ -2534,6 +2858,46 @@ export default function App() {
 
                     <button
                       type="button"
+                      data-testid="stage4-resolve-images-btn"
+                      onClick={handleResolveBookImagesParallel}
+                      disabled={resolvingImagesParallel || runningDeepReview}
+                      title="جستجو و دانلود موازی تصاویر فنی معتبر وب (حداکثر ۴ هم‌زمان، تایم‌اوت ۴ ثانیه و تبدیل خودکار به قالب ۳خطی AI در صورت نبود تصویر)"
+                      className="inline-flex min-h-[36px] items-center gap-1.5 rounded-md border border-[#1E3A5F]/40 bg-[#F0F7FF] px-3 py-1.5 text-xs font-bold text-[#1E3A5F] hover:bg-[#E0EEFF] disabled:opacity-50 cursor-pointer tabular-nums"
+                    >
+                      {resolvingImagesParallel ? (
+                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                      ) : (
+                        <ImageIcon className="h-3.5 w-3.5" />
+                      )}
+                      <span>
+                        {resolvingImagesParallel
+                          ? 'در حال جستجو و درج موازی تصاویر...'
+                          : `جستجو و درج موازی تصاویر وب (وب: ${toPersianDigits(smartImageCounts.resolvedWeb)} | قالب AI: ${toPersianDigits(smartImageCounts.aiPlaceholders)})`}
+                      </span>
+                    </button>
+
+                    <button
+                      type="button"
+                      data-testid="stage4-adaptive-visuals-btn"
+                      onClick={handleGenerateAdaptiveVisuals}
+                      disabled={generatingAdaptiveVisuals || runningDeepReview}
+                      title="تحلیل ماهیت متن‌ها، تطبیق خودکار پروژه و رسم نمودارهای داینو با پایتون + ماتریس حرارتی/۳بعدی WinOLS و گرافیک‌های آموزشی"
+                      className="inline-flex min-h-[36px] items-center gap-1.5 rounded-md border border-[#0F766E]/40 bg-[#F0FDFA] px-3 py-1.5 text-xs font-bold text-[#0F766E] hover:bg-[#CCFBF1] disabled:opacity-50 cursor-pointer tabular-nums"
+                    >
+                      {generatingAdaptiveVisuals ? (
+                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                      ) : (
+                        <LineChart className="h-3.5 w-3.5" />
+                      )}
+                      <span>
+                        {generatingAdaptiveVisuals
+                          ? 'در حال رسم نمودار پایتون و گرافیک...'
+                          : `خلاقیت بصری و پایتون (${toPersianDigits(adaptiveVisualCounts.total)} نمایشگر)`}
+                      </span>
+                    </button>
+
+                    <button
+                      type="button"
                       onClick={() => setWinolsWorkbenchOpen((prev) => !prev)}
                       aria-expanded={winolsWorkbenchOpen}
                       title="مشاهده جدول تولیدشده تغییرات WinOLS و ماتریس ۲بعدی انتخاب سلول‌ها (RPM × بار)"
@@ -2570,6 +2934,17 @@ export default function App() {
                     </button>
                   </div>
                 </div>
+
+                {activeAdaptiveProfile && (
+                  <div className="border-b border-[#E2DDD3] bg-[#FAF9F6] px-4 py-2.5 sm:px-5">
+                    <AdaptiveProjectProfileBanner
+                      profile={activeAdaptiveProfile}
+                      generatingVisuals={generatingAdaptiveVisuals}
+                      canGenerateVisuals={true}
+                      onGenerateAdaptiveVisuals={handleGenerateAdaptiveVisuals}
+                    />
+                  </div>
+                )}
 
                 {winolsWorkbenchOpen && (
                   <WinolsMapWorkbench

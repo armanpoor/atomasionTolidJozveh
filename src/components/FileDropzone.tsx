@@ -107,9 +107,11 @@ interface FileDropzoneProps {
   onClearFiles: () => void;
   showRoleSelector?: boolean;
   onSetFileRole?: (id: string, role: FileRole) => void;
-  /** Selected file IDs for bulk File Role actions in WorkspaceSidebar */
+  /** Selected file IDs for bulk File Role & Delete actions in WorkspaceSidebar */
   selectedFileIds?: string[];
   onToggleSelectFile?: (id: string) => void;
+  onToggleSelectAllVisible?: (visibleIds: string[]) => void;
+  onBulkRemoveFiles?: (ids: string[]) => void;
   disabled?: boolean;
   /** Optional ingested project source files for visual Diff View comparison */
   sourceFiles?: SourceFileDto[];
@@ -217,8 +219,10 @@ export function FileDropzone({
   onClearFiles,
   showRoleSelector = false,
   onSetFileRole,
-  selectedFileIds = [],
+  selectedFileIds,
   onToggleSelectFile,
+  onToggleSelectAllVisible,
+  onBulkRemoveFiles,
   disabled = false,
   sourceFiles = [],
   contentUnits = [],
@@ -232,6 +236,31 @@ export function FileDropzone({
   const [isDragging, setIsDragging] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   const [mode, setMode] = useState<DropzoneMode>('upload');
+  const [internalSelectedIds, setInternalSelectedIds] = useState<string[]>([]);
+
+  const isSelectionControlled = typeof onToggleSelectFile === 'function';
+  const effectiveSelectedIds = isSelectionControlled
+    ? selectedFileIds ?? []
+    : internalSelectedIds;
+
+  useEffect(() => {
+    if (isSelectionControlled) return;
+    const valid = new Set(queuedFiles.map((q) => q.id));
+    setInternalSelectedIds((prev) => {
+      const next = prev.filter((id) => valid.has(id));
+      return next.length === prev.length ? prev : next;
+    });
+  }, [queuedFiles, isSelectionControlled]);
+
+  const handleToggleRowSelection = (id: string) => {
+    if (onToggleSelectFile) {
+      onToggleSelectFile(id);
+    } else {
+      setInternalSelectedIds((prev) =>
+        prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]
+      );
+    }
+  };
 
   // Diff View state
   const [selectedIngestedId, setSelectedIngestedId] = useState<string>('');
@@ -696,17 +725,43 @@ export function FileDropzone({
           {hasFiles && (
             <div className="space-y-2.5 pt-1">
               <div className="flex items-center justify-between gap-2 text-xs text-[#57534E]">
-                <div className="tabular-nums">
-                  <strong className="font-bold text-[#1A1816]">
-                    {fileNameFilter.trim()
-                      ? `${toPersianDigits(visibleQueuedFiles.length)} از ${toPersianDigits(queuedFiles.length)} فایل`
-                      : `${toPersianDigits(queuedFiles.length)} فایل`}
-                  </strong>{' '}
-                  آماده پردازش
-                  <span className="mx-1.5 text-[#C8C1B4]" aria-hidden="true">
-                    ·
-                  </span>
-                  <span>مجموع {formatCompactFileSize(totalBytes)}</span>
+                <div className="flex items-center gap-2 tabular-nums">
+                  {visibleQueuedFiles.length > 0 && (
+                    <input
+                      type="checkbox"
+                      data-testid="queue-select-all-checkbox"
+                      checked={
+                        visibleQueuedFiles.length > 0 &&
+                        visibleQueuedFiles.every((f) => effectiveSelectedIds.includes(f.id))
+                      }
+                      onChange={() => {
+                        const visibleIds = visibleQueuedFiles.map((f) => f.id);
+                        if (onToggleSelectAllVisible) {
+                          onToggleSelectAllVisible(visibleIds);
+                        } else {
+                          const allChecked = visibleIds.every((id) =>
+                            effectiveSelectedIds.includes(id)
+                          );
+                          setInternalSelectedIds(allChecked ? [] : visibleIds);
+                        }
+                      }}
+                      aria-label="انتخاب یا لغو انتخاب همه فایل‌های صف"
+                      title="انتخاب همه فایل‌های صف"
+                      className="h-3.5 w-3.5 shrink-0 cursor-pointer accent-[#1E3A5F]"
+                    />
+                  )}
+                  <div>
+                    <strong className="font-bold text-[#1A1816]">
+                      {fileNameFilter.trim()
+                        ? `${toPersianDigits(visibleQueuedFiles.length)} از ${toPersianDigits(queuedFiles.length)} فایل`
+                        : `${toPersianDigits(queuedFiles.length)} فایل`}
+                    </strong>{' '}
+                    آماده پردازش
+                    <span className="mx-1.5 text-[#C8C1B4]" aria-hidden="true">
+                      ·
+                    </span>
+                    <span>مجموع {formatCompactFileSize(totalBytes)}</span>
+                  </div>
                 </div>
 
                 <button
@@ -720,6 +775,56 @@ export function FileDropzone({
                   پاک کردن همه
                 </button>
               </div>
+
+              {/* Standalone Contextual Bulk Toolbar when FileDropzone manages its own selection */}
+              {!isSelectionControlled && effectiveSelectedIds.length > 0 && (
+                <div
+                  data-testid="file-queue-bulk-toolbar"
+                  className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-[#1E3A5F] bg-[#EEF3F8] px-2.5 py-2 text-[11px]"
+                >
+                  <span className="font-bold text-[#1E3A5F] tabular-nums">
+                    {toPersianDigits(effectiveSelectedIds.length)} فایل انتخاب‌شده
+                  </span>
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    {onSetFileRole && (
+                      <select
+                        aria-label="تغییر نقش گروهی فایل‌های انتخاب‌شده"
+                        defaultValue=""
+                        onChange={(e) => {
+                          const role = e.target.value as FileRole;
+                          if (!role) return;
+                          effectiveSelectedIds.forEach((id) => onSetFileRole(id, role));
+                          e.target.value = '';
+                        }}
+                        className="rounded border border-[#C6D5E6] bg-white px-2 py-1 text-[10.5px] font-bold text-[#1A1816]"
+                      >
+                        <option value="" disabled>
+                          تغییر نقش گروهی...
+                        </option>
+                        <option value="standard">استاندارد (Standard)</option>
+                        <option value="supplement">تکمیلی (Supplement)</option>
+                        <option value="master">سند مرجع (Master)</option>
+                      </select>
+                    )}
+                    <button
+                      type="button"
+                      data-testid="file-queue-bulk-delete-btn"
+                      onClick={() => {
+                        if (onBulkRemoveFiles) {
+                          onBulkRemoveFiles(effectiveSelectedIds);
+                        } else {
+                          effectiveSelectedIds.forEach((id) => onRemoveFile(id));
+                        }
+                        setInternalSelectedIds([]);
+                      }}
+                      className="inline-flex items-center gap-1 rounded border border-[#E6CFC2] bg-[#FEF2F2] px-2 py-1 text-[10.5px] font-bold text-[#9A3412] hover:bg-[#FEE2E2] cursor-pointer"
+                    >
+                      <Trash2 className="h-3 w-3" />
+                      <span>حذف گروهی</span>
+                    </button>
+                  </div>
+                </div>
+              )}
 
               {visibleQueuedFiles.length === 0 ? (
                 <div className="rounded-md border border-[#E5E0D6] bg-white px-3 py-2.5 text-[11px] text-[#78716C]">
@@ -735,7 +840,7 @@ export function FileDropzone({
                     const meta = getFormatVisualMeta(item.format);
                     const currentRole: FileRole = item.role || 'standard';
                     const isMaster = currentRole === 'master';
-                    const isSelected = selectedFileIds.includes(item.id);
+                    const isSelected = effectiveSelectedIds.includes(item.id);
                     const matchedIngested = matchQueuedToIngestedFile(item.name, sourceFiles);
                     const status: UploadQueueStatus = item.uploadStatus || 'pending';
                     const statusMeta = UPLOAD_STATUS_META[status];
@@ -750,6 +855,7 @@ export function FileDropzone({
                         data-testid="uploaded-file-card"
                         data-upload-status={status}
                         data-file-role={currentRole}
+                        data-selected={isSelected ? 'true' : 'false'}
                         className={`flex flex-col gap-2 rounded-md border px-3 py-2.5 transition-colors ${
                           isSelected
                             ? 'border-[#1E3A5F] bg-[#EEF3F8]'
@@ -761,16 +867,14 @@ export function FileDropzone({
                         <div className="flex items-center justify-between gap-2">
                           {/* Leading Selection Checkbox + Format Icon + Compact Info */}
                           <div className="flex min-w-0 flex-1 items-center gap-2">
-                            {onToggleSelectFile && (
-                              <input
-                                type="checkbox"
-                                data-testid={`select-queued-file-${item.id}`}
-                                checked={isSelected}
-                                onChange={() => onToggleSelectFile(item.id)}
-                                aria-label={`انتخاب فایل ${item.name} برای تغییر گروهی نقش`}
-                                className="h-4 w-4 shrink-0 cursor-pointer accent-[#1E3A5F]"
-                              />
-                            )}
+                            <input
+                              type="checkbox"
+                              data-testid={`select-queued-file-${item.id}`}
+                              checked={isSelected}
+                              onChange={() => handleToggleRowSelection(item.id)}
+                              aria-label={`انتخاب فایل ${item.name} برای حذف یا تغییر نقش گروهی`}
+                              className="h-4 w-4 shrink-0 cursor-pointer accent-[#1E3A5F]"
+                            />
 
                             <div
                               className={`flex h-9 w-9 shrink-0 flex-col items-center justify-center rounded-sm ${meta.iconBgClass} ${meta.iconTextClass}`}

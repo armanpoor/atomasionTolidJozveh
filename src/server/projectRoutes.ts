@@ -64,6 +64,20 @@ import {
   preprocessIncomingSourceFile,
 } from '../lib/filePreprocessEngine.ts';
 import {
+  injectSmartImageAnchorsIntoBook,
+  resolveBookWebImagesParallel,
+} from '../lib/smartImageOrchestrator.ts';
+import {
+  analyzeContentNatureForProject,
+  applyAdaptiveProjectSettings,
+  injectAdaptiveVisualExhibitsIntoBook,
+} from '../lib/adaptiveVisualEngine.ts';
+import { enrichBookAdaptiveVisualsWithPython } from './pythonChartEngine.ts';
+import {
+  serverWebImageLruCache,
+  serverWebTechnicalImageFetcher,
+} from './webImageSearchService.ts';
+import {
   assembleFinalBookAndAudit,
   buildInitialOutline,
   computeJaccardSimilarity,
@@ -984,7 +998,11 @@ const CHAT_EDITOR_TOOLS: FunctionDeclaration[] = [
   },
 ];
 
-async function reassembleAndPersistProject(projectId: string, ownerUid: string) {
+async function reassembleAndPersistProject(
+  projectId: string,
+  ownerUid: string,
+  options?: { resolveImages?: boolean }
+) {
   const bundle = await getProjectBundle(projectId, ownerUid);
   if (!bundle) return null;
   const formatted = formatBundleForClient(bundle);
@@ -1010,6 +1028,28 @@ async function reassembleAndPersistProject(projectId: string, ownerUid: string) 
     outlineNodes: formatted.outlineNodes as unknown as Parameters<typeof assembleFinalBookAndAudit>[0]['outlineNodes'],
   });
 
+  // STAGE B: Bounded Parallel Web Image Search & Auto-Fallback (concurrency = 4, timeout = 4000ms)
+  let smartImageResolution: Awaited<ReturnType<typeof resolveBookWebImagesParallel>> | null = null;
+  if (options?.resolveImages !== false && config.includeVisualSuggestions !== false) {
+    try {
+      smartImageResolution = await resolveBookWebImagesParallel(assembled.book, {
+        concurrency: 4,
+        timeoutMs: 4000,
+        fetcher: serverWebTechnicalImageFetcher,
+        cache: serverWebImageLruCache,
+      });
+    } catch (imgErr) {
+      console.warn('Bounded parallel web image resolution skipped:', imgErr);
+    }
+  }
+
+  // STAGE B2: Real Python 3 Scientific Spline & 3D Surface SVG Rendering for Adaptive Visual Exhibits
+  try {
+    await enrichBookAdaptiveVisualsWithPython(assembled.book);
+  } catch (pyErr) {
+    console.warn('Python 3 adaptive visual enrichment fallback to deterministic SVG:', pyErr);
+  }
+
   const existingMicroRouting = (
     (bundle.auditReport?.sourceTraceJson || {}) as Record<string, unknown>
   ).entityMicroRoutingReport as { totalRoutedExtracts?: number } | undefined;
@@ -1027,6 +1067,7 @@ async function reassembleAndPersistProject(projectId: string, ownerUid: string) 
     coveragePercent: assembled.audit.coveragePercent,
     sourceTraceJson: {
       ...(assembled.audit.detailsJson || {}),
+      ...(smartImageResolution ? { smartImageResolution } : {}),
       ...(existingMicroRouting &&
       (existingMicroRouting.totalRoutedExtracts || 0) >=
         (computedMicroRouting?.totalRoutedExtracts || 0)
@@ -1843,24 +1884,45 @@ export function createProjectRouter(): Router {
       }
 
       const fresh = await getProjectBundle(projectId, user.uid);
+      let adaptiveProfile: ReturnType<typeof analyzeContentNatureForProject> | null = null;
       if (fresh) {
         const autoTitle =
           fresh.project.title === 'پروژه تدوین و یکپارچه‌سازی جدید' && fresh.sourceFiles.length > 0
             ? fresh.sourceFiles[0].fileName.replace(/\.(docx|pdf|md|txt|json|csv|html)$/i, '')
             : fresh.project.title;
+
+        // Automatically inspect uploaded files and evolve project configuration & visual modules
+        const detectedProfile = analyzeContentNatureForProject({
+          texts: fresh.contentUnits.map((u) => u.rawText),
+          fileNames: fresh.sourceFiles.map((f) => f.fileName),
+          fileCount: fresh.sourceFiles.length,
+          unitCount: fresh.contentUnits.length,
+        });
+        const adapted = applyAdaptiveProjectSettings(
+          (fresh.project.settingsJson || {}) as Record<string, unknown>,
+          detectedProfile
+        );
+        adaptiveProfile = adapted.updatedProfile;
+
         await updateProjectRecord(projectId, user.uid, {
           title: autoTitle,
           pipelineStage: 1,
           status: 'draft',
+          settingsJson: adapted.nextSettings,
           checkpointJson: {
             ...((fresh.project.checkpointJson || {}) as Record<string, unknown>),
             stage: 1,
             processedFileCount: fresh.sourceFiles.length,
             totalUnits: fresh.contentUnits.length,
+            adaptiveVisualProfile: adapted.updatedProfile,
             lastUpdatedAt: new Date().toISOString(),
           },
         });
       }
+
+      const adaptNote = adaptiveProfile
+        ? ` | تطبیق خودکار پروژه: ${adaptiveProfile.dominantLabelFa} (${adaptiveProfile.visualStyleLabelFa})`
+        : '';
 
       await recordProjectRevision({
         projectId,
@@ -1869,15 +1931,17 @@ export function createProjectRouter(): Router {
         actorName: user.name || (user.isGuest ? 'کاربر مهمان' : 'کاربر استودیو'),
         actionType: 'files_ingested',
         title: `بارگذاری و استخراج ${toPersianDigits(ingestedSummaries.length)} فایل منبع`,
-        summary: ingestedSummaries
-          .slice(0, 3)
-          .map((s) => `${s.fileName} (${toPersianDigits(s.unitCount)} واحد)`)
-          .join(' · '),
+        summary:
+          ingestedSummaries
+            .slice(0, 3)
+            .map((s) => `${s.fileName} (${toPersianDigits(s.unitCount)} واحد)`)
+            .join(' · ') + adaptNote,
       });
 
       const finalBundle = await getProjectBundle(projectId, user.uid);
       res.json({
         ingested: ingestedSummaries,
+        adaptiveProfile,
         bundle: finalBundle ? formatBundleForClient(finalBundle) : null,
       });
     } catch (err) {
@@ -2869,6 +2933,160 @@ export function createProjectRouter(): Router {
     } catch (err) {
       const formattedErr = formatGeminiError(err, 'خطا در تدوین نهایی و تولید گزارش ممیزی.');
       res.status(formattedErr.statusCode).json({ error: formattedErr.message });
+    }
+  });
+
+  // 9B. STAGE 4 BOUNDED PARALLEL WEB IMAGE SEARCH, VALIDATION & AUTO-FALLBACK RESOLUTION
+  router.post('/:id/resolve-images-parallel', async (req, res) => {
+    try {
+      const user = (req as AuthRequest).user!;
+      const projectId = req.params.id;
+      const body = (req.body || {}) as { forceRequery?: boolean };
+      const bundle = await getProjectBundle(projectId, user.uid);
+      if (!bundle) {
+        res.status(404).json({ error: 'پروژه یافت نشد.' });
+        return;
+      }
+
+      const rawSettings = (bundle.project.settingsJson || {}) as Partial<DocxExportConfig>;
+      const config: DocxExportConfig = {
+        ...DEFAULT_DOCX_CONFIG,
+        ...rawSettings,
+        optimization: {
+          ...DEFAULT_DOCX_CONFIG.optimization,
+          ...(rawSettings.optimization || {}),
+        },
+      };
+
+      const rawBook = bundle.project.bookSnapshotJson as unknown as ParsedBook | null;
+      if (!rawBook || !Array.isArray(rawBook.chapters) || rawBook.chapters.length === 0) {
+        res.status(400).json({
+          error: 'ابتدا نسخه پیش‌نمایش یا نهایی سند را تولید کنید تا لنگرهای تصویر در متن کاشته شوند.',
+        });
+        return;
+      }
+
+      const bookCopy = JSON.parse(JSON.stringify(rawBook)) as ParsedBook;
+
+      // Ensure any unanchored sections or inline [[AI_IMAGE_PLACEHOLDER | ...]] tags are hydrated first
+      injectSmartImageAnchorsIntoBook(bookCopy, config);
+
+      const resolution = await resolveBookWebImagesParallel(bookCopy, {
+        concurrency: 4,
+        timeoutMs: 4000,
+        fetcher: serverWebTechnicalImageFetcher,
+        cache: serverWebImageLruCache,
+        forceRequery: Boolean(body.forceRequery),
+      });
+
+      await updateProjectRecord(projectId, user.uid, {
+        bookSnapshotJson: bookCopy as unknown as Record<string, unknown>,
+      });
+
+      const refreshed = await getProjectBundle(projectId, user.uid);
+      res.json({
+        resolution,
+        bundle: refreshed ? formatBundleForClient(refreshed) : null,
+      });
+    } catch (err) {
+      res.status(500).json({
+        error:
+          err instanceof Error
+            ? err.message
+            : 'خطا در اجرای جستجو و درج موازی تصاویر وب.',
+      });
+    }
+  });
+
+  // 9C. ADAPTIVE VISUAL CREATIVITY & PYTHON 3 CHART GENERATION ENGINE
+  router.post('/:id/generate-adaptive-visuals', async (req, res) => {
+    try {
+      const user = (req as AuthRequest).user!;
+      const projectId = req.params.id;
+      const bundle = await getProjectBundle(projectId, user.uid);
+      if (!bundle) {
+        res.status(404).json({ error: 'پروژه یافت نشد.' });
+        return;
+      }
+
+      const rawSettings = (bundle.project.settingsJson || {}) as Partial<DocxExportConfig>;
+      const detectedProfile = analyzeContentNatureForProject({
+        texts: bundle.contentUnits.map((u) => u.rawText),
+        fileNames: bundle.sourceFiles.map((f) => f.fileName),
+        fileCount: bundle.sourceFiles.length,
+        unitCount: bundle.contentUnits.length,
+      });
+      const adapted = applyAdaptiveProjectSettings(rawSettings, detectedProfile);
+
+      const config: DocxExportConfig = {
+        ...DEFAULT_DOCX_CONFIG,
+        ...(adapted.nextSettings as Partial<DocxExportConfig>),
+        adaptiveVisualsEnabled: true,
+        adaptiveVisualProfile: adapted.updatedProfile,
+        optimization: {
+          ...DEFAULT_DOCX_CONFIG.optimization,
+          ...(((adapted.nextSettings.optimization as Partial<DocxExportConfig['optimization']>) || {})),
+        },
+      };
+
+      const rawBook = bundle.project.bookSnapshotJson as unknown as ParsedBook | null;
+      let injectedCount = 0;
+      let pythonRenderedCount = 0;
+      let byVisualKind: Record<string, number> = {};
+      let updatedBook: ParsedBook | null = null;
+
+      if (rawBook && Array.isArray(rawBook.chapters) && rawBook.chapters.length > 0) {
+        const bookCopy = JSON.parse(JSON.stringify(rawBook)) as ParsedBook;
+        const summary = injectAdaptiveVisualExhibitsIntoBook(
+          bookCopy,
+          config,
+          adapted.updatedProfile
+        );
+        injectedCount = summary.injectedCount;
+        byVisualKind = summary.byVisualKind;
+
+        const pyRes = await enrichBookAdaptiveVisualsWithPython(bookCopy);
+        pythonRenderedCount = pyRes.renderedCount;
+        updatedBook = bookCopy;
+      }
+
+      await updateProjectRecord(projectId, user.uid, {
+        settingsJson: adapted.nextSettings,
+        checkpointJson: {
+          ...((bundle.project.checkpointJson || {}) as Record<string, unknown>),
+          adaptiveVisualProfile: adapted.updatedProfile,
+          lastUpdatedAt: new Date().toISOString(),
+        },
+        ...(updatedBook
+          ? { bookSnapshotJson: updatedBook as unknown as Record<string, unknown> }
+          : {}),
+      });
+
+      await recordProjectRevision({
+        projectId,
+        ownerUid: user.uid,
+        actorType: 'system',
+        actorName: 'موتور خلاقیت بصری و پایتون',
+        actionType: 'adaptive_visuals_generated',
+        title: `تطبیق پروژه (${adapted.updatedProfile.dominantLabelFa}) و تولید ${toPersianDigits(injectedCount)} گرافیک خلاقانه`,
+        summary: `${toPersianDigits(injectedCount)} نمایشگر اختصاصی (${toPersianDigits(pythonRenderedCount)} نمودار رسم‌شده با Python 3) بر اساس ماهیت متن‌ها تولید و تنظیمات پروژه بروزرسانی شد.`,
+      });
+
+      const refreshed = await getProjectBundle(projectId, user.uid);
+      res.json({
+        profile: adapted.updatedProfile,
+        injectedCount,
+        pythonRenderedCount,
+        byVisualKind,
+        bundle: refreshed ? formatBundleForClient(refreshed) : null,
+      });
+    } catch (err) {
+      res.status(500).json({
+        error:
+          err instanceof Error
+            ? err.message
+            : 'خطا در تحلیل ماهیت فایل‌ها و تولید نمودارهای پایتون و خلاقیت بصری.',
+      });
     }
   });
 

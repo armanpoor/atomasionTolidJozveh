@@ -18,8 +18,16 @@ import {
   getEffectiveAudioRoute,
   getEffectiveTierRouting,
   getEffectiveWebSearchRoute,
+  isPhase1StabilityLocked,
+  normalizeAiDeploymentPhase,
   normalizeKeyAuthMode,
 } from './aiProviderConfig.ts';
+import {
+  PHASE1_LOCKED_BASE_URL,
+  PHASE1_LOCKED_MODEL,
+  PHASE1_LOCKED_PROVIDER,
+} from './llmAbstractionLayer.ts';
+import type { ParallelImageResolutionResult } from './smartImageOrchestrator.ts';
 import {
   type DeepReviewProgressEvent,
   normalizeDeepReviewReport,
@@ -63,18 +71,82 @@ function encodeUtf8Base64(input: string): string {
   }
 }
 
-function buildProviderHeaders(config?: AiProviderConfig | null): Record<string, string> {
-  if (!config) return {};
+export function buildProviderHeaders(config?: AiProviderConfig | null): Record<string, string> {
+  if (!config) {
+    return {
+      'X-AI-Deployment-Phase': 'phase1_stability_lock',
+      'X-AI-Provider': PHASE1_LOCKED_PROVIDER,
+      'X-AI-Key-Mode': 'auto_creator_first',
+      'X-AI-Base-Url': PHASE1_LOCKED_BASE_URL,
+      'X-AI-Custom-Model': PHASE1_LOCKED_MODEL,
+    };
+  }
+
+  const deploymentPhase = normalizeAiDeploymentPhase(config.deploymentPhase);
+
+  // PHASE 1 HARD-LOCK: Strictly use built-in Gemini 4 Neon platform quota.
+  // NEVER transmit personal Google AI Studio API keys or third-party provider keys.
+  if (isPhase1StabilityLocked(deploymentPhase)) {
+    const tierRouting = getEffectiveTierRouting(config);
+    const encodedSafeTier = encodeUtf8Base64(
+      JSON.stringify({
+        enabled: false,
+        optimizationMode: tierRouting.optimizationMode,
+        hardCostCapUsd: tierRouting.hardCostCapUsd,
+        enablePromptCaching: tierRouting.enablePromptCaching,
+        enableResponseCache: tierRouting.enableResponseCache,
+        enableAntiDriftGuard: tierRouting.enableAntiDriftGuard,
+        taskTierMap: tierRouting.taskTierMap,
+        tiers: {
+          economy: {
+            provider: PHASE1_LOCKED_PROVIDER,
+            baseUrl: PHASE1_LOCKED_BASE_URL,
+            apiKey: '',
+            modelId: PHASE1_LOCKED_MODEL,
+          },
+          balanced: {
+            provider: PHASE1_LOCKED_PROVIDER,
+            baseUrl: PHASE1_LOCKED_BASE_URL,
+            apiKey: '',
+            modelId: PHASE1_LOCKED_MODEL,
+          },
+          flagship: {
+            provider: PHASE1_LOCKED_PROVIDER,
+            baseUrl: PHASE1_LOCKED_BASE_URL,
+            apiKey: '',
+            modelId: PHASE1_LOCKED_MODEL,
+          },
+        },
+      })
+    );
+
+    const lockedHeaders: Record<string, string> = {
+      'X-AI-Deployment-Phase': 'phase1_stability_lock',
+      'X-AI-Provider': PHASE1_LOCKED_PROVIDER,
+      'X-AI-Key-Mode': 'auto_creator_first',
+      'X-AI-Base-Url': PHASE1_LOCKED_BASE_URL,
+      'X-AI-Custom-Model': PHASE1_LOCKED_MODEL,
+      'X-AI-Search-Provider': 'same_as_primary',
+      'X-AI-Audio-Provider': 'google_gemini_audio',
+      'X-AI-Audio-Model': PHASE1_LOCKED_MODEL,
+    };
+    if (encodedSafeTier) {
+      lockedHeaders['X-AI-Tier-Routing'] = encodedSafeTier;
+    }
+    return lockedHeaders;
+  }
+
+  // PHASE 2 OPEN MULTI-PROVIDER MODE: Full provider-agnostic routing
   const creds = getActiveProviderCredentials(config);
   const keyMode = normalizeKeyAuthMode(config.googleKeyMode);
   const headers: Record<string, string> = {
+    'X-AI-Deployment-Phase': 'phase2_open_multi_provider',
     'X-AI-Provider': config.provider,
     'X-AI-Key-Mode': keyMode,
   };
   if (creds.baseUrl.trim()) {
     headers['X-AI-Base-Url'] = creds.baseUrl.trim();
   }
-  // Always forward user's session API key if entered so auto_creator_first can seamlessly fall back to it
   if (creds.apiKey.trim()) {
     headers['X-AI-Api-Key'] = creds.apiKey.trim();
   }
@@ -350,6 +422,7 @@ export class ApiClient {
         tokenSavingsPercent?: number;
         preprocessSummaryFa?: string;
       }>;
+      adaptiveProfile?: import('./bookTypes').AdaptiveProjectProfile | null;
       bundle: ProjectBundleDto;
     }>(`/api/projects/${encodeURIComponent(projectId)}/ingest`, {
       method: 'POST',
@@ -421,6 +494,32 @@ export class ApiClient {
       `/api/projects/${encodeURIComponent(projectId)}/finalize`,
       { method: 'POST', body: JSON.stringify({}) }
     );
+  }
+
+  resolveProjectImagesParallel(
+    projectId: string,
+    payload?: { forceRequery?: boolean }
+  ) {
+    return this.request<{
+      resolution: ParallelImageResolutionResult;
+      bundle: ProjectBundleDto;
+    }>(`/api/projects/${encodeURIComponent(projectId)}/resolve-images-parallel`, {
+      method: 'POST',
+      body: JSON.stringify(payload || {}),
+    });
+  }
+
+  generateAdaptiveVisuals(projectId: string) {
+    return this.request<{
+      profile: import('./bookTypes').AdaptiveProjectProfile;
+      injectedCount: number;
+      pythonRenderedCount: number;
+      byVisualKind: Record<string, number>;
+      bundle: ProjectBundleDto;
+    }>(`/api/projects/${encodeURIComponent(projectId)}/generate-adaptive-visuals`, {
+      method: 'POST',
+      body: JSON.stringify({}),
+    });
   }
 
   resolveConflict(

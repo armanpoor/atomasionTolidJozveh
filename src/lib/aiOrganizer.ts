@@ -583,6 +583,14 @@ export async function rasterizeBookDiagrams(book: ParsedBook): Promise<ParsedBoo
           pngBytes: res.pngBytes,
           pngDataUrl: res.pngDataUrl,
         });
+      } else if (b.type === 'adaptive_visual' && !b.pngBytes) {
+        const svgSource = b.pythonRenderedSvg || b.svgMarkup;
+        const res = await rasterizeSvgToPng(svgSource, b.widthPx, b.heightPx);
+        out.push({
+          ...b,
+          pngBytes: res.pngBytes,
+          pngDataUrl: res.pngDataUrl,
+        });
       } else {
         out.push(b);
       }
